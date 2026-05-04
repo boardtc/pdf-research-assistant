@@ -13,7 +13,7 @@ dependencies = [
     "paper-qa==2026.3.18",
     "pdfplumber",
     "python-dotenv==1.2.2",
-    "streamlit==1.56.0",
+    "streamlit==1.57.0",
 ]
 
 [project.optional-dependencies]

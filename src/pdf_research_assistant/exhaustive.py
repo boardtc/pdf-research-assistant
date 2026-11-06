@@ -135,7 +135,7 @@ def build_exhaustive_settings() -> Settings:
     settings.summary_llm_config = {
         **settings.summary_llm_config,
         "rate_limit": {settings.summary_llm: f"{TOKENS_PER_MINUTE} per 1 minute"},
-        # Without this, lmi defaults to temperature 1.0 and relevance scores vary between runs.
+        # Without this, the temperature is not 0 and relevance scores vary between runs.
         "temperature": 0,
     }
     settings.answer.evidence_retrieval = False

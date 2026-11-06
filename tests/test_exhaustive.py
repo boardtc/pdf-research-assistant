@@ -451,7 +451,9 @@ def test_build_exhaustive_settings_scores_at_temperature_zero_without_changing_d
     params = settings.get_summary_llm().config["model_list"][0]["litellm_params"]
     default_params = exhaustive_module.bootstrap.build_settings().get_summary_llm().config["model_list"][0]["litellm_params"]
     assert params["temperature"] == 0
-    assert default_params["temperature"] == 1.0
+    # The default differs between lmi versions, so only check that it was left alone.
+    assert default_params.get("temperature") != 0
+    assert "temperature" not in exhaustive_module.bootstrap.build_settings().summary_llm_config
 
 
 def test_build_exhaustive_settings_raises_speed_limits_without_changing_defaults(exhaustive_module):

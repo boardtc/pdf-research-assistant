@@ -8,9 +8,13 @@ from pathlib import Path
 
 import streamlit as st
 
-from pdf_research_assistant import bootstrap
+from pdf_research_assistant import bootstrap, exhaustive_client
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
+
+QUERY_MODE = "Query"
+EXHAUSTIVE_MODE = "Exhaustive"
+PROGRESS_POLL_SECONDS = 2
 
 
 def flatten_exception_messages(exc, depth=0):
@@ -98,6 +102,100 @@ def sync_persistent_state(app_state: dict) -> None:
     app_state["query_count"] = st.session_state.query_count
 
 
+def escape_dollars(text: str) -> str:
+    """Stop Streamlit Markdown reading text between two dollar signs as a maths formula."""
+    return text.replace("$", r"\$")
+
+
+def render_exhaustive_report(report_path: str) -> None:
+    path = Path(report_path)
+    if not path.exists():
+        st.warning(f"Report not found: {path}")
+        return
+    report = path.read_text(encoding="utf-8")
+    st.download_button("Download report", report, file_name="exhaustive-report.md", key=f"report_{path.parent.name}")
+    with st.expander("Show full report"):
+        # The report escapes text from PDFs and the model; only its own collapsible sections are HTML.
+        st.markdown(escape_dollars(report), unsafe_allow_html=True)
+
+
+def plan_exhaustive_question(question: str) -> None:
+    with st.spinner("Checking which papers can be searched..."):
+        try:
+            plan = exhaustive_client.request_plan(question)
+        except RuntimeError as exc:
+            st.error(f"Could not plan the search: {exc}")
+            return
+    st.session_state.exhaustive_pending = {"question": question, "plan": plan}
+    st.rerun()
+
+
+def start_exhaustive_run(pending: dict, app_state: dict) -> None:
+    output_dir = exhaustive_client.new_run_dir()
+    process = exhaustive_client.start_run(pending["question"], output_dir)
+    st.session_state.exhaustive_run = {
+        "question": pending["question"],
+        "output_dir": str(output_dir),
+        "process": process,
+        "paper_count": pending["plan"]["paper_count"],
+    }
+    st.session_state.exhaustive_pending = None
+    st.session_state.history.append({"role": "user", "content": pending["question"]})
+    sync_persistent_state(app_state)
+    st.rerun()
+
+
+def render_exhaustive_pending(pending: dict, app_state: dict) -> None:
+    plan = pending["plan"]
+    with st.chat_message("assistant"):
+        st.markdown(escape_dollars(f"**Exhaustive search:** {pending['question']}"))
+        st.markdown(escape_dollars("\n".join(f"- {line}" for line in exhaustive_client.describe_plan(plan))))
+        if not exhaustive_client.can_run(plan):
+            st.error(exhaustive_client.NOTHING_TO_SEARCH_MESSAGE)
+            if st.button("Dismiss", key="dismiss_exhaustive"):
+                st.session_state.exhaustive_pending = None
+                st.rerun()
+            return
+        if st.button("Run paid search", key="confirm_exhaustive"):
+            start_exhaustive_run(pending, app_state)
+            return
+        if st.button("Cancel", key="cancel_exhaustive"):
+            st.session_state.exhaustive_pending = None
+            st.rerun()
+
+
+def finish_exhaustive_run(run: dict, app_state: dict) -> None:
+    output_dir = Path(run["output_dir"])
+    summary = exhaustive_client.read_summary(output_dir)
+    item = {"role": "assistant", "id": len(st.session_state.history), "contexts": []}
+    if summary is None:
+        item |= {"content": exhaustive_client.describe_crash(output_dir), "cost": exhaustive_client.read_saved_cost(output_dir)}
+    else:
+        item |= {
+            "content": escape_dollars("\n\n".join(exhaustive_client.describe_result(summary, output_dir))),
+            "cost": summary["cost_usd"],
+            "report_path": str(output_dir / "report.md"),
+        }
+    st.session_state.history.append(item)
+    st.session_state.total_cost += item["cost"]
+    st.session_state.query_count += 1
+    st.session_state.exhaustive_run = None
+    sync_persistent_state(app_state)
+    st.rerun()
+
+
+@st.fragment(run_every=PROGRESS_POLL_SECONDS)
+def render_exhaustive_run(run: dict, app_state: dict) -> None:
+    # A fragment refreshes alone, so the page finishes and old content such as the Run button clears.
+    if run["process"].poll() is not None:
+        finish_exhaustive_run(run, app_state)
+        return
+    finished = exhaustive_client.count_finished_papers(Path(run["output_dir"]))
+    total = run["paper_count"]
+    with st.chat_message("assistant"):
+        st.progress(min(finished / max(total, 1), 1.0), text=f"{finished} of {total} papers finished")
+
+
 st.title("PDF Research Assistant")
 
 allowed_paths = bootstrap.get_allowed_paths()
@@ -142,6 +240,12 @@ if "query_count" not in st.session_state:
     st.session_state.query_count = app_state["query_count"]
 
 with st.sidebar:
+    search_mode = st.radio(
+        "Search mode",
+        [QUERY_MODE, EXHAUSTIVE_MODE],
+        index=0,
+        help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
+    )
     st.header("Usage")
     st.metric("Queries this session", st.session_state.query_count)
     st.metric("Total cost this session", f"${st.session_state.total_cost:.4f}")
@@ -158,11 +262,21 @@ for item in st.session_state.history:
         if item["role"] == "assistant" and "cost" in item:
             render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
             render_source_passages(item.get("contexts", []))
+            if "report_path" in item:
+                render_exhaustive_report(item["report_path"])
             st.caption(f"Cost: ${item['cost']:.4f}")
 
-question = st.chat_input("Ask a question about your PDFs...")
+exhaustive_pending = st.session_state.get("exhaustive_pending")
+exhaustive_run = st.session_state.get("exhaustive_run")
+question = st.chat_input("Ask a question about your PDFs...", disabled=bool(exhaustive_pending or exhaustive_run))
 
-if question:
+if exhaustive_run:
+    render_exhaustive_run(exhaustive_run, app_state)
+elif exhaustive_pending:
+    render_exhaustive_pending(exhaustive_pending, app_state)
+elif question and search_mode == EXHAUSTIVE_MODE:
+    plan_exhaustive_question(question)
+elif question:
     st.session_state.history.append({"role": "user", "content": question})
     sync_persistent_state(app_state)
     with st.chat_message("user"):

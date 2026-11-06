@@ -111,6 +111,42 @@ Type a question at the prompt to search your indexed PDFs and return a cited ans
 
 Like the Streamlit app, the CLI runs each question in a fresh helper process so repeated questions start with clean query state.
 
+### Exhaustive Search
+
+Normal queries are search-first: PaperQA picks candidate papers, ranks the top chunks, and caps the sources in the answer, so a relevant paper can be missed without warning. Exhaustive search checks every chunk of every paper in scope instead, which suits searching for ideas across a whole library.
+
+Query mode stays the default. To use exhaustive search:
+
+- In the Streamlit UI, choose `Exhaustive` under `Search mode` in the sidebar.
+- In the CLI, run `pdf-research --exhaustive`.
+
+Before each run you see the paper count, any papers that cannot be searched, the estimated cost, and the estimated time. Nothing is spent until you confirm. Afterwards you see the actual cost and runtime.
+
+Each run saves its output in a new folder under `exhaustive_runs/`:
+
+- `report.md` is the readable report: evidence grouped by paper with page references, strongest first
+- `results.jsonl` holds each paper's result, including the full chunk text, and is saved as each paper finishes
+- `summary.json` holds the run totals
+- `run.log` holds any helper output
+
+Every paper in scope appears in the report with a status:
+
+| Status | Meaning |
+| --- | --- |
+| Relevant evidence found | At least one chunk was judged relevant |
+| Possible misses only | Chunks were rejected, but they keep mentioning the topic, so check them |
+| No relevant evidence | Every chunk was checked and rejected |
+| Incomplete | Some chunks could not be checked, and none were judged relevant |
+| Not processed | The run stopped early, usually after repeated failures |
+| Failed to index, Not indexed, Unreadable | The paper could not be searched |
+
+A failed request or rate limit is never reported as "no relevant evidence".
+
+> **Important**
+> Exhaustive search is more thorough than a normal query, but it can still misjudge relevance. A model scores each chunk, so it can reject something relevant or accept something that is not. Scanned pages and figures are not searched. Quotes are marked verified or not verified, and a quote marked not verified may still be genuine, so check it against the PDF. Treat the report as a list to review, not a conclusion.
+
+Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed settings are in `src/pdf_research_assistant/exhaustive.py`: `MAX_CONCURRENT_REQUESTS` and `TOKENS_PER_MINUTE`. Lower them if your OpenAI account has a lower rate limit. You can see your limits at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits).
+
 ### Rebuild Index
 
 ```bash
@@ -153,7 +189,8 @@ If `PDF_RESEARCH_ASSISTANT_SYNC_DIR` is set, the tracked `post-push` hook copies
 - If `manifest.csv` does not exist, the app indexes all PDFs under `PAPER_DIR`.
 - `windows-helper-commands.example.md` is a safe-to-share template. If you want a version with your own local paths ready to copy and paste, create `windows-helper-commands.md` from it.
 - The app automatically ignores the broken loopback proxy placeholder `127.0.0.1:9` if it appears in `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
-- `src/pdf_research_assistant/query_once.py` is an internal helper used by the app and CLI; it is not intended as a separate user entry point.
+- `src/pdf_research_assistant/query_once.py` and `src/pdf_research_assistant/exhaustive.py` are internal helpers used by the app and CLI; they are not intended as separate user entry points.
+- If you change `MANIFEST_PATH` to a narrower manifest while keeping the same `PAPER_DIR` and `INDEX_DIR`, the next rebuild or normal query removes the other papers from that index. Use a separate `INDEX_DIR` for a subset.
 - If PaperQA reports that a PDF is empty but the file opens normally, it may be image-only and need OCR before it can be indexed.
 - Answers cite specific pages from your PDFs when available.
 

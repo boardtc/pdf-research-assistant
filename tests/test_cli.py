@@ -173,3 +173,125 @@ def test_main_defaults_error_type_and_message_when_error_payload_fields_are_miss
 
     assert exit_code == 0
     assert print_mock.call_args_list == [mock.call("\nError: Unknown error")]
+
+
+def _plan(**overrides):
+    values = {
+        "paper_count": 2,
+        "status_counts": {"loadable": 2},
+        "chunk_count": 5,
+        "cost_usd": {"low": 0.01, "typical": 0.02, "high": 0.03},
+        "estimated_minutes": 1.0,
+    }
+    return values | overrides
+
+
+def _printed(print_mock):
+    return "\n".join(str(call.args[0]) if call.args else "" for call in print_mock.call_args_list)
+
+
+def _run_exhaustive_cli(module, inputs, plan=None, summary=None, plan_error=None, poll_values=(0,), finished=(2,)):
+    client = module.exhaustive_client
+    process = mock.Mock()
+    process.poll.side_effect = list(poll_values)
+    plan_mock = mock.Mock(side_effect=plan_error) if plan_error else mock.Mock(return_value=plan or _plan())
+    with mock.patch.object(sys, "argv", ["pdf-research", "--exhaustive"]), \
+            mock.patch("builtins.input", side_effect=inputs), \
+            mock.patch.object(client, "request_plan", plan_mock), \
+            mock.patch.object(client, "new_run_dir", return_value=Path("run-dir")), \
+            mock.patch.object(client, "start_run", return_value=process) as start_run, \
+            mock.patch.object(client, "count_finished_papers", side_effect=list(finished)), \
+            mock.patch.object(client, "read_summary", return_value=summary), \
+            mock.patch.object(client, "describe_crash", return_value="It crashed."), \
+            mock.patch.object(module.subprocess, "run") as query_run, \
+            mock.patch.object(module.time, "sleep"), \
+            mock.patch("builtins.print") as print_mock:
+        exit_code = module.main()
+    return SimpleNamespace(exit_code=exit_code, start_run=start_run, query_run=query_run, output=_printed(print_mock))
+
+
+def _finished_summary():
+    return {
+        "paper_count": 2,
+        "status_counts": {"relevant": 1},
+        "failed_chunks": 0,
+        "cost_usd": 0.5,
+        "cost_may_be_understated": False,
+        "runtime_seconds": 60,
+        "stopped_early": False,
+        "stop_reason": None,
+    }
+
+
+def test_main_uses_normal_query_mode_by_default(query_papers_module):
+    result = SimpleNamespace(returncode=0, stdout='{"ok": true, "answer": "Answer"}', stderr="")
+
+    with mock.patch.object(sys, "argv", ["pdf-research"]), \
+            mock.patch("builtins.input", side_effect=["question", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", return_value=result) as run, \
+            mock.patch.object(query_papers_module.exhaustive_client, "request_plan") as request_plan, \
+            mock.patch("builtins.print"):
+        query_papers_module.main()
+
+    run.assert_called_once()
+    request_plan.assert_not_called()
+
+
+def test_exhaustive_shows_the_plan_before_asking_to_confirm(query_papers_module):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "no", "quit"])
+
+    assert "Papers in scope: 2" in outcome.output
+    assert "Estimated cost: $0.01 to $0.03, typically $0.02" in outcome.output
+
+
+@pytest.mark.parametrize("answer", ["no", "", "y", "maybe"])
+def test_exhaustive_makes_no_run_unless_the_user_types_yes(query_papers_module, answer):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", answer, "quit"])
+
+    outcome.start_run.assert_not_called()
+    assert "No API calls were made" in outcome.output
+
+
+def test_exhaustive_runs_after_yes_and_reports_actual_cost(query_papers_module):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "YES", "quit"], summary=_finished_summary())
+
+    outcome.start_run.assert_called_once_with("q", Path("run-dir"))
+    outcome.query_run.assert_not_called()
+    assert "Actual cost: $0.5000" in outcome.output
+    assert outcome.exit_code == 0
+
+
+def test_exhaustive_shows_progress_only_when_it_changes(query_papers_module):
+    outcome = _run_exhaustive_cli(
+        query_papers_module,
+        ["q", "yes", "quit"],
+        summary=_finished_summary(),
+        poll_values=(None, None, None, 0),
+        finished=(0, 1, 1),
+    )
+
+    assert outcome.output.count("1 of 2 papers finished") == 1
+    assert outcome.output.count("0 of 2 papers finished") == 1
+
+
+def test_exhaustive_refuses_to_run_when_no_paper_can_be_searched(query_papers_module):
+    plan = _plan(status_counts={"not_indexed": 2}, chunk_count=0)
+
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "quit"], plan=plan)
+
+    outcome.start_run.assert_not_called()
+    assert "pdf-research-rebuild" in outcome.output
+
+
+def test_exhaustive_reports_a_planning_failure_and_keeps_going(query_papers_module):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "quit"], plan_error=RuntimeError("bad index"))
+
+    outcome.start_run.assert_not_called()
+    assert "bad index" in outcome.output
+    assert outcome.exit_code == 0
+
+
+def test_exhaustive_says_so_when_the_run_crashes(query_papers_module):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "yes", "quit"], summary=None)
+
+    assert "It crashed." in outcome.output

@@ -17,6 +17,7 @@ import json
 import logging
 import pickle
 import re
+import string
 import sys
 import time
 import zlib
@@ -117,6 +118,8 @@ POSSIBLE_MISS_MENTIONS = 5
 REFERENCE_LIST_DENSITY = 3
 CITATION_PATTERN = re.compile(r"\(\d{4}[a-z]?\)|\b(?:19|20)\d{2}[a-z]?[.,;)]|doi|https?://", re.IGNORECASE)
 QUOTE_NOISE_PATTERN = re.compile(r"[\s\-­‐]+")
+# The model often adds a full stop or quote marks around a quote that the PDF does not have there.
+QUOTE_END_PUNCTUATION = string.punctuation + "‘’“”…"
 
 # Output length is unknown before a run, so the estimate is a range. Typical is measured.
 OUTPUT_TOKENS_PER_CHUNK = {"low": 30, "typical": 160, "high": 300}
@@ -340,8 +343,8 @@ def is_possible_miss(text: str, key_terms: set[str]) -> bool:
 
 
 def verify_quote(quote: str, text: str) -> bool:
-    """Return whether a quote is in the chunk, ignoring PDF line breaks and hyphenation."""
-    cleaned_quote = QUOTE_NOISE_PATTERN.sub("", quote).lower()
+    """Return whether a quote is in the chunk, ignoring PDF line breaks, hyphenation and end punctuation."""
+    cleaned_quote = QUOTE_NOISE_PATTERN.sub("", quote).strip(QUOTE_END_PUNCTUATION).lower()
     return bool(cleaned_quote) and cleaned_quote in QUOTE_NOISE_PATTERN.sub("", text).lower()
 
 

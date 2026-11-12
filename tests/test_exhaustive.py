@@ -585,6 +585,25 @@ def test_verify_quote_ignores_pdf_line_breaks_but_not_changed_words(exhaustive_m
 
 
 @pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        ("The enthusiasm of the educators predicted value in the subject matter.", True),
+        ("“The enthusiasm of the educators predicted value in the subject matter”", True),
+        ('"inspiring students to learn."', True),
+        ("The enthusiasm, of the educators predicted value", False),
+        ("“.”", False),
+    ],
+    ids=["added-full-stop", "curly-quote-marks", "straight-quotes-and-full-stop", "inner-punctuation", "only-punctuation"],
+)
+def test_verify_quote_ignores_punctuation_only_at_the_ends(exhaustive_module, quote, expected):
+    text = (
+        "classroom:\n“The enthusiasm of the educators predicted value in the subject matter” "
+        "(Cavanagh, p. 64). Teacher enthusiasm plays a role in inspiring students to learn, and more."
+    )
+    assert exhaustive_module.verify_quote(quote, text) is expected
+
+
+@pytest.mark.parametrize(
     ("score", "expected"),
     [(10, "best"), (9, "best"), (8, "likely"), (7, "likely"), (6, "possible"), (1, "possible")],
 )

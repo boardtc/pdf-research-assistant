@@ -196,115 +196,131 @@ def render_exhaustive_run(run: dict, app_state: dict) -> None:
         st.progress(min(finished / max(total, 1), 1.0), text=f"{finished} of {total} papers finished")
 
 
-st.title("PDF Research Assistant")
-
-allowed_paths = bootstrap.get_allowed_paths()
-use_manifest_scope = bool(allowed_paths)
-manifest_count = len(allowed_paths)
-active_index_dir = bootstrap.get_active_index_dir()
-indexed_count = bootstrap.get_indexed_doc_count(index_dir=active_index_dir)
-failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
-
-if indexed_count == 0 and use_manifest_scope:
-    st.warning(
-        f"Index not found. The first question will rebuild the index for {manifest_count} manifest PDFs, "
-        "which may take a long time."
-    )
-    st.info("A rebuild starts only after you submit a question below.")
-elif use_manifest_scope and indexed_count < manifest_count:
-    st.warning(
-        f"Index is incomplete: {indexed_count} of {manifest_count} manifest PDFs appear indexed. "
-        "The next question should continue or trigger indexing work."
-    )
-elif indexed_count == 0:
-    st.warning("Index not found. The first question will build the PDF index, which may take a long time.")
-    st.info("No manifest.csv was found, so all PDFs under PAPER_DIR are in scope.")
-else:
+def select_index_status(indexed_count: int, manifest_count: int) -> list[tuple[str, str]]:
+    """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest."""
+    use_manifest_scope = manifest_count > 0
+    if indexed_count == 0 and use_manifest_scope:
+        return [
+            (
+                "warning",
+                f"Index not found. The first question will rebuild the index for {manifest_count} manifest PDFs, "
+                "which may take a long time.",
+            ),
+            ("info", "A rebuild starts only after you submit a question below."),
+        ]
+    if use_manifest_scope and indexed_count < manifest_count:
+        return [
+            (
+                "warning",
+                f"Index is incomplete: {indexed_count} of {manifest_count} manifest PDFs appear indexed. "
+                "The next question should continue or trigger indexing work.",
+            )
+        ]
+    if indexed_count == 0:
+        return [
+            ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
+            ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
+        ]
     if use_manifest_scope:
-        st.caption(f"Index available for {indexed_count} manifest PDFs.")
-    else:
-        st.caption(f"Index available for {indexed_count} PDFs under PAPER_DIR.")
+        return [("caption", f"Index available for {indexed_count} manifest PDFs.")]
+    return [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
 
-if failed_files:
+
+def render_index_status(status: list[tuple[str, str]]) -> None:
+    for level, message in status:
+        getattr(st, level)(message)
+
+
+def render_failed_files(failed_files: list[str]) -> None:
+    if not failed_files:
+        return
     st.error(f"{len(failed_files)} PDF(s) failed to index.")
     with st.expander("Show failed PDFs"):
         for file_location in failed_files:
             st.code(file_location)
 
-app_state = get_persistent_app_state()
-if "history" not in st.session_state:
-    st.session_state.history = deepcopy(app_state["history"])
-if "total_cost" not in st.session_state:
-    st.session_state.total_cost = app_state["total_cost"]
-if "query_count" not in st.session_state:
-    st.session_state.query_count = app_state["query_count"]
 
-with st.sidebar:
-    search_mode = st.radio(
-        "Search mode",
-        [QUERY_MODE, EXHAUSTIVE_MODE],
-        index=0,
-        help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
+def init_session_state(app_state: dict) -> None:
+    """Start a new browser session from the saved state, leaving a session that already has values alone."""
+    if "history" not in st.session_state:
+        st.session_state.history = deepcopy(app_state["history"])
+    if "total_cost" not in st.session_state:
+        st.session_state.total_cost = app_state["total_cost"]
+    if "query_count" not in st.session_state:
+        st.session_state.query_count = app_state["query_count"]
+
+
+def render_sidebar(app_state: dict) -> str:
+    """Show the sidebar and return the chosen search mode."""
+    with st.sidebar:
+        search_mode = st.radio(
+            "Search mode",
+            [QUERY_MODE, EXHAUSTIVE_MODE],
+            index=0,
+            help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
+        )
+        st.header("Usage")
+        st.metric("Queries this session", st.session_state.query_count)
+        st.metric("Total cost this session", f"${st.session_state.total_cost:.4f}")
+        if st.button("Clear chat"):
+            st.session_state.history = []
+            st.session_state.total_cost = 0.0
+            st.session_state.query_count = 0
+            sync_persistent_state(app_state)
+            st.rerun()
+    return search_mode
+
+
+def render_history(history: list[dict]) -> None:
+    for item in history:
+        with st.chat_message(item["role"]):
+            st.markdown(item["content"])
+            if item["role"] == "assistant" and "cost" in item:
+                render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
+                render_source_passages(item.get("contexts", []))
+                if "report_path" in item:
+                    render_exhaustive_report(item["report_path"])
+                st.caption(f"Cost: ${item['cost']:.4f}")
+
+
+def describe_query_failure(exc: BaseException) -> str:
+    return (
+        "Indexing/search failed.\n\n"
+        "Top-level error:\n"
+        f"```\n{type(exc).__name__}: {exc}\n```\n\n"
+        "Underlying error(s):\n"
+        f"```\n{chr(10).join(flatten_exception_messages(exc))}\n```\n\n"
+        "This usually means one document or a parsing/indexing step failed."
     )
-    st.header("Usage")
-    st.metric("Queries this session", st.session_state.query_count)
-    st.metric("Total cost this session", f"${st.session_state.total_cost:.4f}")
-    if st.button("Clear chat"):
-        st.session_state.history = []
-        st.session_state.total_cost = 0.0
-        st.session_state.query_count = 0
-        sync_persistent_state(app_state)
-        st.rerun()
 
-for item in st.session_state.history:
-    with st.chat_message(item["role"]):
-        st.markdown(item["content"])
-        if item["role"] == "assistant" and "cost" in item:
-            render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
-            render_source_passages(item.get("contexts", []))
-            if "report_path" in item:
-                render_exhaustive_report(item["report_path"])
-            st.caption(f"Cost: ${item['cost']:.4f}")
 
-exhaustive_pending = st.session_state.get("exhaustive_pending")
-exhaustive_run = st.session_state.get("exhaustive_run")
-question = st.chat_input("Ask a question about your PDFs...", disabled=bool(exhaustive_pending or exhaustive_run))
+def answer_question(question: str) -> tuple[str, float, list[dict]]:
+    """Run one query and show its answer, or its failure; return what to record in the history."""
+    with st.spinner("Searching PDFs..."):
+        try:
+            answer, cost, contexts = run_query_subprocess(question)
+        except Exception as exc:
+            answer = describe_query_failure(exc)
+            st.error(answer)
+            st.caption("Cost: $0.0000")
+            st.code("".join(traceback.format_exception(exc)))
+            return answer, 0.0, []
+        st.markdown(answer)
+        render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
+        render_source_passages(contexts)
+        st.caption(f"Cost: ${cost:.4f}")
+        return answer, cost, contexts
 
-if exhaustive_run:
-    render_exhaustive_run(exhaustive_run, app_state)
-elif exhaustive_pending:
-    render_exhaustive_pending(exhaustive_pending, app_state)
-elif question and search_mode == EXHAUSTIVE_MODE:
-    plan_exhaustive_question(question)
-elif question:
+
+def submit_question(question: str, app_state: dict) -> None:
+    """Record a Query-mode question, answer it, and add the answer and its cost to the session."""
     st.session_state.history.append({"role": "user", "content": question})
     sync_persistent_state(app_state)
     with st.chat_message("user"):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching PDFs..."):
-            try:
-                answer, cost, contexts = run_query_subprocess(question)
-            except Exception as exc:
-                answer = (
-                    "Indexing/search failed.\n\n"
-                    "Top-level error:\n"
-                    f"```\n{type(exc).__name__}: {exc}\n```\n\n"
-                    "Underlying error(s):\n"
-                    f"```\n{chr(10).join(flatten_exception_messages(exc))}\n```\n\n"
-                    "This usually means one document or a parsing/indexing step failed."
-                )
-                cost = 0.0
-                contexts = []
-                st.error(answer)
-                st.caption("Cost: $0.0000")
-                st.code("".join(traceback.format_exception(exc)))
-            else:
-                st.markdown(answer)
-                render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
-                render_source_passages(contexts)
-                st.caption(f"Cost: ${cost:.4f}")
+        answer, cost, contexts = answer_question(question)
 
     st.session_state.history.append(
         {
@@ -320,3 +336,34 @@ elif question:
     sync_persistent_state(app_state)
     st.rerun()
 
+
+def main() -> None:
+    """Draw the page. Streamlit reruns this file from the top on every interaction."""
+    st.title("PDF Research Assistant")
+
+    manifest_count = len(bootstrap.get_allowed_paths())
+    active_index_dir = bootstrap.get_active_index_dir()
+    indexed_count = bootstrap.get_indexed_doc_count(index_dir=active_index_dir)
+    render_index_status(select_index_status(indexed_count, manifest_count))
+    render_failed_files(bootstrap.get_failed_files(index_dir=active_index_dir))
+
+    app_state = get_persistent_app_state()
+    init_session_state(app_state)
+    search_mode = render_sidebar(app_state)
+    render_history(st.session_state.history)
+
+    exhaustive_pending = st.session_state.get("exhaustive_pending")
+    exhaustive_run = st.session_state.get("exhaustive_run")
+    question = st.chat_input("Ask a question about your PDFs...", disabled=bool(exhaustive_pending or exhaustive_run))
+
+    if exhaustive_run:
+        render_exhaustive_run(exhaustive_run, app_state)
+    elif exhaustive_pending:
+        render_exhaustive_pending(exhaustive_pending, app_state)
+    elif question and search_mode == EXHAUSTIVE_MODE:
+        plan_exhaustive_question(question)
+    elif question:
+        submit_question(question, app_state)
+
+
+main()

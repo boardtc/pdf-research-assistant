@@ -3,6 +3,7 @@ import json
 import shutil
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -151,6 +152,31 @@ def test_new_run_dir_creates_a_separate_folder_each_time(client, workspace_tmp_p
 
     assert first != second
     assert first.is_dir() and second.is_dir()
+
+
+def test_new_run_dir_names_the_folder_after_the_time_when_it_is_free(client, workspace_tmp_path):
+    fixed_time = SimpleNamespace(now=lambda: datetime(2026, 11, 12, 18, 47, 40, 790418))
+    with mock.patch.object(client, "RUNS_DIR", workspace_tmp_path / "runs"), mock.patch.object(
+        client, "datetime", fixed_time
+    ):
+        path = client.new_run_dir()
+
+    assert path.name == "20261112-184740-790418"
+
+
+def test_new_run_dir_adds_a_number_when_runs_start_in_the_same_clock_tick(client, workspace_tmp_path):
+    fixed_time = SimpleNamespace(now=lambda: datetime(2026, 11, 12, 18, 47, 40, 790418))
+    with mock.patch.object(client, "RUNS_DIR", workspace_tmp_path / "runs"), mock.patch.object(
+        client, "datetime", fixed_time
+    ):
+        paths = [client.new_run_dir() for _ in range(3)]
+
+    assert [path.name for path in paths] == [
+        "20261112-184740-790418",
+        "20261112-184740-790418-2",
+        "20261112-184740-790418-3",
+    ]
+    assert all(path.is_dir() for path in paths)
 
 
 def test_start_run_confirms_the_helper_and_logs_to_the_run_folder(client, workspace_tmp_path):

@@ -65,10 +65,18 @@ def describe_plan(plan: dict) -> list[str]:
 
 
 def new_run_dir() -> Path:
-    """Create a separate output folder for one run."""
-    path = RUNS_DIR / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    path.mkdir(parents=True)
-    return path
+    """Create a separate output folder for one run, numbered if another run started in the same clock tick."""
+    name = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RUNS_DIR / name
+    number = 1
+    while True:
+        try:
+            path.mkdir()
+            return path
+        except FileExistsError:
+            number += 1
+            path = RUNS_DIR / f"{name}-{number}"
 
 
 def start_run(question: str, output_dir: Path) -> subprocess.Popen:

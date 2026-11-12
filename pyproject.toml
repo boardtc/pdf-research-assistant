@@ -36,3 +36,6 @@ where = ["src"]
 addopts = "-p no:cacheprovider"
 norecursedirs = ["pytest-cache-files-*"]
 pythonpath = ["src"]
+markers = [
+    "integration: indexes and searches a real tiny PDF offline; slower, skip with -m \"not integration\"",
+]

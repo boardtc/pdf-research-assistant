@@ -59,6 +59,18 @@ This CI workflow complements the local `pre-push` hook:
 python -m pytest
 ```
 
+## Integration tests
+
+`tests\test_integration_tiny_pdf.py` indexes a real one-page PDF (`tests\fixtures\tiny-enthusiasm.pdf`) through the rebuild entry point, then runs exhaustive search on it. It makes no API calls and needs no key: PaperQA's local `sparse` embedding replaces OpenAI embeddings, and the scoring model returns a fixed reply through LiteLLM's `mock_response`.
+
+These tests run with the rest of the suite, including in the pre-push hook and CI. They can add up to a minute, mostly loading PaperQA. For a quicker run, skip them:
+
+```powershell
+python -m pytest -m "not integration"
+```
+
+To change the fixture's text, edit and run `tests\fixtures\make_tiny_pdf.py`. It needs `reportlab`, which is not a project dependency.
+
 ## Run one test file
 
 ```powershell

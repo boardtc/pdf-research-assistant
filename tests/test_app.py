@@ -733,3 +733,287 @@ def test_import_question_submission_error_renders_diagnostics_and_still_appends_
         assert module.st.session_state.history[1]["role"] == "assistant"
         assert module.st.session_state.history[1]["cost"] == 0.0
         assert module.st.session_state.history[1]["contexts"] == []
+
+
+# Extracted page functions, tested directly. The import tests above cover the page as a whole.
+
+
+@pytest.mark.parametrize(
+    ("indexed_count", "manifest_count", "expected"),
+    [
+        (
+            0,
+            2,
+            [
+                (
+                    "warning",
+                    "Index not found. The first question will rebuild the index for 2 manifest PDFs, "
+                    "which may take a long time.",
+                ),
+                ("info", "A rebuild starts only after you submit a question below."),
+            ],
+        ),
+        (
+            2,
+            3,
+            [
+                (
+                    "warning",
+                    "Index is incomplete: 2 of 3 manifest PDFs appear indexed. "
+                    "The next question should continue or trigger indexing work.",
+                )
+            ],
+        ),
+        (
+            0,
+            0,
+            [
+                ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
+                ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
+            ],
+        ),
+        (2, 2, [("caption", "Index available for 2 manifest PDFs.")]),
+        (4, 0, [("caption", "Index available for 4 PDFs under PAPER_DIR.")]),
+    ],
+    ids=["manifest-missing", "manifest-incomplete", "no-manifest-missing", "manifest-ready", "no-manifest-ready"],
+)
+def test_select_index_status_picks_the_banner_for_each_index_state(
+    pdf_research_assistant_module, indexed_count, manifest_count, expected
+):
+    assert pdf_research_assistant_module.select_index_status(indexed_count, manifest_count) == expected
+
+
+def test_render_index_status_shows_each_message_at_its_level(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    for shown in (st.warning, st.info, st.caption):
+        shown.reset_mock()
+
+    pdf_research_assistant_module.render_index_status([("warning", "W"), ("info", "I"), ("caption", "C")])
+
+    st.warning.assert_called_once_with("W")
+    st.info.assert_called_once_with("I")
+    st.caption.assert_called_once_with("C")
+
+
+def test_render_failed_files_shows_nothing_when_no_file_failed(pdf_research_assistant_module):
+    pdf_research_assistant_module.render_failed_files([])
+
+    pdf_research_assistant_module.st.error.assert_not_called()
+    pdf_research_assistant_module.st.expander.assert_not_called()
+
+
+def test_render_failed_files_lists_each_failed_file(pdf_research_assistant_module):
+    pdf_research_assistant_module.render_failed_files(["bad_a.pdf", "bad_b.pdf"])
+
+    pdf_research_assistant_module.st.error.assert_called_once_with("2 PDF(s) failed to index.")
+    pdf_research_assistant_module.st.expander.assert_called_once_with("Show failed PDFs")
+    assert pdf_research_assistant_module.st.code.call_args_list == [mock.call("bad_a.pdf"), mock.call("bad_b.pdf")]
+
+
+def test_init_session_state_copies_saved_state_into_a_new_session(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.session_state.clear()
+    saved = {"history": [{"role": "user", "content": "Hi"}], "total_cost": 1.5, "query_count": 3}
+
+    pdf_research_assistant_module.init_session_state(saved)
+
+    assert st.session_state == saved
+    assert st.session_state.history is not saved["history"]
+
+
+def test_init_session_state_keeps_values_the_session_already_has(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.session_state.clear()
+    st.session_state.update({"history": [{"role": "user", "content": "Mine"}], "total_cost": 9.0, "query_count": 4})
+
+    pdf_research_assistant_module.init_session_state({"history": [], "total_cost": 0.0, "query_count": 0})
+
+    assert st.session_state == {"history": [{"role": "user", "content": "Mine"}], "total_cost": 9.0, "query_count": 4}
+
+
+def test_render_sidebar_returns_the_chosen_mode_and_shows_usage(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.session_state.update({"history": [], "total_cost": 1.25, "query_count": 2})
+    st.radio = mock.Mock(return_value="Exhaustive")
+    st.button = mock.Mock(return_value=False)
+    st.metric.reset_mock()
+    st.rerun.reset_mock()
+
+    assert pdf_research_assistant_module.render_sidebar({}) == "Exhaustive"
+
+    assert st.metric.call_args_list == [
+        mock.call("Queries this session", 2),
+        mock.call("Total cost this session", "$1.2500"),
+    ]
+    st.rerun.assert_not_called()
+
+
+def test_render_sidebar_clear_chat_resets_the_session_and_the_saved_state(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.session_state.update({"history": [{"role": "user", "content": "Hi"}], "total_cost": 1.0, "query_count": 2})
+    st.button = mock.Mock(return_value=True)
+    st.rerun.reset_mock()
+    saved = {"history": [{"role": "user", "content": "Hi"}], "total_cost": 1.0, "query_count": 2}
+
+    pdf_research_assistant_module.render_sidebar(saved)
+
+    assert saved == {"history": [], "total_cost": 0.0, "query_count": 0}
+    assert st.session_state.history == []
+    st.rerun.assert_called_once_with()
+
+
+def test_render_history_shows_a_user_message_without_answer_actions(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    for shown in (st.chat_message, st.markdown, st.caption, st.button):
+        shown.reset_mock()
+
+    pdf_research_assistant_module.render_history([{"role": "user", "content": "User question"}])
+
+    st.chat_message.assert_called_once_with("user")
+    st.markdown.assert_called_once_with("User question")
+    st.button.assert_not_called()
+    st.caption.assert_not_called()
+
+
+def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.button = mock.Mock(return_value=False)
+    st.caption.reset_mock()
+    st.download_button.reset_mock()
+    item = {
+        "role": "assistant",
+        "content": "Answer",
+        "cost": 0.25,
+        "contexts": [{"name": "Source", "context": "Quoted text"}],
+        "id": 7,
+    }
+
+    pdf_research_assistant_module.render_history([item])
+
+    st.button.assert_called_once_with("Copy answer", key="copy_history_7")
+    st.subheader.assert_called_once_with("Source")
+    st.caption.assert_called_once_with("Cost: $0.2500")
+    st.download_button.assert_not_called()
+
+
+def test_render_history_skips_answer_actions_when_an_assistant_item_has_no_cost(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.button = mock.Mock(return_value=False)
+    st.caption.reset_mock()
+
+    pdf_research_assistant_module.render_history([{"role": "assistant", "content": "Note"}])
+
+    st.button.assert_not_called()
+    st.caption.assert_not_called()
+
+
+def test_render_history_offers_the_report_for_an_exhaustive_answer(pdf_research_assistant_module, tmp_path):
+    st = pdf_research_assistant_module.st
+    st.button = mock.Mock(return_value=False)
+    st.download_button.reset_mock()
+    report = tmp_path / "report.md"
+    report.write_text("# Report", encoding="utf-8")
+
+    pdf_research_assistant_module.render_history(
+        [{"role": "assistant", "content": "Done", "cost": 0.5, "report_path": str(report)}]
+    )
+
+    st.button.assert_called_once_with("Copy answer", key="copy_history_0")
+    st.download_button.assert_called_once()
+
+
+def test_describe_query_failure_includes_the_top_level_and_nested_errors(pdf_research_assistant_module):
+    error = ExceptionGroup("group failed", [ValueError("bad pdf")])
+
+    assert pdf_research_assistant_module.describe_query_failure(error) == (
+        "Indexing/search failed.\n\n"
+        "Top-level error:\n"
+        "```\nExceptionGroup: group failed (1 sub-exception)\n```\n\n"
+        "Underlying error(s):\n"
+        "```\nExceptionGroup: group failed (1 sub-exception)\n  ValueError: bad pdf\n```\n\n"
+        "This usually means one document or a parsing/indexing step failed."
+    )
+
+
+def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [{"role": "user", "content": "Q"}], "total_cost": 0.0, "query_count": 0})
+    st.button = mock.Mock(return_value=False)
+    for shown in (st.markdown, st.caption, st.error):
+        shown.reset_mock()
+    contexts = [{"name": "Source", "context": "Quoted text"}]
+
+    with mock.patch.object(module, "run_query_subprocess", return_value=("Answer text", 1.5, contexts)) as run_query:
+        result = module.answer_question("Q")
+
+    assert result == ("Answer text", 1.5, contexts)
+    run_query.assert_called_once_with("Q")
+    st.markdown.assert_called_once_with("Answer text")
+    st.button.assert_called_once_with("Copy answer", key="copy_current_1")
+    st.caption.assert_called_once_with("Cost: $1.5000")
+    st.error.assert_not_called()
+
+
+def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.markdown, st.caption, st.error, st.code):
+        shown.reset_mock()
+    failure = RuntimeError("query failed")
+
+    with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
+        answer, cost, contexts = module.answer_question("Q")
+
+    assert answer == module.describe_query_failure(failure)
+    assert (cost, contexts) == (0.0, [])
+    st.error.assert_called_once_with(answer)
+    st.caption.assert_called_once_with("Cost: $0.0000")
+    st.code.assert_called_once_with("trace line\n")
+    st.markdown.assert_not_called()
+
+
+def test_submit_question_records_the_question_answer_and_cost(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [], "total_cost": 1.0, "query_count": 2})
+    st.rerun.reset_mock()
+    st.chat_message.reset_mock()
+    saved = {}
+
+    with mock.patch.object(module, "answer_question", return_value=("Answer text", 0.5, [])) as answer_question:
+        module.submit_question("What is new?", saved)
+
+    answer_question.assert_called_once_with("What is new?")
+    assert st.chat_message.call_args_list == [mock.call("user"), mock.call("assistant")]
+    assert st.session_state.history == [
+        {"role": "user", "content": "What is new?"},
+        {"role": "assistant", "id": 1, "content": "Answer text", "cost": 0.5, "contexts": []},
+    ]
+    assert (st.session_state.total_cost, st.session_state.query_count) == (1.5, 3)
+    assert saved == {"history": st.session_state.history, "total_cost": 1.5, "query_count": 3}
+    st.rerun.assert_called_once_with()
+
+
+def test_main_does_nothing_more_when_there_is_no_question_or_search(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.rerun.reset_mock()
+
+    with mock.patch.object(module, "submit_question") as submit_question, mock.patch.object(
+        module, "plan_exhaustive_question"
+    ) as plan_question:
+        module.main()
+
+    submit_question.assert_not_called()
+    plan_question.assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.chat_input = mock.Mock(return_value="What is new?")
+
+    with mock.patch.object(module, "submit_question") as submit_question:
+        module.main()
+
+    submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state())

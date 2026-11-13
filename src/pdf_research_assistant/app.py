@@ -8,13 +8,24 @@ from pathlib import Path
 
 import streamlit as st
 
-from pdf_research_assistant import bootstrap, exhaustive_client, local_llm
+from pdf_research_assistant import bootstrap, exhaustive_client, local_llm, settings_groups
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
 QUERY_MODE = "Query"
 EXHAUSTIVE_MODE = "Exhaustive"
 PROGRESS_POLL_SECONDS = 2
+INSTANT_SETTINGS_TITLE = "Applies to your next question"
+INSTANT_SETTINGS_NOTE = (
+    "Change these whenever you like. They take effect on your next question, and the index is not rebuilt."
+)
+REINDEX_SETTINGS_TITLE = "Needs an index rebuild"
+REINDEX_SETTINGS_NOTE = (
+    "These decide how your PDFs are read and stored in the index. Changing any of them means the app has to "
+    "index every PDF again, which can take a long time. They are set in `.env` and in the app's code, "
+    "so they are shown here for reference."
+)
+REBUILD_BADGE = ":orange-badge[Needs rebuild]"
 LOCAL_LLM_GUIDE = (
     "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
     "1. Install and start [Ollama](https://ollama.com), or another local server such as LM Studio.\n"
@@ -259,15 +270,34 @@ def init_session_state(app_state: dict) -> None:
         st.session_state.query_count = app_state["query_count"]
 
 
-def render_sidebar(app_state: dict) -> str:
-    """Show the sidebar and return the chosen search mode."""
+def render_instant_settings() -> str:
+    """Show the settings that apply to the next question and return the chosen search mode."""
     with st.sidebar:
+        st.subheader(INSTANT_SETTINGS_TITLE)
+        st.caption(INSTANT_SETTINGS_NOTE)
         search_mode = st.radio(
             "Search mode",
             [QUERY_MODE, EXHAUSTIVE_MODE],
             index=0,
             help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
         )
+    render_local_llm_setup()
+    return search_mode
+
+
+def render_reindex_settings(settings) -> None:
+    """Show the current value of each setting that cannot change without rebuilding the index."""
+    with st.sidebar:
+        st.subheader(REINDEX_SETTINGS_TITLE)
+        st.caption(REINDEX_SETTINGS_NOTE)
+        with st.expander("Library and index settings"):
+            for setting in settings_groups.REINDEX_SETTINGS:
+                st.markdown(f"{settings_groups.describe_setting(setting, settings)} {REBUILD_BADGE}")
+                st.caption(setting.help)
+
+
+def render_usage(app_state: dict) -> None:
+    with st.sidebar:
         st.header("Usage")
         st.metric("Queries this session", st.session_state.query_count)
         st.metric("Total cost this session", f"${st.session_state.total_cost:.4f}")
@@ -277,6 +307,15 @@ def render_sidebar(app_state: dict) -> str:
             st.session_state.query_count = 0
             sync_persistent_state(app_state)
             st.rerun()
+
+
+def render_sidebar(app_state: dict, settings) -> str:
+    """Show the sidebar, with settings in two groups, and return the chosen search mode."""
+    with st.sidebar:
+        st.header("Settings")
+    search_mode = render_instant_settings()
+    render_reindex_settings(settings)
+    render_usage(app_state)
     return search_mode
 
 
@@ -395,15 +434,15 @@ def main() -> None:
     st.title("PDF Research Assistant")
 
     manifest_count = len(bootstrap.get_allowed_paths())
-    active_index_dir = bootstrap.get_active_index_dir()
+    settings = bootstrap.build_settings()
+    active_index_dir = bootstrap.get_active_index_dir(settings)
     indexed_count = bootstrap.get_indexed_doc_count(index_dir=active_index_dir)
     render_index_status(select_index_status(indexed_count, manifest_count))
     render_failed_files(bootstrap.get_failed_files(index_dir=active_index_dir))
 
     app_state = get_persistent_app_state()
     init_session_state(app_state)
-    search_mode = render_sidebar(app_state)
-    render_local_llm_setup()
+    search_mode = render_sidebar(app_state, settings)
     render_history(st.session_state.history)
 
     exhaustive_pending = st.session_state.get("exhaustive_pending")

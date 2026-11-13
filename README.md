@@ -83,7 +83,14 @@ streamlit run src/pdf_research_assistant/app.py
 
 Streamlit usually opens the app in your browser automatically and prints the local URL in the terminal. By default, it uses `http://localhost:8501` unless that port is already in use.
 
-The Streamlit sidebar shows:
+The Streamlit sidebar puts settings in two groups:
+
+- **Applies to your next question**: the search mode and the local LLM setup. Change these whenever you like; the index is not rebuilt.
+- **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page reading, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again. They are set in `.env` and in `src/pdf_research_assistant/bootstrap.py`, and the sidebar shows their current values.
+
+The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
+
+The sidebar also shows:
 
 - query count for the current session
 - total session cost

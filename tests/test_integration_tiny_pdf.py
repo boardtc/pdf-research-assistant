@@ -33,6 +33,7 @@ PDF_TITLE = "Tiny enthusiasm fixture"
 QUESTION = "Does teacher enthusiasm help students learn?"
 QUOTE = "Enthusiasm is contagious in a classroom."
 FAKE_API_KEY = "sk-test-not-a-real-key"
+REBUILD_ATTEMPTS = 3
 PROJECT_MODULES = (
     "pdf_research_assistant.bootstrap",
     "pdf_research_assistant.rebuild",
@@ -68,9 +69,14 @@ def tiny_index():
             rebuild = importlib.import_module("pdf_research_assistant.rebuild")
             exhaustive = importlib.import_module("pdf_research_assistant.exhaustive")
             rebuild.settings.embedding = "sparse"
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                asyncio.run(rebuild.async_main())
+            # On Windows another program can briefly lock a new index file ("Access is denied").
+            # The rebuild reports that and carries on when run again, as a user would run it again.
+            for _attempt in range(REBUILD_ATTEMPTS):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    asyncio.run(rebuild.async_main())
+                if "Indexed after run: 1" in output.getvalue():
+                    break
             settings = exhaustive.build_exhaustive_settings()
             settings.embedding = "sparse"
             yield SimpleNamespace(

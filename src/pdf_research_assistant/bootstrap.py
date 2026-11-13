@@ -5,6 +5,7 @@ internal project wiring.
 """
 
 import csv
+from copy import deepcopy
 import os
 import pickle
 import zlib
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 from paperqa import Settings
 from paperqa.settings import AgentSettings, IndexSettings, ParsingSettings
 
+from pdf_research_assistant import local_llm
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -172,17 +174,26 @@ def get_failed_files(index_dir: Path = INDEX_DIR) -> list[str]:
     return sorted(set(failed))
 
 
+def get_model_settings() -> tuple[str, dict]:
+    """Return the model name and config for answers: a saved local LLM, or else the hosted model."""
+    saved_local_llm = local_llm.load_config()
+    if saved_local_llm:
+        return local_llm.litellm_model(saved_local_llm)
+    return MODEL_NAME, {"rate_limit": {MODEL_NAME: "30000 per 1 minute"}}
+
+
 def build_settings() -> Settings:
     """Build the shared PaperQA settings object used across all entry points."""
+    model_name, model_config = get_model_settings()
     return Settings(
-        llm=MODEL_NAME,
-        summary_llm=MODEL_NAME,
-        llm_config={"rate_limit": {MODEL_NAME: "30000 per 1 minute"}},
-        summary_llm_config={"rate_limit": {MODEL_NAME: "30000 per 1 minute"}},
+        llm=model_name,
+        summary_llm=model_name,
+        llm_config=deepcopy(model_config),
+        summary_llm_config=deepcopy(model_config),
         parsing=ParsingSettings(multimodal=False, use_doc_details=False, parse_pdf=parse_pdf_with_fallback),
         agent=AgentSettings(
-            agent_llm=MODEL_NAME,
-            agent_llm_config={"rate_limit": {MODEL_NAME: "30000 per 1 minute"}},
+            agent_llm=model_name,
+            agent_llm_config=deepcopy(model_config),
             index=IndexSettings(
                 paper_directory=PAPER_DIR,
                 index_directory=INDEX_DIR,

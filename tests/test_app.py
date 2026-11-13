@@ -28,6 +28,36 @@ class _SessionState(dict):
         self[name] = value
 
 
+def _fake_settings(**changes):
+    """Stand in for PaperQA settings with the values the sidebar reads."""
+    values = {
+        "llm": "gpt-4o-mini",
+        "embedding": "text-embedding-3-small",
+        "paper_directory": Path("papers"),
+        "use_absolute_paper_directory": False,
+        "parse_pdf": _fake_pdf_reader,
+        "reader_config": {"chunk_chars": 5000, "overlap": 250},
+        "multimodal": False,
+    } | changes
+    return SimpleNamespace(
+        llm=values["llm"],
+        embedding=values["embedding"],
+        parsing=SimpleNamespace(
+            parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
+        ),
+        agent=SimpleNamespace(
+            index=SimpleNamespace(
+                paper_directory=values["paper_directory"],
+                use_absolute_paper_directory=values["use_absolute_paper_directory"],
+            )
+        ),
+    )
+
+
+def _fake_pdf_reader():
+    return None
+
+
 @contextmanager
 def imported_pdf_research_assistant(
     *,
@@ -91,6 +121,7 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
+    bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings())
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
 
     with mock.patch.dict(
@@ -658,7 +689,7 @@ def test_import_uses_the_active_index_directory_for_startup_index_counts_and_fai
         indexed_count=2,
         failed_files=[],
     ) as module:
-        module.bootstrap.get_active_index_dir.assert_called_once_with()
+        module.bootstrap.get_active_index_dir.assert_called_once_with(module.bootstrap.build_settings.return_value)
         module.bootstrap.get_indexed_doc_count.assert_called_once_with(index_dir=active_index_dir)
         module.bootstrap.get_failed_files.assert_called_once_with(index_dir=active_index_dir)
 
@@ -700,8 +731,9 @@ def test_import_renders_history_and_assistant_history_actions():
         },
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
-        guide = mock.call(module.LOCAL_LLM_GUIDE)
-        chat_markdown = [shown for shown in module.st.markdown.call_args_list if shown != guide]
+        # The sidebar's guide and index settings are Markdown too; they are drawn before the chat.
+        sidebar_lines = 1 + len(module.settings_groups.REINDEX_SETTINGS)
+        chat_markdown = module.st.markdown.call_args_list[sidebar_lines:]
         assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
 
@@ -849,15 +881,14 @@ def test_init_session_state_keeps_values_the_session_already_has(pdf_research_as
     assert st.session_state == {"history": [{"role": "user", "content": "Mine"}], "total_cost": 9.0, "query_count": 4}
 
 
-def test_render_sidebar_returns_the_chosen_mode_and_shows_usage(pdf_research_assistant_module):
+def test_render_usage_shows_the_session_counts(pdf_research_assistant_module):
     st = pdf_research_assistant_module.st
     st.session_state.update({"history": [], "total_cost": 1.25, "query_count": 2})
-    st.radio = mock.Mock(return_value="Exhaustive")
     st.button = mock.Mock(return_value=False)
     st.metric.reset_mock()
     st.rerun.reset_mock()
 
-    assert pdf_research_assistant_module.render_sidebar({}) == "Exhaustive"
+    pdf_research_assistant_module.render_usage({})
 
     assert st.metric.call_args_list == [
         mock.call("Queries this session", 2),
@@ -866,18 +897,102 @@ def test_render_sidebar_returns_the_chosen_mode_and_shows_usage(pdf_research_ass
     st.rerun.assert_not_called()
 
 
-def test_render_sidebar_clear_chat_resets_the_session_and_the_saved_state(pdf_research_assistant_module):
+def test_render_usage_clear_chat_resets_the_session_and_the_saved_state(pdf_research_assistant_module):
     st = pdf_research_assistant_module.st
     st.session_state.update({"history": [{"role": "user", "content": "Hi"}], "total_cost": 1.0, "query_count": 2})
     st.button = mock.Mock(return_value=True)
     st.rerun.reset_mock()
     saved = {"history": [{"role": "user", "content": "Hi"}], "total_cost": 1.0, "query_count": 2}
 
-    pdf_research_assistant_module.render_sidebar(saved)
+    pdf_research_assistant_module.render_usage(saved)
 
     assert saved == {"history": [], "total_cost": 0.0, "query_count": 0}
     assert st.session_state.history == []
     st.rerun.assert_called_once_with()
+
+
+# Sidebar settings: one group applies to the next question, the other needs the index rebuilt.
+
+
+def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.radio = mock.Mock(return_value="Exhaustive")
+    st.subheader.reset_mock()
+    st.caption.reset_mock()
+
+    with mock.patch.object(module, "render_local_llm_setup") as local_llm_panel:
+        assert module.render_instant_settings() == "Exhaustive"
+
+    st.subheader.assert_called_once_with(module.INSTANT_SETTINGS_TITLE)
+    st.caption.assert_called_once_with(module.INSTANT_SETTINGS_NOTE)
+    local_llm_panel.assert_called_once_with()
+
+
+def test_render_reindex_settings_marks_every_index_setting_as_needing_a_rebuild(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.subheader, st.caption, st.expander, st.markdown):
+        shown.reset_mock()
+
+    module.render_reindex_settings(_fake_settings())
+
+    st.subheader.assert_called_once_with(module.REINDEX_SETTINGS_TITLE)
+    st.caption.assert_any_call(module.REINDEX_SETTINGS_NOTE)
+    st.expander.assert_called_once_with("Library and index settings")
+    lines = [call.args[0] for call in st.markdown.call_args_list]
+    assert lines == [
+        f"**PDF folder:** `papers` {module.REBUILD_BADGE}",
+        f"**Full folder path kept in the index:** `Off` {module.REBUILD_BADGE}",
+        f"**Embedding model:** `text-embedding-3-small` {module.REBUILD_BADGE}",
+        f"**PDF reader:** `_fake_pdf_reader` {module.REBUILD_BADGE}",
+        f"**Chunk size (characters):** `5000` {module.REBUILD_BADGE}",
+        f"**Chunk overlap (characters):** `250` {module.REBUILD_BADGE}",
+        f"**Whole-page reading:** `Off` {module.REBUILD_BADGE}",
+        f"**Images and tables:** `Off` {module.REBUILD_BADGE}",
+    ]
+    for setting in module.settings_groups.REINDEX_SETTINGS:
+        st.caption.assert_any_call(setting.help)
+
+
+def test_settings_notes_say_which_group_needs_a_rebuild(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert "next question" in module.INSTANT_SETTINGS_NOTE
+    assert "not rebuilt" in module.INSTANT_SETTINGS_NOTE
+    assert "index every PDF again" in module.REINDEX_SETTINGS_NOTE
+    assert "rebuild" in module.REBUILD_BADGE.lower()
+
+
+def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.header.reset_mock()
+    settings = _fake_settings()
+    app_state = {}
+    steps = mock.Mock()
+    steps.instant.return_value = "Exhaustive"
+
+    with mock.patch.multiple(
+        module,
+        render_instant_settings=steps.instant,
+        render_reindex_settings=steps.reindex,
+        render_usage=steps.usage,
+    ):
+        assert module.render_sidebar(app_state, settings) == "Exhaustive"
+
+    module.st.header.assert_called_once_with("Settings")
+    assert steps.mock_calls == [mock.call.instant(), mock.call.reindex(settings), mock.call.usage(app_state)]
+
+
+def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant_group():
+    with imported_pdf_research_assistant() as module:
+        st = module.st
+        titles = [call.args[0] for call in st.subheader.call_args_list]
+        panels = [call.args[0] for call in st.expander.call_args_list]
+
+        assert titles == [module.INSTANT_SETTINGS_TITLE, module.REINDEX_SETTINGS_TITLE]
+        assert panels == ["Local LLM setup", "Library and index settings"]
+        module.bootstrap.build_settings.assert_called_once_with()
 
 
 def test_render_history_shows_a_user_message_without_answer_actions(pdf_research_assistant_module):
@@ -897,6 +1012,7 @@ def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_a
     st = pdf_research_assistant_module.st
     st.button = mock.Mock(return_value=False)
     st.caption.reset_mock()
+    st.subheader.reset_mock()
     st.download_button.reset_mock()
     item = {
         "role": "assistant",

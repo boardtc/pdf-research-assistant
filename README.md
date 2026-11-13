@@ -147,6 +147,23 @@ A failed request or rate limit is never reported as "no relevant evidence".
 
 Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed settings are in `src/pdf_research_assistant/exhaustive.py`: `MAX_CONCURRENT_REQUESTS` and `TOKENS_PER_MINUTE`. Lower them if your OpenAI account has a lower rate limit. You can see your limits at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits).
 
+### Local LLM
+
+By default, answers are written by OpenAI's `gpt-4o-mini`. To use a model running on your own computer instead:
+
+1. Install and start [Ollama](https://ollama.com), or another local server that speaks the OpenAI API, such as LM Studio or llama.cpp.
+2. Download a model that supports tool calling, for example `ollama pull llama3.2`.
+3. In the app's sidebar, open **Local LLM setup**, choose the server type, and enter the server address and model name.
+4. Click **Check connection**. The app asks the server which models it has and tells you whether your settings are ready.
+5. Click **Use this local model**. Settings are only saved if the check passes.
+
+**Switch back to OpenAI** in the same panel removes the saved settings.
+
+The settings are saved in `local_llm.json` in the project folder, which Git ignores, and apply to the app, the CLI and exhaustive search.
+
+> **Note**
+> Only the model that reads passages and writes answers changes. Finding passages still uses OpenAI embeddings, so `OPENAI_API_KEY` is still needed, and switching does not rebuild your index. Local models are usually slower than OpenAI, and exhaustive search shows no cost estimate for them.
+
 ### Rebuild Index
 
 ```bash

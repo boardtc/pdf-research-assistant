@@ -8,13 +8,22 @@ from pathlib import Path
 
 import streamlit as st
 
-from pdf_research_assistant import bootstrap, exhaustive_client
+from pdf_research_assistant import bootstrap, exhaustive_client, local_llm
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
 QUERY_MODE = "Query"
 EXHAUSTIVE_MODE = "Exhaustive"
 PROGRESS_POLL_SECONDS = 2
+LOCAL_LLM_GUIDE = (
+    "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
+    "1. Install and start [Ollama](https://ollama.com), or another local server such as LM Studio.\n"
+    "2. Download a model that supports tool calling, for example `ollama pull llama3.2`.\n"
+    "3. Fill in the details below and click **Check connection**.\n"
+    "4. When the check says it is ready, click **Use this local model**.\n\n"
+    "Finding passages in your papers still uses OpenAI embeddings, so the OpenAI key is still needed "
+    "and your index is not rebuilt."
+)
 
 
 def flatten_exception_messages(exc, depth=0):
@@ -271,6 +280,50 @@ def render_sidebar(app_state: dict) -> str:
     return search_mode
 
 
+def render_local_llm_setup() -> None:
+    """Show the sidebar panel for checking, saving and removing local LLM settings."""
+    saved = local_llm.load_config()
+    providers = list(local_llm.PROVIDERS)
+    with st.sidebar, st.expander("Local LLM setup"):
+        st.caption(local_llm.describe_answer_model(saved, bootstrap.MODEL_NAME))
+        notice = st.session_state.pop("local_llm_notice", None)
+        if notice:
+            st.success(notice)
+        st.markdown(LOCAL_LLM_GUIDE)
+        provider = st.selectbox(
+            "Local server type",
+            providers,
+            index=providers.index(saved["provider"]) if saved else 0,
+            format_func=lambda key: local_llm.PROVIDERS[key]["label"],
+            key="local_llm_provider",
+        )
+        # Each server type keeps its own address box, so picking another type shows that type's usual address.
+        saved_address = saved["address"] if saved and saved["provider"] == provider else None
+        address = st.text_input(
+            "Server address",
+            value=saved_address or local_llm.PROVIDERS[provider]["default_address"],
+            key=f"local_llm_address_{provider}",
+        )
+        model = st.text_input("Model name", value=saved["model"] if saved else "", key="local_llm_model")
+        candidate = local_llm.clean_config(provider, address, model)
+
+        if st.button("Check connection", key="local_llm_check"):
+            ready, message = local_llm.check_connection(candidate)
+            (st.success if ready else st.error)(message)
+        if st.button("Use this local model", key="local_llm_save"):
+            ready, message = local_llm.check_connection(candidate)
+            if ready:
+                local_llm.save_config(candidate)
+                st.session_state.local_llm_notice = f"{message} Answers will now use this local model."
+                st.rerun()
+            else:
+                st.error(f"{message} Nothing was changed.")
+        if saved and st.button("Switch back to OpenAI", key="local_llm_clear"):
+            local_llm.clear_config()
+            st.session_state.local_llm_notice = "Answers will now use OpenAI again."
+            st.rerun()
+
+
 def render_history(history: list[dict]) -> None:
     for item in history:
         with st.chat_message(item["role"]):
@@ -350,6 +403,7 @@ def main() -> None:
     app_state = get_persistent_app_state()
     init_session_state(app_state)
     search_mode = render_sidebar(app_state)
+    render_local_llm_setup()
     render_history(st.session_state.history)
 
     exhaustive_pending = st.session_state.get("exhaustive_pending")

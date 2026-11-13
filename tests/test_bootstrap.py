@@ -540,3 +540,40 @@ def test_build_settings_omits_manifest_path_when_manifest_does_not_exist(bootstr
             settings = bootstrap_module.build_settings()
 
     assert settings.agent.index.manifest_file is None
+
+
+def test_get_model_settings_uses_the_hosted_model_when_no_local_llm_is_saved(bootstrap_module):
+    with mock.patch.object(bootstrap_module.local_llm, "load_config", return_value=None):
+        name, config = bootstrap_module.get_model_settings()
+
+    assert name == bootstrap_module.MODEL_NAME
+    assert config == {"rate_limit": {bootstrap_module.MODEL_NAME: "30000 per 1 minute"}}
+
+
+def test_get_model_settings_uses_the_saved_local_llm(bootstrap_module):
+    saved = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+    with mock.patch.object(bootstrap_module.local_llm, "load_config", return_value=saved):
+        name, config = bootstrap_module.get_model_settings()
+
+    assert name == "ollama/llama3.2"
+    assert config["model_list"][0]["litellm_params"]["api_base"] == "http://localhost:11434"
+    assert "rate_limit" not in config
+
+
+def test_build_settings_sends_all_three_model_roles_to_the_saved_local_llm(bootstrap_module):
+    saved = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+    with mock.patch.object(bootstrap_module.local_llm, "load_config", return_value=saved):
+        settings = bootstrap_module.build_settings()
+
+    assert settings.llm == settings.summary_llm == settings.agent.agent_llm == "ollama/llama3.2"
+    configs = [settings.llm_config, settings.summary_llm_config, settings.agent.agent_llm_config]
+    assert all(config["model_list"][0]["model_name"] == "ollama/llama3.2" for config in configs)
+    # Each role gets its own copy, so changing one, as exhaustive mode does, leaves the others alone.
+    assert len({id(config) for config in configs}) == 3
+
+
+def test_build_settings_keeps_the_hosted_rate_limit_for_each_model_role(bootstrap_module):
+    settings = bootstrap_module.build_settings()
+
+    expected = {"rate_limit": {bootstrap_module.MODEL_NAME: "30000 per 1 minute"}}
+    assert settings.llm_config == settings.summary_llm_config == settings.agent.agent_llm_config == expected

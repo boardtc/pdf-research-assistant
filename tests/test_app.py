@@ -52,7 +52,18 @@ def imported_pdf_research_assistant(
     streamlit_module.sidebar = _ContextManagerStub()
     streamlit_module.cache_resource = lambda fn: fn
     # Mock the button API with a queue of return values so import-time UI flows can be driven deterministically.
-    streamlit_module.button = mock.Mock(side_effect=list(button_values or [False, False]))
+    queued_button_values = list(button_values or [False, False])
+
+    def click(_label, key=None, **_kwargs):
+        # The local LLM panel is drawn on every page; its buttons stay unclicked and leave the queue alone.
+        if str(key or "").startswith("local_llm_"):
+            return False
+        return queued_button_values.pop(0)
+
+    streamlit_module.button = mock.Mock(side_effect=click)
+    streamlit_module.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: options[index])
+    streamlit_module.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
+    streamlit_module.success = mock.Mock()
     streamlit_module.expander = mock.Mock(return_value=_ContextManagerStub())
     streamlit_module.subheader = mock.Mock()
     streamlit_module.write = mock.Mock()
@@ -80,6 +91,7 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
+    bootstrap_module.MODEL_NAME = "gpt-4o-mini"
 
     with mock.patch.dict(
         sys.modules,
@@ -688,7 +700,9 @@ def test_import_renders_history_and_assistant_history_actions():
         },
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
-        assert module.st.markdown.call_args_list[:2] == [mock.call("User question"), mock.call("Assistant answer")]
+        guide = mock.call(module.LOCAL_LLM_GUIDE)
+        chat_markdown = [shown for shown in module.st.markdown.call_args_list if shown != guide]
+        assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
 
 
@@ -796,6 +810,8 @@ def test_render_index_status_shows_each_message_at_its_level(pdf_research_assist
 
 
 def test_render_failed_files_shows_nothing_when_no_file_failed(pdf_research_assistant_module):
+    pdf_research_assistant_module.st.expander.reset_mock()
+
     pdf_research_assistant_module.render_failed_files([])
 
     pdf_research_assistant_module.st.error.assert_not_called()
@@ -803,6 +819,8 @@ def test_render_failed_files_shows_nothing_when_no_file_failed(pdf_research_assi
 
 
 def test_render_failed_files_lists_each_failed_file(pdf_research_assistant_module):
+    pdf_research_assistant_module.st.expander.reset_mock()
+
     pdf_research_assistant_module.render_failed_files(["bad_a.pdf", "bad_b.pdf"])
 
     pdf_research_assistant_module.st.error.assert_called_once_with("2 PDF(s) failed to index.")
@@ -1017,3 +1035,159 @@ def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assist
         module.main()
 
     submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state())
+
+
+# Local LLM setup panel.
+
+SAVED_LOCAL_LLM = {"provider": "openai_compatible", "address": "http://localhost:8080/v1", "model": "qwen2.5"}
+READY_MESSAGE = "Ready: it works."
+
+
+def draw_local_llm_panel(module, *, saved=None, clicked=(), check=(True, READY_MESSAGE), typed=None, provider=None):
+    """Draw the panel with chosen saved settings, typed values, clicked buttons and check result."""
+    st = module.st
+    for shown in (st.caption, st.success, st.error, st.markdown, st.rerun, st.expander, st.selectbox, st.text_input):
+        shown.reset_mock()
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    if provider:
+        st.selectbox = mock.Mock(return_value=provider)
+    if typed:
+        st.text_input = mock.Mock(side_effect=lambda label, value="", **_kwargs: typed.get(label, value))
+    with mock.patch.multiple(
+        module.local_llm,
+        load_config=mock.Mock(return_value=saved),
+        check_connection=mock.Mock(return_value=check),
+        save_config=mock.DEFAULT,
+        clear_config=mock.DEFAULT,
+    ) as patched:
+        module.render_local_llm_setup()
+        return patched | {"check_connection": module.local_llm.check_connection}
+
+
+def test_local_llm_panel_says_answers_come_from_openai_when_nothing_is_saved(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_local_llm_panel(module)
+
+    module.st.expander.assert_called_once_with("Local LLM setup")
+    module.st.caption.assert_called_once_with("Answers come from OpenAI (gpt-4o-mini).")
+    module.st.markdown.assert_called_once_with(module.LOCAL_LLM_GUIDE)
+    assert [call.kwargs["key"] for call in module.st.button.call_args_list] == ["local_llm_check", "local_llm_save"]
+    patched["check_connection"].assert_not_called()
+    module.st.success.assert_not_called()
+
+
+def test_local_llm_panel_starts_with_ollama_and_its_usual_address(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module)
+
+    select_call = module.st.selectbox.call_args
+    assert select_call.args[1] == ["ollama", "openai_compatible"]
+    assert select_call.kwargs["index"] == 0
+    assert select_call.kwargs["format_func"]("openai_compatible") == "OpenAI-compatible server"
+    assert module.st.text_input.call_args_list[0].kwargs["value"] == "http://localhost:11434"
+    assert module.st.text_input.call_args_list[1].kwargs["value"] == ""
+
+
+def test_local_llm_panel_shows_the_saved_settings_and_offers_to_switch_back(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module, saved=SAVED_LOCAL_LLM)
+
+    module.st.caption.assert_called_once_with(
+        "Answers come from the local model qwen2.5 (OpenAI-compatible server at http://localhost:8080/v1)."
+    )
+    assert module.st.selectbox.call_args.kwargs["index"] == 1
+    assert module.st.text_input.call_args_list[0].kwargs["value"] == "http://localhost:8080/v1"
+    assert module.st.text_input.call_args_list[1].kwargs["value"] == "qwen2.5"
+    assert module.st.button.call_args_list[-1] == mock.call("Switch back to OpenAI", key="local_llm_clear")
+
+
+def test_local_llm_panel_offers_the_usual_address_when_another_server_type_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module, saved=SAVED_LOCAL_LLM, provider="ollama")
+
+    address_call = module.st.text_input.call_args_list[0]
+    assert address_call.kwargs["value"] == "http://localhost:11434"
+    assert address_call.kwargs["key"] == "local_llm_address_ollama"
+
+
+def test_local_llm_check_button_shows_ready_without_saving(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    typed = {"Server address": " http://localhost:11434/ ", "Model name": " llama3.2 "}
+
+    patched = draw_local_llm_panel(module, clicked={"local_llm_check"}, typed=typed)
+
+    patched["check_connection"].assert_called_once_with(
+        {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+    )
+    module.st.success.assert_called_once_with(READY_MESSAGE)
+    patched["save_config"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_local_llm_check_button_shows_what_is_wrong(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module, clicked={"local_llm_check"}, check=(False, "Could not reach Ollama."))
+
+    module.st.error.assert_called_once_with("Could not reach Ollama.")
+    module.st.success.assert_not_called()
+
+
+def test_local_llm_use_button_saves_settings_that_pass_the_check(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    typed = {"Model name": "llama3.2"}
+
+    patched = draw_local_llm_panel(module, clicked={"local_llm_save"}, typed=typed)
+
+    patched["save_config"].assert_called_once_with(
+        {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+    )
+    assert module.st.session_state.local_llm_notice == f"{READY_MESSAGE} Answers will now use this local model."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_local_llm_use_button_saves_nothing_when_the_check_fails(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_local_llm_panel(module, clicked={"local_llm_save"}, check=(False, "Model missing."))
+
+    patched["save_config"].assert_not_called()
+    module.st.error.assert_called_once_with("Model missing. Nothing was changed.")
+    module.st.rerun.assert_not_called()
+
+
+def test_local_llm_switch_back_button_removes_the_saved_settings(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_local_llm_panel(module, saved=SAVED_LOCAL_LLM, clicked={"local_llm_clear"})
+
+    patched["clear_config"].assert_called_once_with()
+    assert module.st.session_state.local_llm_notice == "Answers will now use OpenAI again."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_local_llm_panel_shows_a_saved_notice_once(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.local_llm_notice = "Answers will now use OpenAI again."
+
+    draw_local_llm_panel(module)
+
+    module.st.success.assert_called_once_with("Answers will now use OpenAI again.")
+    assert "local_llm_notice" not in module.st.session_state
+
+
+def test_local_llm_guide_tells_the_user_what_stays_on_openai(pdf_research_assistant_module):
+    guide = pdf_research_assistant_module.LOCAL_LLM_GUIDE
+
+    assert "Check connection" in guide
+    assert "embeddings" in guide
+    assert "OpenAI key" in guide
+
+
+def test_page_draws_the_local_llm_panel():
+    with imported_pdf_research_assistant() as module:
+        module.st.expander.assert_any_call("Local LLM setup")

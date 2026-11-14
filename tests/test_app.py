@@ -40,11 +40,16 @@ def _fake_settings(**changes):
         "multimodal": False,
         "evidence_k": 10,
         "answer_max_sources": 5,
+        "answer_length": "about 200 words, but can be longer",
     } | changes
     return SimpleNamespace(
         llm=values["llm"],
         embedding=values["embedding"],
-        answer=SimpleNamespace(evidence_k=values["evidence_k"], answer_max_sources=values["answer_max_sources"]),
+        answer=SimpleNamespace(
+            evidence_k=values["evidence_k"],
+            answer_max_sources=values["answer_max_sources"],
+            answer_length=values["answer_length"],
+        ),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
         ),
@@ -94,8 +99,8 @@ def imported_pdf_research_assistant(
         # So do the Open chunk buttons drawn beside each source passage.
         if str(key or "").startswith("open_chunk_"):
             return False
-        # And the button that puts the source settings back to PaperQA's defaults.
-        if str(key or "").startswith("source_settings_"):
+        # And the button that puts the sidebar settings back to PaperQA's defaults.
+        if str(key or "").startswith("answer_settings_"):
             return False
         return queued_button_values.pop(0)
 
@@ -1195,12 +1200,14 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     settings = _fake_settings()
 
     with mock.patch.object(module, "render_local_llm_setup") as local_llm_panel, \
-            mock.patch.object(module, "render_source_settings") as source_settings:
+            mock.patch.object(module, "render_source_settings") as source_settings,             mock.patch.object(module, "render_answer_length") as answer_length,             mock.patch.object(module, "render_settings_reset") as settings_reset:
         assert module.render_instant_settings(settings) == "Exhaustive"
 
     st.subheader.assert_called_once_with(module.INSTANT_SETTINGS_TITLE)
     st.caption.assert_called_once_with(module.INSTANT_SETTINGS_NOTE)
     source_settings.assert_called_once_with(settings)
+    answer_length.assert_called_once_with(settings)
+    settings_reset.assert_called_once_with()
     local_llm_panel.assert_called_once_with()
 
 
@@ -1500,20 +1507,13 @@ def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assist
 # Sidebar controls for how many passages are gathered and how many sources an answer may use.
 
 
-def draw_source_settings(module, *, settings=None, typed=None, saved=None, clicked=()):
-    """Draw the source settings with chosen typed numbers, saved values and clicked buttons."""
+def draw_source_settings(module, *, settings=None, typed=None):
+    """Draw the source settings with chosen typed numbers."""
     st = module.st
-    for shown in (st.caption, st.rerun):
-        shown.reset_mock()
+    st.caption.reset_mock()
     typed = typed or {}
     st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: typed.get(label, value))
-    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
-    with mock.patch.multiple(
-        module.saved_settings,
-        load=mock.Mock(return_value=saved or {}),
-        save_value=mock.DEFAULT,
-        forget=mock.DEFAULT,
-    ) as patched:
+    with mock.patch.multiple(module.saved_settings, save_value=mock.DEFAULT) as patched:
         module.render_source_settings(settings or _fake_settings())
         return patched
 
@@ -1584,45 +1584,121 @@ def test_a_current_value_outside_the_limits_is_brought_inside_and_saved(pdf_rese
     assert patched["save_value"].call_args_list == [mock.call("evidence_k", 30), mock.call("answer_max_sources", 1)]
 
 
-def test_the_defaults_button_is_hidden_until_a_source_setting_is_saved(pdf_research_assistant_module):
+def draw_settings_reset(module, *, saved=None, clicked=()):
+    """Draw the button that puts the saved sidebar settings back to PaperQA's defaults."""
+    st = module.st
+    st.rerun.reset_mock()
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    with mock.patch.multiple(
+        module.saved_settings, load=mock.Mock(return_value=saved or {}), forget=mock.DEFAULT
+    ) as patched:
+        module.render_settings_reset()
+        return patched
+
+
+def test_the_defaults_button_is_hidden_until_a_sidebar_setting_is_saved(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
-    draw_source_settings(module, saved={"answer_length": "short"})
+    draw_settings_reset(module, saved={"local_llm": "anything"})
 
     module.st.button.assert_not_called()
 
 
-def test_the_defaults_button_forgets_the_saved_source_settings(pdf_research_assistant_module):
+@pytest.mark.parametrize("saved", [{"evidence_k": 3}, {"answer_length": "50 to 100 words"}])
+def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
-    patched = draw_source_settings(module, saved={"evidence_k": 3}, clicked={"source_settings_reset"})
+    patched = draw_settings_reset(module, saved=saved, clicked={"answer_settings_reset"})
 
-    module.st.button.assert_called_once_with(module.SOURCE_SETTINGS_RESET_LABEL, key="source_settings_reset")
-    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources"])
-    # The browser keeps a number box's old value, so the boxes get new keys and start again from the defaults.
-    assert module.st.session_state.source_settings_round == 1
+    module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
+    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources", "answer_length"])
+    # The browser keeps a control's old value, so the controls get new keys and start again from the defaults.
+    assert module.st.session_state.answer_settings_round == 1
     module.st.rerun.assert_called_once_with()
 
 
-def test_number_boxes_get_new_keys_after_going_back_to_the_defaults(pdf_research_assistant_module):
+def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_assistant_module):
     module = pdf_research_assistant_module
-    module.st.session_state.source_settings_round = 1
+    module.st.session_state.answer_settings_round = 1
 
     draw_source_settings(module)
+    draw_answer_length(module)
 
     keys = [call.kwargs["key"] for call in module.st.number_input.call_args_list]
     assert keys == ["setting_evidence_k_1", "setting_answer_max_sources_1"]
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_length_1"
 
 
 def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
-    patched = draw_source_settings(module, saved={"answer_max_sources": 2})
+    patched = draw_settings_reset(module, saved={"answer_max_sources": 2})
 
-    assert "source_settings_round" not in module.st.session_state
+    assert "answer_settings_round" not in module.st.session_state
     module.st.button.assert_called_once()
     patched["forget"].assert_not_called()
     module.st.rerun.assert_not_called()
+
+
+# Sidebar control for how long the answer is asked to be.
+
+SHORT = "50 to 100 words"
+STANDARD = "about 200 words, but can be longer"
+LONG = "about 400 words, but can be longer"
+
+
+def draw_answer_length(module, *, settings=None, picked=None):
+    """Draw the answer length control, with the user picking a phrase or leaving it as it is."""
+    st = module.st
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with mock.patch.object(module.saved_settings, "save_value") as save_value:
+        module.render_answer_length(settings or _fake_settings())
+        return save_value
+
+
+def test_answer_length_offers_the_named_choices_starting_at_the_one_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_length(module, settings=_fake_settings(answer_length=SHORT))
+
+    call = module.st.selectbox.call_args
+    assert call.args == ("Answer length", [SHORT, STANDARD, LONG])
+    assert call.kwargs["index"] == 0
+    assert call.kwargs["help"] == module.settings_groups.get_setting("answer_length").help
+    assert call.kwargs["key"] == "setting_answer_length_0"
+    assert [call.kwargs["format_func"](phrase) for phrase in (SHORT, STANDARD, LONG)] == [
+        "Short (50 to 100 words)",
+        "Standard (about 200 words, but can be longer)",
+        "Long (about 400 words, but can be longer)",
+    ]
+    save_value.assert_not_called()
+
+
+def test_picking_another_answer_length_saves_it_for_the_next_question(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_length(module, settings=_fake_settings(answer_length=STANDARD), picked=LONG)
+
+    save_value.assert_called_once_with("answer_length", LONG)
+
+
+def test_an_answer_length_that_is_not_offered_is_kept_until_another_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_length(module, settings=_fake_settings(answer_length="one paragraph"))
+
+    call = module.st.selectbox.call_args
+    assert call.args[1] == [SHORT, STANDARD, LONG, "one paragraph"]
+    assert call.kwargs["index"] == 3
+    assert call.kwargs["format_func"]("one paragraph") == "one paragraph"
+    save_value.assert_not_called()
+
+
+def test_page_draws_the_answer_length_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Answer length")
+
+        assert call.args[1][call.kwargs["index"]] == STANDARD
 
 
 def test_page_draws_the_source_settings_from_the_settings_it_built():

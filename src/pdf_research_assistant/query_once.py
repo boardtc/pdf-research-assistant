@@ -15,6 +15,7 @@ from paperqa import Docs
 from paperqa.agents.main import run_agent
 from paperqa.utils import run_or_ensure
 
+from pdf_research_assistant import settings_groups
 from pdf_research_assistant.bootstrap import build_settings
 
 
@@ -75,6 +76,7 @@ def run_query_payload(question: str) -> dict:
                 getattr(response.session, "contexts", []),
                 cited_ids=getattr(response.session, "used_contexts", ()),
             ),
+            "settings": settings_groups.record_answer_settings(settings),
         }
     except Exception as exc:
         return {

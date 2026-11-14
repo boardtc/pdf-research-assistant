@@ -1,3 +1,4 @@
+import json
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,9 @@ def _set_multimodal(settings):
 # One change per setting, made the way PaperQA stores it.
 CHANGES = {
     "answer_model": lambda s: setattr(s, "llm", "some-other-model"),
+    "evidence_k": lambda s: setattr(s.answer, "evidence_k", 3),
+    "answer_max_sources": lambda s: setattr(s.answer, "answer_max_sources", 2),
+    "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
     "paper_directory": lambda s: setattr(s.agent.index, "paper_directory", Path(s.agent.index.paper_directory) / "other"),
     "use_absolute_paper_directory": lambda s: setattr(s.agent.index, "use_absolute_paper_directory", True),
     "embedding": lambda s: setattr(s, "embedding", "text-embedding-3-large"),
@@ -46,7 +50,7 @@ def test_every_setting_is_in_exactly_one_group():
     instant = [setting.key for setting in settings_groups.INSTANT_SETTINGS]
     reindex = [setting.key for setting in settings_groups.REINDEX_SETTINGS]
 
-    assert instant == ["answer_model"]
+    assert instant == ["answer_model", "evidence_k", "answer_max_sources", "answer_length"]
     assert reindex == [
         "paper_directory",
         "use_absolute_paper_directory",
@@ -131,7 +135,12 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
     assert values["chunk_chars"] == 5000
     assert values["overlap"] == 250
     assert values["full_page"] is False
-    assert settings_groups.read_values(settings, settings_groups.INSTANT_SETTINGS) == {"answer_model": settings.llm}
+    assert settings_groups.read_values(settings, settings_groups.INSTANT_SETTINGS) == {
+        "answer_model": settings.llm,
+        "evidence_k": 10,
+        "answer_max_sources": 5,
+        "answer_length": "about 200 words, but can be longer",
+    }
 
 
 class _Colour(Enum):
@@ -171,3 +180,33 @@ def test_describe_setting_shows_the_label_and_current_value():
     line = settings_groups.describe_setting(settings_groups.get_setting("embedding"), settings)
 
     assert line == "**Embedding model:** `text-embedding-3-small`"
+
+
+def test_describe_line_shows_a_label_and_value_as_markdown():
+    assert settings_groups.describe_line("Answer length", "about 50 words") == "**Answer length:** `about 50 words`"
+
+
+def test_record_answer_settings_keeps_the_index_and_every_instant_setting_as_text(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    record = settings_groups.record_answer_settings(settings)
+
+    assert record["index"] == settings.get_index_name()
+    assert record["values"] == [
+        {"key": setting.key, "label": setting.label, "value": settings_groups.describe_value(setting.read(settings)), "source": None}
+        for setting in settings_groups.INSTANT_SETTINGS
+    ]
+    assert record["values"][1]["value"] == "10"
+    assert json.loads(json.dumps(record)) == record
+
+
+def test_describe_recorded_setting_shows_the_label_and_value():
+    item = {"key": "evidence_k", "label": "Passages gathered", "value": "10", "source": None}
+
+    assert settings_groups.describe_recorded_setting(item) == "**Passages gathered:** `10`"
+
+
+def test_describe_recorded_setting_says_where_a_value_came_from_when_known():
+    item = {"key": "evidence_k", "label": "Passages gathered", "value": "3", "source": "This question only"}
+
+    assert settings_groups.describe_recorded_setting(item) == "**Passages gathered:** `3` :gray-badge[This question only]"

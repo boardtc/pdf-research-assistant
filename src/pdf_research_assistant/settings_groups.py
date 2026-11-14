@@ -32,6 +32,27 @@ INSTANT_SETTINGS = (
         needs_reindex=False,
         read=lambda settings: settings.llm,
     ),
+    Setting(
+        key="evidence_k",
+        label="Passages gathered",
+        help="How many passages are pulled from your PDFs and checked against the question.",
+        needs_reindex=False,
+        read=lambda settings: settings.answer.evidence_k,
+    ),
+    Setting(
+        key="answer_max_sources",
+        label="Most sources in the answer",
+        help="The largest number of those passages the answer may cite.",
+        needs_reindex=False,
+        read=lambda settings: settings.answer.answer_max_sources,
+    ),
+    Setting(
+        key="answer_length",
+        label="Answer length",
+        help="How long the answer is asked to be.",
+        needs_reindex=False,
+        read=lambda settings: settings.answer.answer_length,
+    ),
 )
 
 # One entry for each part of PaperQA's index name, in the same order.
@@ -125,6 +146,40 @@ def describe_value(value: object) -> str:
     return str(value)
 
 
+def describe_line(label: str, value: str) -> str:
+    """Return one Markdown line with a label and a value."""
+    return f"**{label}:** `{value}`"
+
+
 def describe_setting(setting: Setting, settings: object) -> str:
     """Return one Markdown line with the setting's label and current value."""
-    return f"**{setting.label}:** `{describe_value(setting.read(settings))}`"
+    return describe_line(setting.label, describe_value(setting.read(settings)))
+
+
+def record_answer_settings(settings: object) -> dict:
+    """Return what to keep with an answer: the index it searched and each instant setting, as plain text.
+
+    Only the instant settings are listed, because the index name already stands for every rebuild setting.
+    "source" says where a value came from, such as a one-off change for this question; None means the
+    usual settings.
+    """
+    return {
+        "index": settings.get_index_name(),
+        "values": [
+            {
+                "key": setting.key,
+                "label": setting.label,
+                "value": describe_value(setting.read(settings)),
+                "source": None,
+            }
+            for setting in INSTANT_SETTINGS
+        ],
+    }
+
+
+def describe_recorded_setting(item: dict) -> str:
+    """Return one Markdown line for a setting kept with an answer, saying where it came from when known."""
+    line = describe_line(item["label"], item["value"])
+    if item.get("source"):
+        line += f" :gray-badge[{item['source']}]"
+    return line

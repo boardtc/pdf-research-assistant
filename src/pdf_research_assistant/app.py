@@ -251,6 +251,36 @@ def render_index_status(status: list[tuple[str, str]]) -> None:
         getattr(st, level)(message)
 
 
+def describe_active_index(
+    active_index_dir: Path, manifest_path: Path, manifest_count: int, paper_dir: Path
+) -> dict[str, str | None]:
+    """Describe the index the query path uses; a manifest count of 0 means no paper list is in use.
+
+    "name" is the folder name for now, so a friendly name can replace it later without changing the layout.
+    """
+    use_manifest_scope = manifest_count > 0
+    return {
+        "name": active_index_dir.name,
+        "folder": str(active_index_dir),
+        "paper_list": (
+            f"`{manifest_path.name}` ({manifest_count} PDFs)"
+            if use_manifest_scope
+            else "none, so all PDFs under PAPER_DIR are in scope"
+        ),
+        "paper_list_path": str(manifest_path) if use_manifest_scope else None,
+        "paper_dir": str(paper_dir),
+    }
+
+
+def render_active_index(details: dict[str, str | None]) -> None:
+    st.caption(f"Active index: `{details['name']}` · Paper list: {details['paper_list']}")
+    with st.expander("Active index details"):
+        st.markdown(f"**Index folder:** `{details['folder']}`")
+        if details["paper_list_path"]:
+            st.markdown(f"**Paper list:** `{details['paper_list_path']}`")
+        st.markdown(f"**PDF folder:** `{details['paper_dir']}`")
+
+
 def render_failed_files(failed_files: list[str]) -> None:
     if not failed_files:
         return
@@ -438,6 +468,9 @@ def main() -> None:
     active_index_dir = bootstrap.get_active_index_dir(settings)
     indexed_count = bootstrap.get_indexed_doc_count(index_dir=active_index_dir)
     render_index_status(select_index_status(indexed_count, manifest_count))
+    render_active_index(
+        describe_active_index(active_index_dir, bootstrap.MANIFEST_PATH, manifest_count, bootstrap.PAPER_DIR)
+    )
     render_failed_files(bootstrap.get_failed_files(index_dir=active_index_dir))
 
     app_state = get_persistent_app_state()

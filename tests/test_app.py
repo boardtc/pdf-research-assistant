@@ -71,10 +71,10 @@ def imported_pdf_research_assistant(
     traceback_lines=None,
     search_mode="Query",
     client_patches=None,
+    active_index_dir=Path(r"C:\index\active-shard"),
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
-    active_index_dir = Path(r"C:\index\active-shard")
 
     streamlit_module.session_state = _SessionState()
     if app_state:
@@ -123,6 +123,8 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings())
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
+    bootstrap_module.MANIFEST_PATH = Path(r"D:\papers-list\manifest.csv")
+    bootstrap_module.PAPER_DIR = Path(r"D:\papers")
 
     with mock.patch.dict(
         sys.modules,
@@ -694,6 +696,28 @@ def test_import_uses_the_active_index_directory_for_startup_index_counts_and_fai
         module.bootstrap.get_failed_files.assert_called_once_with(index_dir=active_index_dir)
 
 
+def test_import_shows_the_active_index_folder_and_paper_list_the_query_path_uses():
+    with imported_pdf_research_assistant(allowed_paths={"paper_a.pdf", "paper_b.pdf"}, indexed_count=2) as module:
+        module.st.caption.assert_any_call(
+            "Active index: `active-shard` · Paper list: `manifest.csv` (2 PDFs)"
+        )
+        details = _markdown_text(module)
+        assert r"`C:\index\active-shard`" in details
+        assert r"`D:\papers-list\manifest.csv`" in details
+        assert r"`D:\papers`" in details
+
+
+def test_import_shows_the_new_active_index_after_it_changes():
+    with imported_pdf_research_assistant(active_index_dir=Path(r"C:\index\shard-one")) as module:
+        module.st.caption.assert_any_call(
+            "Active index: `shard-one` · Paper list: none, so all PDFs under PAPER_DIR are in scope"
+        )
+    with imported_pdf_research_assistant(active_index_dir=Path(r"C:\index\shard-two")) as module:
+        module.st.caption.assert_any_call(
+            "Active index: `shard-two` · Paper list: none, so all PDFs under PAPER_DIR are in scope"
+        )
+
+
 def test_import_shows_failed_files_error_and_lists_each_failed_file():
     with imported_pdf_research_assistant(
         failed_files=["bad_a.pdf", "bad_b.pdf"],
@@ -731,9 +755,10 @@ def test_import_renders_history_and_assistant_history_actions():
         },
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
-        # The sidebar's guide and index settings are Markdown too; they are drawn before the chat.
-        sidebar_lines = 1 + len(module.settings_groups.REINDEX_SETTINGS)
-        chat_markdown = module.st.markdown.call_args_list[sidebar_lines:]
+        # The active index details (index and PDF folders, no paper list here) and the sidebar's guide and
+        # index settings are Markdown too; they are drawn before the chat.
+        lines_before_chat = 2 + 1 + len(module.settings_groups.REINDEX_SETTINGS)
+        chat_markdown = module.st.markdown.call_args_list[lines_before_chat:]
         assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
 
@@ -839,6 +864,73 @@ def test_render_index_status_shows_each_message_at_its_level(pdf_research_assist
     st.warning.assert_called_once_with("W")
     st.info.assert_called_once_with("I")
     st.caption.assert_called_once_with("C")
+
+
+def test_describe_active_index_names_the_folder_and_the_manifest_in_use(pdf_research_assistant_module):
+    details = pdf_research_assistant_module.describe_active_index(
+        Path("index") / "pqa_index_abc", Path("lists") / "manifest.csv", 3, Path("papers")
+    )
+
+    assert details == {
+        "name": "pqa_index_abc",
+        "folder": str(Path("index") / "pqa_index_abc"),
+        "paper_list": "`manifest.csv` (3 PDFs)",
+        "paper_list_path": str(Path("lists") / "manifest.csv"),
+        "paper_dir": "papers",
+    }
+
+
+def test_describe_active_index_says_all_pdfs_are_in_scope_without_a_manifest(pdf_research_assistant_module):
+    details = pdf_research_assistant_module.describe_active_index(
+        Path("index") / "pqa_index_abc", Path("manifest.csv"), 0, Path("papers")
+    )
+
+    assert details["paper_list"] == "none, so all PDFs under PAPER_DIR are in scope"
+    assert details["paper_list_path"] is None
+
+
+def test_render_active_index_shows_the_name_and_puts_the_paths_in_details(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    for shown in (st.caption, st.markdown, st.expander):
+        shown.reset_mock()
+
+    pdf_research_assistant_module.render_active_index(
+        {
+            "name": "pqa_index_abc",
+            "folder": "C:/index/pqa_index_abc",
+            "paper_list": "`manifest.csv` (3 PDFs)",
+            "paper_list_path": "D:/lists/manifest.csv",
+            "paper_dir": "D:/papers",
+        }
+    )
+
+    st.caption.assert_called_once_with("Active index: `pqa_index_abc` · Paper list: `manifest.csv` (3 PDFs)")
+    st.expander.assert_called_once_with("Active index details")
+    assert st.markdown.call_args_list == [
+        mock.call("**Index folder:** `C:/index/pqa_index_abc`"),
+        mock.call("**Paper list:** `D:/lists/manifest.csv`"),
+        mock.call("**PDF folder:** `D:/papers`"),
+    ]
+
+
+def test_render_active_index_skips_the_paper_list_path_without_a_manifest(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.markdown.reset_mock()
+
+    pdf_research_assistant_module.render_active_index(
+        {
+            "name": "pqa_index_abc",
+            "folder": "C:/index/pqa_index_abc",
+            "paper_list": "none, so all PDFs under PAPER_DIR are in scope",
+            "paper_list_path": None,
+            "paper_dir": "D:/papers",
+        }
+    )
+
+    assert st.markdown.call_args_list == [
+        mock.call("**Index folder:** `C:/index/pqa_index_abc`"),
+        mock.call("**PDF folder:** `D:/papers`"),
+    ]
 
 
 def test_render_failed_files_shows_nothing_when_no_file_failed(pdf_research_assistant_module):
@@ -991,7 +1083,7 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
         panels = [call.args[0] for call in st.expander.call_args_list]
 
         assert titles == [module.INSTANT_SETTINGS_TITLE, module.REINDEX_SETTINGS_TITLE]
-        assert panels == ["Local LLM setup", "Library and index settings"]
+        assert panels == ["Active index details", "Local LLM setup", "Library and index settings"]
         module.bootstrap.build_settings.assert_called_once_with()
 
 

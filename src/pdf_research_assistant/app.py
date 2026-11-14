@@ -33,6 +33,7 @@ NO_MEDIA_NOTE = (
     "the Images and tables setting turned on."
 )
 IMAGE_FAILED_NOTE = "This image could not be shown."
+ANSWER_SETTINGS_TITLE = "Show settings used"
 LOCAL_LLM_GUIDE = (
     "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
     "1. Install and start [Ollama](https://ollama.com), or another local server such as LM Studio.\n"
@@ -146,7 +147,20 @@ def render_source_passages(contexts, key: str = "passages"):
                 show_chunk_details(ctx)
 
 
-def run_query_subprocess(question: str) -> tuple[str, float, list[dict]]:
+def render_answer_settings(recorded: dict | None) -> None:
+    """List the index and settings a query used, as the query process recorded them.
+
+    Answers saved without a record, such as exhaustive-search answers, show nothing.
+    """
+    if not recorded:
+        return
+    with st.expander(ANSWER_SETTINGS_TITLE):
+        st.markdown(settings_groups.describe_line("Index", recorded["index"]))
+        for item in recorded["values"]:
+            st.markdown(settings_groups.describe_recorded_setting(item))
+
+
+def run_query_subprocess(question: str) -> tuple[str, float, list[dict], dict | None]:
     helper = Path(__file__).with_name("query_once.py")
     result = subprocess.run(
         [sys.executable, str(helper), question],
@@ -164,7 +178,7 @@ def run_query_subprocess(question: str) -> tuple[str, float, list[dict]]:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Invalid query response.") from exc
     if not payload.get("ok"):
         raise RuntimeError(f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
-    return payload["answer"], payload["cost"], payload.get("contexts", [])
+    return payload["answer"], payload["cost"], payload.get("contexts", []), payload.get("settings")
 
 
 @st.cache_resource
@@ -460,6 +474,7 @@ def render_history(history: list[dict]) -> None:
             if item["role"] == "assistant" and "cost" in item:
                 render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
                 render_source_passages(item.get("contexts", []), key=f"history_{item.get('id', 0)}")
+                render_answer_settings(item.get("settings"))
                 if "report_path" in item:
                     render_exhaustive_report(item["report_path"])
                 st.caption(f"Cost: ${item['cost']:.4f}")
@@ -476,22 +491,23 @@ def describe_query_failure(exc: BaseException) -> str:
     )
 
 
-def answer_question(question: str) -> tuple[str, float, list[dict]]:
+def answer_question(question: str) -> tuple[str, float, list[dict], dict | None]:
     """Run one query and show its answer, or its failure; return what to record in the history."""
     with st.spinner("Searching PDFs..."):
         try:
-            answer, cost, contexts = run_query_subprocess(question)
+            answer, cost, contexts, recorded_settings = run_query_subprocess(question)
         except Exception as exc:
             answer = describe_query_failure(exc)
             st.error(answer)
             st.caption("Cost: $0.0000")
             st.code("".join(traceback.format_exception(exc)))
-            return answer, 0.0, []
+            return answer, 0.0, [], None
         st.markdown(answer)
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
+        render_answer_settings(recorded_settings)
         st.caption(f"Cost: ${cost:.4f}")
-        return answer, cost, contexts
+        return answer, cost, contexts, recorded_settings
 
 
 def submit_question(question: str, app_state: dict) -> None:
@@ -502,7 +518,7 @@ def submit_question(question: str, app_state: dict) -> None:
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        answer, cost, contexts = answer_question(question)
+        answer, cost, contexts, recorded_settings = answer_question(question)
 
     st.session_state.history.append(
         {
@@ -511,6 +527,7 @@ def submit_question(question: str, app_state: dict) -> None:
             "content": answer,
             "cost": cost,
             "contexts": contexts,
+            "settings": recorded_settings,
         }
     )
     st.session_state.total_cost += cost

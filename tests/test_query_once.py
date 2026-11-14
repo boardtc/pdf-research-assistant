@@ -206,14 +206,23 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
     # Mock context serialization so this test stays focused on the success flow orchestration.
     query_once_module.serialize_contexts = mock.Mock(return_value=[{"name": "Source"}])
 
-    result = query_once_module.run_query_payload("What is the answer?")
+    # Mock the settings record so this test only checks that it comes from the settings the query used.
+    recorded = {"index": "pqa_index_x", "values": []}
+    record_settings = mock.patch.object(
+        query_once_module.settings_groups, "record_answer_settings", return_value=recorded
+    )
+
+    with record_settings as record_answer_settings:
+        result = query_once_module.run_query_payload("What is the answer?")
 
     assert result == {
         "ok": True,
         "answer": "Answer text",
         "cost": 1.25,
         "contexts": [{"name": "Source"}],
+        "settings": recorded,
     }
+    record_answer_settings.assert_called_once_with(settings)
     query_once_module.build_settings.assert_called_once_with()
     query_once_module.Docs.assert_called_once_with()
     query_once_module.run_agent.assert_called_once_with(
@@ -233,7 +242,8 @@ def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(
     query_once_module.run_or_ensure = mock.Mock(return_value=response)
     query_once_module.serialize_contexts = mock.Mock(return_value=[])
 
-    query_once_module.run_query_payload("What is the answer?")
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings"):
+        query_once_module.run_query_payload("What is the answer?")
 
     query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"], cited_ids=())
 

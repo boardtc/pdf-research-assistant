@@ -688,20 +688,34 @@ def test_describe_media_names_the_kind_and_page_when_known(pdf_research_assistan
     assert pdf_research_assistant_module.describe_media(media) == label
 
 
-def test_run_query_subprocess_returns_answer_cost_and_contexts_for_successful_json_payload(pdf_research_assistant_module):
+def test_run_query_subprocess_returns_answer_cost_contexts_and_settings_for_successful_json_payload(
+    pdf_research_assistant_module,
+):
+    recorded = {"index": "pqa_index_x", "values": []}
     result = SimpleNamespace(
         returncode=0,
-        stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.25, "contexts": [{"name": "Source"}]}),
+        stdout=json.dumps(
+            {"ok": True, "answer": "Answer", "cost": 0.25, "contexts": [{"name": "Source"}], "settings": recorded}
+        ),
         stderr="",
     )
 
     # Mock subprocess.run so the test can supply the exact helper output contract.
     with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
-        answer, cost, contexts = pdf_research_assistant_module.run_query_subprocess("What is new?")
+        answer, cost, contexts, settings = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
-    assert (answer, cost, contexts) == ("Answer", 0.25, [{"name": "Source"}])
+    assert (answer, cost, contexts, settings) == ("Answer", 0.25, [{"name": "Source"}], recorded)
     assert run_mock.call_args.args[0][0] == pdf_research_assistant_module.sys.executable
     assert run_mock.call_args.args[0][-1] == "What is new?"
+
+
+def test_run_query_subprocess_returns_no_settings_when_the_payload_has_none(pdf_research_assistant_module):
+    result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
+
+    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+        answer, cost, contexts, settings = pdf_research_assistant_module.run_query_subprocess("What is new?")
+
+    assert (contexts, settings) == ([], None)
 
 
 def test_run_query_subprocess_raises_subprocess_error_message_when_process_fails_without_stdout(
@@ -1281,6 +1295,61 @@ def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_a
     st.download_button.assert_not_called()
 
 
+def test_render_history_shows_the_settings_kept_with_an_answer(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    recorded = {"index": "pqa_index_x", "values": []}
+    item = {"role": "assistant", "content": "Answer", "cost": 0.25, "contexts": [], "id": 7, "settings": recorded}
+
+    with mock.patch.object(module, "render_answer_settings") as render_answer_settings:
+        module.render_history([item])
+
+    render_answer_settings.assert_called_once_with(recorded)
+
+
+def test_render_history_passes_no_settings_for_an_answer_saved_without_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+
+    with mock.patch.object(module, "render_answer_settings") as render_answer_settings:
+        module.render_history([{"role": "assistant", "content": "Answer", "cost": 0.25}])
+
+    render_answer_settings.assert_called_once_with(None)
+
+
+def test_render_answer_settings_shows_nothing_when_no_settings_were_kept(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.expander.reset_mock()
+    st.markdown.reset_mock()
+
+    pdf_research_assistant_module.render_answer_settings(None)
+
+    st.expander.assert_not_called()
+    st.markdown.assert_not_called()
+
+
+def test_render_answer_settings_lists_the_index_and_each_setting_in_an_expander(pdf_research_assistant_module):
+    st = pdf_research_assistant_module.st
+    st.expander.reset_mock()
+    st.markdown.reset_mock()
+    recorded = {
+        "index": "pqa_index_x",
+        "values": [
+            {"key": "answer_model", "label": "Answer model", "value": "gpt-4o-mini", "source": None},
+            {"key": "evidence_k", "label": "Passages gathered", "value": "3", "source": "This question only"},
+        ],
+    }
+
+    pdf_research_assistant_module.render_answer_settings(recorded)
+
+    st.expander.assert_called_once_with("Show settings used")
+    assert st.markdown.call_args_list == [
+        mock.call("**Index:** `pqa_index_x`"),
+        mock.call("**Answer model:** `gpt-4o-mini`"),
+        mock.call("**Passages gathered:** `3` :gray-badge[This question only]"),
+    ]
+
+
 def test_render_history_skips_answer_actions_when_an_assistant_item_has_no_cost(pdf_research_assistant_module):
     st = pdf_research_assistant_module.st
     st.button = mock.Mock(return_value=False)
@@ -1328,12 +1397,17 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
     for shown in (st.markdown, st.caption, st.error):
         shown.reset_mock()
     contexts = [{"name": "Source", "context": "Quoted text"}]
+    recorded = {"index": "pqa_index_x", "values": []}
+    returned = ("Answer text", 1.5, contexts, recorded)
 
-    with mock.patch.object(module, "run_query_subprocess", return_value=("Answer text", 1.5, contexts)) as run_query:
+    with mock.patch.object(module, "run_query_subprocess", return_value=returned) as run_query, mock.patch.object(
+        module, "render_answer_settings"
+    ) as render_answer_settings:
         result = module.answer_question("Q")
 
-    assert result == ("Answer text", 1.5, contexts)
+    assert result == returned
     run_query.assert_called_once_with("Q")
+    render_answer_settings.assert_called_once_with(recorded)
     st.markdown.assert_called_once_with("Answer text")
     assert st.button.call_args_list == [
         mock.call("Copy answer", key="copy_current_1"),
@@ -1351,10 +1425,10 @@ def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_
     failure = RuntimeError("query failed")
 
     with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
-        answer, cost, contexts = module.answer_question("Q")
+        answer, cost, contexts, settings = module.answer_question("Q")
 
     assert answer == module.describe_query_failure(failure)
-    assert (cost, contexts) == (0.0, [])
+    assert (cost, contexts, settings) == (0.0, [], None)
     st.error.assert_called_once_with(answer)
     st.caption.assert_called_once_with("Cost: $0.0000")
     st.code.assert_called_once_with("trace line\n")
@@ -1369,14 +1443,17 @@ def test_submit_question_records_the_question_answer_and_cost(pdf_research_assis
     st.chat_message.reset_mock()
     saved = {}
 
-    with mock.patch.object(module, "answer_question", return_value=("Answer text", 0.5, [])) as answer_question:
+    recorded = {"index": "pqa_index_x", "values": []}
+    with mock.patch.object(
+        module, "answer_question", return_value=("Answer text", 0.5, [], recorded)
+    ) as answer_question:
         module.submit_question("What is new?", saved)
 
     answer_question.assert_called_once_with("What is new?")
     assert st.chat_message.call_args_list == [mock.call("user"), mock.call("assistant")]
     assert st.session_state.history == [
         {"role": "user", "content": "What is new?"},
-        {"role": "assistant", "id": 1, "content": "Answer text", "cost": 0.5, "contexts": []},
+        {"role": "assistant", "id": 1, "content": "Answer text", "cost": 0.5, "contexts": [], "settings": recorded},
     ]
     assert (st.session_state.total_cost, st.session_state.query_count) == (1.5, 3)
     assert saved == {"history": st.session_state.history, "total_cost": 1.5, "query_count": 3}

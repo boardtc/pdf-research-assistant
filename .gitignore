@@ -1,6 +1,7 @@
 .env
 manifest.csv
 local_llm.json
+saved_settings.json
 index/
 index_*/
 exhaustive_runs/

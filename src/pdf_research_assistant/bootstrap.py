@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from paperqa import Settings
 from paperqa.settings import AgentSettings, IndexSettings, ParsingSettings
 
-from pdf_research_assistant import local_llm
+from pdf_research_assistant import local_llm, saved_settings
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -183,9 +183,9 @@ def get_model_settings() -> tuple[str, dict]:
 
 
 def build_settings() -> Settings:
-    """Build the shared PaperQA settings object used across all entry points."""
+    """Build the shared PaperQA settings object used across all entry points, with the sidebar choices applied."""
     model_name, model_config = get_model_settings()
-    return Settings(
+    settings = Settings(
         llm=model_name,
         summary_llm=model_name,
         llm_config=deepcopy(model_config),
@@ -205,4 +205,6 @@ def build_settings() -> Settings:
             ),
         ),
     )
+    saved_settings.apply(settings)
+    return settings
 

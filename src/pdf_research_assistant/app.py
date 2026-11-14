@@ -9,7 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from pdf_research_assistant import bootstrap, exhaustive_client, local_llm, settings_groups
+from pdf_research_assistant import bootstrap, exhaustive_client, local_llm, saved_settings, settings_groups
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
@@ -27,6 +27,9 @@ REINDEX_SETTINGS_NOTE = (
     "so they are shown here for reference."
 )
 REBUILD_BADGE = ":orange-badge[Needs rebuild]"
+SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
+SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
+SOURCE_SETTINGS_RESET_LABEL = "Go back to PaperQA defaults"
 NO_CHUNK_TEXT_NOTE = "No chunk text came back with this passage."
 NO_MEDIA_NOTE = (
     "No images or tables are stored with this chunk. They are only kept when the index is built with "
@@ -374,7 +377,54 @@ def init_session_state(app_state: dict) -> None:
         st.session_state.query_count = app_state["query_count"]
 
 
-def render_instant_settings() -> str:
+def setting_widget_key(setting_key: str) -> str:
+    """Return the number box key, which changes each time the source settings go back to the defaults."""
+    return f"setting_{setting_key}_{st.session_state.get('source_settings_round', 0)}"
+
+
+def pick_whole_number(setting: settings_groups.Setting, current: int, high: int) -> int:
+    """Draw a number box for a setting, and save the chosen number when it differs from the one in use.
+
+    The key keeps it the same widget when its starting value changes, so quick clicks are not lost.
+    Streamlit puts the box back to its starting value if the number in it goes above a lowered maximum.
+    """
+    low = setting.check.low
+    chosen = st.number_input(
+        setting.label,
+        min_value=low,
+        max_value=high,
+        value=min(max(current, low), high),
+        step=1,
+        help=setting.help,
+        key=setting_widget_key(setting.key),
+    )
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+    return chosen
+
+
+def render_source_settings(settings) -> None:
+    """Let the user choose how many passages are gathered and how many the answer may cite.
+
+    The numbers start at the values the next question will use. A changed number is saved at once, so the
+    query process picks it up when it builds its settings.
+    """
+    gathered_setting, sources_setting = (settings_groups.get_setting(key) for key in SOURCE_SETTING_KEYS)
+    gathered = pick_whole_number(gathered_setting, gathered_setting.read(settings), gathered_setting.check.high)
+    # PaperQA cannot cite more passages than it gathered.
+    pick_whole_number(sources_setting, sources_setting.read(settings), min(sources_setting.check.high, gathered))
+    st.caption(SOURCE_SETTINGS_NOTE)
+    saved = saved_settings.load()
+    if any(key in saved for key in SOURCE_SETTING_KEYS) and st.button(
+        SOURCE_SETTINGS_RESET_LABEL, key="source_settings_reset"
+    ):
+        saved_settings.forget(SOURCE_SETTING_KEYS)
+        # The browser keeps the old numbers in boxes it has already drawn, so draw new ones.
+        st.session_state.source_settings_round = st.session_state.get("source_settings_round", 0) + 1
+        st.rerun()
+
+
+def render_instant_settings(settings) -> str:
     """Show the settings that apply to the next question and return the chosen search mode."""
     with st.sidebar:
         st.subheader(INSTANT_SETTINGS_TITLE)
@@ -385,6 +435,7 @@ def render_instant_settings() -> str:
             index=0,
             help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
         )
+        render_source_settings(settings)
     render_local_llm_setup()
     return search_mode
 
@@ -417,7 +468,7 @@ def render_sidebar(app_state: dict, settings) -> str:
     """Show the sidebar, with settings in two groups, and return the chosen search mode."""
     with st.sidebar:
         st.header("Settings")
-    search_mode = render_instant_settings()
+    search_mode = render_instant_settings(settings)
     render_reindex_settings(settings)
     render_usage(app_state)
     return search_mode

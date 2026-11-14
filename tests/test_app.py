@@ -38,10 +38,13 @@ def _fake_settings(**changes):
         "parse_pdf": _fake_pdf_reader,
         "reader_config": {"chunk_chars": 5000, "overlap": 250},
         "multimodal": False,
+        "evidence_k": 10,
+        "answer_max_sources": 5,
     } | changes
     return SimpleNamespace(
         llm=values["llm"],
         embedding=values["embedding"],
+        answer=SimpleNamespace(evidence_k=values["evidence_k"], answer_max_sources=values["answer_max_sources"]),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
         ),
@@ -91,11 +94,15 @@ def imported_pdf_research_assistant(
         # So do the Open chunk buttons drawn beside each source passage.
         if str(key or "").startswith("open_chunk_"):
             return False
+        # And the button that puts the source settings back to PaperQA's defaults.
+        if str(key or "").startswith("source_settings_"):
+            return False
         return queued_button_values.pop(0)
 
     streamlit_module.button = mock.Mock(side_effect=click)
     streamlit_module.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: options[index])
     streamlit_module.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
+    streamlit_module.number_input = mock.Mock(side_effect=lambda _label, value=None, **_kwargs: value)
     streamlit_module.success = mock.Mock()
     streamlit_module.expander = mock.Mock(return_value=_ContextManagerStub())
     streamlit_module.subheader = mock.Mock()
@@ -143,7 +150,9 @@ def imported_pdf_research_assistant(
             subprocess_result = SimpleNamespace(returncode=0, stdout='{"ok": true, "answer": "", "cost": 0.0, "contexts": []}', stderr="")
 
         # Mock subprocess.run before import so question-submission scenarios never hit the real helper process.
+        # Point the saved sidebar choices at a file that does not exist, so a real saved file never leaks in.
         with mock.patch("subprocess.run", return_value=subprocess_result), mock.patch("time.sleep"), \
+                mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")), \
                 mock.patch.multiple(
                     "pdf_research_assistant.exhaustive_client", RUNS_DIR=Path("unused"), **(client_patches or {})
                 ):
@@ -1183,11 +1192,15 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     st.subheader.reset_mock()
     st.caption.reset_mock()
 
-    with mock.patch.object(module, "render_local_llm_setup") as local_llm_panel:
-        assert module.render_instant_settings() == "Exhaustive"
+    settings = _fake_settings()
+
+    with mock.patch.object(module, "render_local_llm_setup") as local_llm_panel, \
+            mock.patch.object(module, "render_source_settings") as source_settings:
+        assert module.render_instant_settings(settings) == "Exhaustive"
 
     st.subheader.assert_called_once_with(module.INSTANT_SETTINGS_TITLE)
     st.caption.assert_called_once_with(module.INSTANT_SETTINGS_NOTE)
+    source_settings.assert_called_once_with(settings)
     local_llm_panel.assert_called_once_with()
 
 
@@ -1243,7 +1256,7 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
         assert module.render_sidebar(app_state, settings) == "Exhaustive"
 
     module.st.header.assert_called_once_with("Settings")
-    assert steps.mock_calls == [mock.call.instant(), mock.call.reindex(settings), mock.call.usage(app_state)]
+    assert steps.mock_calls == [mock.call.instant(settings), mock.call.reindex(settings), mock.call.usage(app_state)]
 
 
 def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant_group():
@@ -1482,6 +1495,142 @@ def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assist
         module.main()
 
     submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state())
+
+
+# Sidebar controls for how many passages are gathered and how many sources an answer may use.
+
+
+def draw_source_settings(module, *, settings=None, typed=None, saved=None, clicked=()):
+    """Draw the source settings with chosen typed numbers, saved values and clicked buttons."""
+    st = module.st
+    for shown in (st.caption, st.rerun):
+        shown.reset_mock()
+    typed = typed or {}
+    st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: typed.get(label, value))
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    with mock.patch.multiple(
+        module.saved_settings,
+        load=mock.Mock(return_value=saved or {}),
+        save_value=mock.DEFAULT,
+        forget=mock.DEFAULT,
+    ) as patched:
+        module.render_source_settings(settings or _fake_settings())
+        return patched
+
+
+def _number_box(module, label):
+    return next(call for call in module.st.number_input.call_args_list if call.args[0] == label)
+
+
+def test_source_settings_start_at_the_values_the_next_question_will_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, settings=_fake_settings(evidence_k=12, answer_max_sources=4))
+
+    gathered = _number_box(module, "Passages gathered")
+    sources = _number_box(module, "Most sources in the answer")
+    assert gathered.kwargs == {
+        "min_value": 1,
+        "max_value": 30,
+        "value": 12,
+        "step": 1,
+        "help": module.settings_groups.get_setting("evidence_k").help,
+        # A fixed key keeps the box the same widget when its starting value changes, so no click is lost.
+        "key": "setting_evidence_k_0",
+    }
+    assert sources.kwargs["key"] == "setting_answer_max_sources_0"
+    assert (sources.kwargs["min_value"], sources.kwargs["max_value"], sources.kwargs["value"]) == (1, 12, 4)
+    assert sources.kwargs["help"] == module.settings_groups.get_setting("answer_max_sources").help
+    patched["save_value"].assert_not_called()
+
+
+def test_source_settings_say_exhaustive_search_ignores_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_source_settings(module)
+
+    module.st.caption.assert_any_call(module.SOURCE_SETTINGS_NOTE)
+    assert "Exhaustive search ignores" in module.SOURCE_SETTINGS_NOTE
+
+
+def test_choosing_a_new_number_saves_it_for_the_next_question(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, typed={"Passages gathered": 20, "Most sources in the answer": 8})
+
+    assert patched["save_value"].call_args_list == [
+        mock.call("evidence_k", 20),
+        mock.call("answer_max_sources", 8),
+    ]
+
+
+def test_most_sources_can_never_be_more_than_the_passages_gathered(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, typed={"Passages gathered": 3})
+
+    sources = _number_box(module, "Most sources in the answer")
+    assert (sources.kwargs["max_value"], sources.kwargs["value"]) == (3, 3)
+    assert patched["save_value"].call_args_list == [mock.call("evidence_k", 3), mock.call("answer_max_sources", 3)]
+
+
+def test_a_current_value_outside_the_limits_is_brought_inside_and_saved(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, settings=_fake_settings(evidence_k=50, answer_max_sources=0))
+
+    assert _number_box(module, "Passages gathered").kwargs["value"] == 30
+    assert _number_box(module, "Most sources in the answer").kwargs["value"] == 1
+    assert patched["save_value"].call_args_list == [mock.call("evidence_k", 30), mock.call("answer_max_sources", 1)]
+
+
+def test_the_defaults_button_is_hidden_until_a_source_setting_is_saved(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_source_settings(module, saved={"answer_length": "short"})
+
+    module.st.button.assert_not_called()
+
+
+def test_the_defaults_button_forgets_the_saved_source_settings(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, saved={"evidence_k": 3}, clicked={"source_settings_reset"})
+
+    module.st.button.assert_called_once_with(module.SOURCE_SETTINGS_RESET_LABEL, key="source_settings_reset")
+    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources"])
+    # The browser keeps a number box's old value, so the boxes get new keys and start again from the defaults.
+    assert module.st.session_state.source_settings_round == 1
+    module.st.rerun.assert_called_once_with()
+
+
+def test_number_boxes_get_new_keys_after_going_back_to_the_defaults(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.source_settings_round = 1
+
+    draw_source_settings(module)
+
+    keys = [call.kwargs["key"] for call in module.st.number_input.call_args_list]
+    assert keys == ["setting_evidence_k_1", "setting_answer_max_sources_1"]
+
+
+def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_source_settings(module, saved={"answer_max_sources": 2})
+
+    assert "source_settings_round" not in module.st.session_state
+    module.st.button.assert_called_once()
+    patched["forget"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_page_draws_the_source_settings_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        labels = [call.args[0] for call in module.st.number_input.call_args_list]
+
+        assert labels == ["Passages gathered", "Most sources in the answer"]
+        assert module.st.number_input.call_args_list[0].kwargs["value"] == 10
 
 
 # Local LLM setup panel.

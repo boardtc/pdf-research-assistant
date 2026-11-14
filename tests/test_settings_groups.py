@@ -210,3 +210,59 @@ def test_describe_recorded_setting_says_where_a_value_came_from_when_known():
     item = {"key": "evidence_k", "label": "Passages gathered", "value": "3", "source": "This question only"}
 
     assert settings_groups.describe_recorded_setting(item) == "**Passages gathered:** `3` :gray-badge[This question only]"
+
+
+# Settings the user can change from the sidebar.
+
+
+def test_only_the_source_settings_can_be_saved_from_the_sidebar_so_far():
+    saved = [setting.key for setting in settings_groups.SETTINGS if setting.write is not None]
+
+    assert saved == ["evidence_k", "answer_max_sources"]
+    assert all(setting.check is not None for setting in settings_groups.SETTINGS if setting.write is not None)
+
+
+@pytest.mark.parametrize(("key", "value"), [("evidence_k", 3), ("answer_max_sources", 2)])
+def test_writing_a_source_setting_changes_the_paperqa_value_it_reads(key, value, tmp_path):
+    settings = _real_settings(tmp_path)
+    setting = settings_groups.get_setting(key)
+
+    setting.write(settings, value)
+
+    assert setting.read(settings) == value
+
+
+def test_source_settings_allow_what_paperqa_s_own_presets_use():
+    gathered = settings_groups.get_setting("evidence_k").check
+    sources = settings_groups.get_setting("answer_max_sources").check
+
+    # PaperQA's bundled presets go as high as 30 passages and 15 sources.
+    assert (gathered.low, gathered.high) == (1, 30)
+    assert (sources.low, sources.high) == (1, 15)
+
+
+def test_whole_number_returns_a_value_inside_its_limits():
+    check = settings_groups.WholeNumber(1, 30)
+
+    assert check(1) == 1
+    assert check(30) == 30
+
+
+@pytest.mark.parametrize("value", [0, 31, -1])
+def test_whole_number_rejects_a_value_outside_its_limits(value):
+    with pytest.raises(ValueError, match="between 1 and 30"):
+        settings_groups.WholeNumber(1, 30)(value)
+
+
+@pytest.mark.parametrize("value", [True, 3.0, "3", None])
+def test_whole_number_rejects_anything_that_is_not_a_whole_number(value):
+    with pytest.raises(ValueError, match="whole number"):
+        settings_groups.WholeNumber(1, 30)(value)
+
+
+def test_source_setting_help_mentions_cost_and_speed_in_plain_words():
+    gathered = settings_groups.get_setting("evidence_k").help
+    sources = settings_groups.get_setting("answer_max_sources").help
+
+    assert "cost" in gathered and "longer" in gathered
+    assert "cost" in sources

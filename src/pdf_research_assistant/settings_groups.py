@@ -6,12 +6,28 @@ index, so every PDF has to be indexed again. Those settings are REINDEX_SETTINGS
 Every other setting only changes how a question is answered: INSTANT_SETTINGS.
 
 To add a setting, add one entry to the group it belongs to. The tests check both
-groups against PaperQA itself.
+groups against PaperQA itself. A setting the user can change from the sidebar also
+has `write` and `check`; saved_settings.py then saves it and applies it to every query.
 """
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
+
+
+@dataclass(frozen=True)
+class WholeNumber:
+    """Accepts a whole number from low to high, inclusive."""
+
+    low: int
+    high: int
+
+    def __call__(self, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"Expected a whole number, got {value!r}.")
+        if not self.low <= value <= self.high:
+            raise ValueError(f"Expected a number between {self.low} and {self.high}, got {value}.")
+        return value
 
 
 @dataclass(frozen=True)
@@ -22,6 +38,10 @@ class Setting:
     needs_reindex: bool
     # Returns the setting's current value from a PaperQA Settings object.
     read: Callable[[object], object]
+    # Puts a chosen value onto a PaperQA Settings object; None when the sidebar cannot change the setting.
+    write: Callable[[object, object], None] | None = None
+    # Returns a chosen value if it can be used, or raises ValueError.
+    check: Callable[[object], object] | None = None
 
 
 INSTANT_SETTINGS = (
@@ -35,16 +55,28 @@ INSTANT_SETTINGS = (
     Setting(
         key="evidence_k",
         label="Passages gathered",
-        help="How many passages are pulled from your PDFs and checked against the question.",
+        help=(
+            "How many passages are pulled from your PDFs and checked against the question. The model reads "
+            "each one, so more passages cost more and take longer, but can find evidence that fewer would miss."
+        ),
         needs_reindex=False,
         read=lambda settings: settings.answer.evidence_k,
+        write=lambda settings, value: setattr(settings.answer, "evidence_k", value),
+        # PaperQA sets no limit; its own presets use from 2 to 30.
+        check=WholeNumber(1, 30),
     ),
     Setting(
         key="answer_max_sources",
         label="Most sources in the answer",
-        help="The largest number of those passages the answer may cite.",
+        help=(
+            "The largest number of those passages the answer may cite. More sources make the answer draw on "
+            "more of your PDFs, at a slightly higher cost, because the model is sent more text to write from."
+        ),
         needs_reindex=False,
         read=lambda settings: settings.answer.answer_max_sources,
+        write=lambda settings, value: setattr(settings.answer, "answer_max_sources", value),
+        # PaperQA sets no limit; its own presets use from 2 to 15.
+        check=WholeNumber(1, 15),
     ),
     Setting(
         key="answer_length",

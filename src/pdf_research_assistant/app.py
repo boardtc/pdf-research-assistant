@@ -31,6 +31,13 @@ SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
 SETTINGS_RESET_LABEL = "Go back to PaperQA defaults"
+ONE_OFF_TITLE = "Change for the next question only"
+ONE_OFF_TOGGLE_LABEL = "Use different settings for my next question"
+ONE_OFF_NOTE = (
+    "Try other values on one question without changing your usual settings above. They are used for your "
+    "next question only, marked under that answer, and then switched off again. "
+    "Exhaustive search ignores them."
+)
 NO_CHUNK_TEXT_NOTE = "No chunk text came back with this passage."
 NO_MEDIA_NOTE = (
     "No images or tables are stored with this chunk. They are only kept when the index is built with "
@@ -164,10 +171,14 @@ def render_answer_settings(recorded: dict | None) -> None:
             st.markdown(settings_groups.describe_recorded_setting(item))
 
 
-def run_query_subprocess(question: str) -> tuple[str, float, list[dict], dict | None]:
+def run_query_subprocess(question: str, one_off: dict | None = None) -> tuple[str, float, list[dict], dict | None]:
+    """Run one question in its own process, with any settings changed for this question only."""
     helper = Path(__file__).with_name("query_once.py")
+    command = [sys.executable, str(helper), question]
+    if one_off:
+        command.append(json.dumps(one_off))
     result = subprocess.run(
-        [sys.executable, str(helper), question],
+        command,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -383,22 +394,27 @@ def setting_widget_key(setting_key: str) -> str:
     return f"setting_{setting_key}_{st.session_state.get('answer_settings_round', 0)}"
 
 
-def pick_whole_number(setting: settings_groups.Setting, current: int, high: int) -> int:
-    """Draw a number box for a setting, and save the chosen number when it differs from the one in use.
+def draw_whole_number(setting: settings_groups.Setting, current: int, high: int, key: str) -> int:
+    """Draw a number box for a setting, starting at the current value brought inside its limits.
 
     The key keeps it the same widget when its starting value changes, so quick clicks are not lost.
     Streamlit puts the box back to its starting value if the number in it goes above a lowered maximum.
     """
     low = setting.check.low
-    chosen = st.number_input(
+    return st.number_input(
         setting.label,
         min_value=low,
         max_value=high,
         value=min(max(current, low), high),
         step=1,
         help=setting.help,
-        key=setting_widget_key(setting.key),
+        key=key,
     )
+
+
+def pick_whole_number(setting: settings_groups.Setting, current: int, high: int) -> int:
+    """Draw a number box for a setting, and save the chosen number when it differs from the one in use."""
+    chosen = draw_whole_number(setting, current, high, setting_widget_key(setting.key))
     if chosen != current:
         saved_settings.save_value(setting.key, chosen)
     return chosen
@@ -423,25 +439,30 @@ def describe_answer_length(phrase: str) -> str:
     return f"{name} ({phrase})" if name else phrase
 
 
-def render_answer_length(settings) -> None:
-    """Let the user choose how long the answer is asked to be, saving a new choice at once.
+def draw_answer_length(setting: settings_groups.Setting, current: str, key: str) -> str:
+    """Draw the answer length choices, starting at the current length.
 
     A length that is not one of the choices, such as a changed PaperQA default, is offered as well, so
     drawing the control never changes the setting by itself.
     """
-    setting = settings_groups.get_setting("answer_length")
-    current = setting.read(settings)
     options = list(setting.check.values)
     if current not in options:
         options.append(current)
-    chosen = st.selectbox(
+    return st.selectbox(
         setting.label,
         options,
         index=options.index(current),
         format_func=describe_answer_length,
         help=setting.help,
-        key=setting_widget_key(setting.key),
+        key=key,
     )
+
+
+def render_answer_length(settings) -> None:
+    """Let the user choose how long the answer is asked to be, saving a new choice at once."""
+    setting = settings_groups.get_setting("answer_length")
+    current = setting.read(settings)
+    chosen = draw_answer_length(setting, current, setting_widget_key(setting.key))
     if chosen != current:
         saved_settings.save_value(setting.key, chosen)
 
@@ -456,8 +477,50 @@ def render_settings_reset() -> None:
         st.rerun()
 
 
-def render_instant_settings(settings) -> str:
-    """Show the settings that apply to the next question and return the chosen search mode."""
+def one_off_widget_key(name: str, usual: object = "") -> str:
+    """Return a one-off control's key.
+
+    It changes after each question, so the controls start again switched off, and when the usual value
+    changes, so an untouched box never holds on to an old usual value.
+    """
+    return f"one_off_{name}_{st.session_state.get('one_off_round', 0)}" + (f"_{usual}" if usual != "" else "")
+
+
+def render_one_off_settings(settings) -> dict:
+    """Let the user change settings for the next question only; return the changes, by setting key.
+
+    Nothing here is saved. Only values that differ from the usual ones are returned, so the query process
+    can mark exactly those as changed for this question.
+    """
+    with st.expander(ONE_OFF_TITLE):
+        st.caption(ONE_OFF_NOTE)
+        if not st.toggle(ONE_OFF_TOGGLE_LABEL, key=one_off_widget_key("enabled")):
+            return {}
+        gathered_setting, sources_setting = (settings_groups.get_setting(key) for key in SOURCE_SETTING_KEYS)
+        length_setting = settings_groups.get_setting("answer_length")
+        usual = {setting.key: setting.read(settings) for setting in (gathered_setting, sources_setting, length_setting)}
+        gathered = draw_whole_number(
+            gathered_setting,
+            usual["evidence_k"],
+            gathered_setting.check.high,
+            one_off_widget_key("evidence_k", usual["evidence_k"]),
+        )
+        # PaperQA cannot cite more passages than it gathered.
+        sources = draw_whole_number(
+            sources_setting,
+            usual["answer_max_sources"],
+            min(sources_setting.check.high, gathered),
+            one_off_widget_key("answer_max_sources", usual["answer_max_sources"]),
+        )
+        length = draw_answer_length(
+            length_setting, usual["answer_length"], one_off_widget_key("answer_length", usual["answer_length"])
+        )
+    chosen = {"evidence_k": gathered, "answer_max_sources": sources, "answer_length": length}
+    return {key: value for key, value in chosen.items() if value != usual[key]}
+
+
+def render_instant_settings(settings) -> tuple[str, dict]:
+    """Show the settings that apply to the next question; return the search mode and any one-off changes."""
     with st.sidebar:
         st.subheader(INSTANT_SETTINGS_TITLE)
         st.caption(INSTANT_SETTINGS_NOTE)
@@ -470,8 +533,9 @@ def render_instant_settings(settings) -> str:
         render_source_settings(settings)
         render_answer_length(settings)
         render_settings_reset()
+        one_off = render_one_off_settings(settings)
     render_local_llm_setup()
-    return search_mode
+    return search_mode, one_off
 
 
 def render_reindex_settings(settings) -> None:
@@ -498,14 +562,14 @@ def render_usage(app_state: dict) -> None:
             st.rerun()
 
 
-def render_sidebar(app_state: dict, settings) -> str:
-    """Show the sidebar, with settings in two groups, and return the chosen search mode."""
+def render_sidebar(app_state: dict, settings) -> tuple[str, dict]:
+    """Show the sidebar, with settings in two groups; return the search mode and any one-off changes."""
     with st.sidebar:
         st.header("Settings")
-    search_mode = render_instant_settings(settings)
+    search_mode, one_off = render_instant_settings(settings)
     render_reindex_settings(settings)
     render_usage(app_state)
-    return search_mode
+    return search_mode, one_off
 
 
 def render_local_llm_setup() -> None:
@@ -576,11 +640,11 @@ def describe_query_failure(exc: BaseException) -> str:
     )
 
 
-def answer_question(question: str) -> tuple[str, float, list[dict], dict | None]:
+def answer_question(question: str, one_off: dict | None = None) -> tuple[str, float, list[dict], dict | None]:
     """Run one query and show its answer, or its failure; return what to record in the history."""
     with st.spinner("Searching PDFs..."):
         try:
-            answer, cost, contexts, recorded_settings = run_query_subprocess(question)
+            answer, cost, contexts, recorded_settings = run_query_subprocess(question, one_off)
         except Exception as exc:
             answer = describe_query_failure(exc)
             st.error(answer)
@@ -595,15 +659,20 @@ def answer_question(question: str) -> tuple[str, float, list[dict], dict | None]
         return answer, cost, contexts, recorded_settings
 
 
-def submit_question(question: str, app_state: dict) -> None:
-    """Record a Query-mode question, answer it, and add the answer and its cost to the session."""
+def submit_question(question: str, app_state: dict, one_off: dict | None = None) -> None:
+    """Record a Query-mode question, answer it, and add the answer and its cost to the session.
+
+    one_off holds settings changed for this question only. They are used once: afterwards the one-off
+    controls start again, switched off.
+    """
     st.session_state.history.append({"role": "user", "content": question})
     sync_persistent_state(app_state)
     with st.chat_message("user"):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        answer, cost, contexts, recorded_settings = answer_question(question)
+        answer, cost, contexts, recorded_settings = answer_question(question, one_off)
+    st.session_state.one_off_round = st.session_state.get("one_off_round", 0) + 1
 
     st.session_state.history.append(
         {
@@ -637,7 +706,7 @@ def main() -> None:
 
     app_state = get_persistent_app_state()
     init_session_state(app_state)
-    search_mode = render_sidebar(app_state, settings)
+    search_mode, one_off = render_sidebar(app_state, settings)
     render_history(st.session_state.history)
 
     exhaustive_pending = st.session_state.get("exhaustive_pending")
@@ -651,7 +720,7 @@ def main() -> None:
     elif question and search_mode == EXHAUSTIVE_MODE:
         plan_exhaustive_question(question)
     elif question:
-        submit_question(question, app_state)
+        submit_question(question, app_state, one_off)
 
 
 main()

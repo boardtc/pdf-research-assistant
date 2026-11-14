@@ -222,7 +222,7 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
         "contexts": [{"name": "Source"}],
         "settings": recorded,
     }
-    record_answer_settings.assert_called_once_with(settings)
+    record_answer_settings.assert_called_once_with(settings, one_off=[])
     query_once_module.build_settings.assert_called_once_with()
     query_once_module.Docs.assert_called_once_with()
     query_once_module.run_agent.assert_called_once_with(
@@ -280,9 +280,69 @@ def test_main_returns_exit_code_1_when_question_argument_count_is_incorrect(quer
             exit_code = query_once_module.main()
 
     assert exit_code == 1
-    print_mock.assert_called_once_with(
-        json.dumps({"ok": False, "error": "Expected exactly one question argument."})
-    )
+    print_mock.assert_called_once_with(json.dumps({"ok": False, "error": query_once_module.USAGE_ERROR}))
+
+
+@pytest.mark.parametrize("one_off", ["not json", "[1, 2]"])
+def test_main_returns_exit_code_1_when_the_one_off_settings_are_not_a_json_object(one_off, query_once_module):
+    with mock.patch.object(query_once_module.sys, "argv", ["query_once.py", "What is new?", one_off]):
+        with mock.patch.object(query_once_module, "run_query_payload") as payload_mock:
+            with mock.patch("builtins.print") as print_mock:
+                exit_code = query_once_module.main()
+
+    assert exit_code == 1
+    payload_mock.assert_not_called()
+    print_mock.assert_called_once_with(json.dumps({"ok": False, "error": query_once_module.USAGE_ERROR}))
+
+
+def test_main_passes_one_off_settings_given_after_the_question(query_once_module):
+    payload = {"ok": True}
+    argv = ["query_once.py", "What is new?", json.dumps({"evidence_k": 3})]
+    with mock.patch.object(query_once_module.sys, "argv", argv):
+        with mock.patch.object(query_once_module, "run_query_payload", return_value=payload) as payload_mock:
+            with mock.patch("builtins.print"):
+                exit_code = query_once_module.main()
+
+    assert exit_code == 0
+    payload_mock.assert_called_once_with("What is new?", {"evidence_k": 3})
+
+
+def test_run_query_payload_applies_one_off_settings_after_the_saved_ones_and_records_them(query_once_module):
+    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+    steps = mock.Mock()
+    steps.build.return_value = settings
+    steps.apply_usable.return_value = ["evidence_k"]
+    # Record the order: settings are built, then the one-off values applied, then the question run.
+    query_once_module.build_settings = steps.build
+    query_once_module.run_agent = mock.Mock(side_effect=lambda *args, **kwargs: steps.run())
+
+    with mock.patch.multiple(
+        query_once_module.settings_groups,
+        apply_usable=steps.apply_usable,
+        record_answer_settings=steps.record,
+    ):
+        query_once_module.run_query_payload("Q", {"evidence_k": 3, "evidence_x": 1})
+
+    assert steps.mock_calls[:3] == [
+        mock.call.build(),
+        mock.call.apply_usable(settings, {"evidence_k": 3, "evidence_x": 1}),
+        mock.call.run(),
+    ]
+    steps.record.assert_called_once_with(settings, one_off=["evidence_k"])
+
+
+def test_run_query_payload_records_no_one_off_settings_when_none_are_given(query_once_module):
+    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
+    query_once_module.build_settings = mock.Mock(return_value=settings)
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings") as record:
+        query_once_module.run_query_payload("Q")
+
+    record.assert_called_once_with(settings, one_off=[])
 
 
 def test_main_returns_exit_code_0_and_prints_serialized_payload_for_single_question_argument(query_once_module):
@@ -297,5 +357,5 @@ def test_main_returns_exit_code_0_and_prints_serialized_payload_for_single_quest
                 exit_code = query_once_module.main()
 
     assert exit_code == 0
-    payload_mock.assert_called_once_with("What is new?")
+    payload_mock.assert_called_once_with("What is new?", None)
     print_mock.assert_called_once_with(json.dumps(payload, ensure_ascii=False))

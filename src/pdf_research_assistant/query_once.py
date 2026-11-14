@@ -56,10 +56,18 @@ def serialize_contexts(contexts, cited_ids=()):
     return items
 
 
-def run_query_payload(question: str) -> dict:
-    """Run one PaperQA query and return a serializable success or error payload."""
+USAGE_ERROR = "Expected a question, optionally followed by one-off settings as a JSON object."
+
+
+def run_query_payload(question: str, one_off: dict | None = None) -> dict:
+    """Run one PaperQA query and return a serializable success or error payload.
+
+    one_off holds settings changed for this question only, by setting key. They go on top of the saved
+    settings for this run and are never saved; any that cannot be used are skipped.
+    """
     try:
         settings = build_settings()
+        applied = settings_groups.apply_usable(settings, one_off or {})
         response = run_or_ensure(
             coro=run_agent(
                 Docs(),
@@ -76,7 +84,7 @@ def run_query_payload(question: str) -> dict:
                 getattr(response.session, "contexts", []),
                 cited_ids=getattr(response.session, "used_contexts", ()),
             ),
-            "settings": settings_groups.record_answer_settings(settings),
+            "settings": settings_groups.record_answer_settings(settings, one_off=applied),
         }
     except Exception as exc:
         return {
@@ -88,12 +96,21 @@ def run_query_payload(question: str) -> dict:
 
 def main() -> int:
     """Execute the one-shot query CLI contract expected by the app and shell wrapper."""
-    if len(sys.argv) != 2:
-        print(json.dumps({"ok": False, "error": "Expected exactly one question argument."}))
+    if len(sys.argv) not in (2, 3):
+        print(json.dumps({"ok": False, "error": USAGE_ERROR}))
         return 1
+    one_off = None
+    if len(sys.argv) == 3:
+        try:
+            one_off = json.loads(sys.argv[2])
+        except ValueError:
+            one_off = None
+        if not isinstance(one_off, dict):
+            print(json.dumps({"ok": False, "error": USAGE_ERROR}))
+            return 1
 
     question = sys.argv[1]
-    payload = run_query_payload(question)
+    payload = run_query_payload(question, one_off)
     print(json.dumps(payload, ensure_ascii=False))
     return 0
 

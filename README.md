@@ -105,6 +105,8 @@ A longer answer costs a little more and takes a little longer, because the model
 
 A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to PaperQA defaults` removes every saved choice. Exhaustive search ignores all three, because it checks every passage in scope and writes no combined answer.
 
+To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The same three controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
+
 The sidebar also shows:
 
 - query count for the current session
@@ -116,7 +118,7 @@ Each assistant response also includes:
 - a `Copy answer` button that copies the full answer text to the clipboard on Windows
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
 - an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
-- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, and the answer length. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. Exhaustive-search answers do not have this list.
+- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, and the answer length. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 

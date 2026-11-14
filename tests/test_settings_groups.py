@@ -308,3 +308,61 @@ def test_answer_length_help_mentions_cost_speed_and_exhaustive_search():
 
     assert "cost" in help_text and "longer" in help_text
     assert "Exhaustive search ignores" in help_text
+
+
+# Checking and applying values chosen in the app, saved or for one question only.
+
+
+def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
+    assert settings_groups.usable("evidence_k", 3) is True
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("no_such_setting", 3),
+        ("answer_model", "some-other-model"),
+        ("evidence_k", 0),
+        ("answer_length", "one paragraph"),
+    ],
+)
+def test_usable_rejects_unknown_settings_settings_the_sidebar_cannot_change_and_values_not_allowed(key, value):
+    assert settings_groups.usable(key, value) is False
+
+
+def test_apply_usable_puts_each_allowed_value_on_the_settings_and_says_which_it_applied(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    applied = settings_groups.apply_usable(
+        settings, {"evidence_k": 3, "answer_length": "50 to 100 words", "answer_max_sources": 99, "answer_model": "x"}
+    )
+
+    assert applied == ["evidence_k", "answer_length"]
+    assert settings.answer.evidence_k == 3
+    assert settings.answer.answer_length == "50 to 100 words"
+    assert settings.answer.answer_max_sources == 5
+    assert settings.llm != "x"
+
+
+def test_apply_usable_changes_nothing_when_there_are_no_values(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    assert settings_groups.apply_usable(settings, {}) == []
+    assert settings.answer.evidence_k == 10
+
+
+def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_path):
+    settings = _real_settings(tmp_path)
+    settings.answer.evidence_k = 3
+
+    record = settings_groups.record_answer_settings(settings, one_off=["evidence_k"])
+
+    sources = {item["key"]: item["source"] for item in record["values"]}
+    assert sources == {
+        "answer_model": None,
+        "evidence_k": settings_groups.ONE_OFF_SOURCE,
+        "answer_max_sources": None,
+        "answer_length": None,
+    }
+    assert record["values"][1]["value"] == "3"
+    assert settings_groups.ONE_OFF_SOURCE == "This question only"

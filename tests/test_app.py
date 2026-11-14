@@ -88,6 +88,9 @@ def imported_pdf_research_assistant(
         # The local LLM panel is drawn on every page; its buttons stay unclicked and leave the queue alone.
         if str(key or "").startswith("local_llm_"):
             return False
+        # So do the Open chunk buttons drawn beside each source passage.
+        if str(key or "").startswith("open_chunk_"):
+            return False
         return queued_button_values.pop(0)
 
     streamlit_module.button = mock.Mock(side_effect=click)
@@ -115,6 +118,9 @@ def imported_pdf_research_assistant(
     streamlit_module.progress = mock.Mock()
     streamlit_module.download_button = mock.Mock()
     streamlit_module.fragment = mock.Mock(return_value=lambda fn: fn)
+    streamlit_module.dialog = mock.Mock(return_value=lambda fn: fn)
+    streamlit_module.text = mock.Mock()
+    streamlit_module.image = mock.Mock()
 
     # Mock bootstrap lookups so each import scenario can model a specific index and manifest state.
     bootstrap_module.get_allowed_paths = mock.Mock(return_value=set() if allowed_paths is None else allowed_paths)
@@ -517,19 +523,169 @@ def test_render_source_passages_uses_source_fallback_name_when_context_name_is_m
     subheader_mock.assert_called_once_with("Source")
 
 
-def test_render_source_passages_shows_raw_chunk_caption_and_text_when_raw_text_is_present(pdf_research_assistant_module):
-    contexts = [{"name": "Paper A", "context": "Quoted text", "raw_text": "Raw chunk"}]
+def test_render_source_passages_offers_an_open_chunk_button_for_each_passage(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    contexts = [{"name": "Paper A", "context": "First"}, {"name": "Paper B", "context": "Second"}]
 
-    # Mock the expander context manager so the test can execute the rendering branch safely.
-    with mock.patch.object(pdf_research_assistant_module.st, "expander", return_value=_ContextManagerStub()):
-        # Mock caption so the test can assert on the raw-text label.
-        with mock.patch.object(pdf_research_assistant_module.st, "caption") as caption_mock:
-            # Mock write so the test can assert that the raw chunk text is also rendered.
-            with mock.patch.object(pdf_research_assistant_module.st, "write") as write_mock:
-                pdf_research_assistant_module.render_source_passages(contexts)
+    with mock.patch.object(module, "show_chunk_details") as show_chunk:
+        module.render_source_passages(contexts, key="history_7")
 
-    caption_mock.assert_called_once_with("Raw chunk text")
-    assert write_mock.call_args_list[-1] == mock.call("Raw chunk")
+    assert module.st.button.call_args_list == [
+        mock.call("Open chunk", key="open_chunk_history_7_0"),
+        mock.call("Open chunk", key="open_chunk_history_7_1"),
+    ]
+    show_chunk.assert_not_called()
+
+
+def test_render_source_passages_opens_the_chunk_whose_button_was_clicked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(side_effect=lambda _label, key: key.endswith("_1"))
+    contexts = [{"name": "Paper A", "context": "First"}, {"name": "Paper B", "context": "Second"}]
+
+    with mock.patch.object(module, "show_chunk_details") as show_chunk:
+        module.render_source_passages(contexts, key="history_7")
+
+    show_chunk.assert_called_once_with(contexts[1])
+
+
+def test_render_source_passages_keeps_the_chunk_text_out_of_the_passage_list(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    module.st.write.reset_mock()
+
+    module.render_source_passages([{"name": "Paper A", "context": "Summary", "raw_text": "Raw chunk"}])
+
+    module.st.write.assert_called_once_with("Summary")
+
+
+def test_chunk_details_open_in_a_wide_dialog():
+    with imported_pdf_research_assistant() as module:
+        module.st.dialog.assert_called_once_with("Chunk details", width="large")
+
+
+def test_describe_chunk_facts_names_the_source_and_says_whether_it_was_cited(pdf_research_assistant_module):
+    describe = pdf_research_assistant_module.describe_chunk_facts
+
+    assert describe({"name": "Paper A pages 1-2", "cited": True}) == [
+        ("Source", "Paper A pages 1-2"),
+        ("Cited in the answer", "yes"),
+    ]
+    assert describe({"name": "Paper A pages 1-2", "cited": False})[1] == ("Cited in the answer", "no")
+
+
+def test_describe_chunk_facts_leaves_out_cited_when_it_was_not_recorded(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.describe_chunk_facts({}) == [("Source", "Source")]
+
+
+def test_show_chunk_details_shows_the_facts_then_the_chunk_text_then_the_media(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.subheader, st.text):
+        shown.reset_mock()
+    ctx = {"name": "Paper A pages 1-2", "cited": True, "raw_text": "Costs $5 and *more*", "media": [{"text": "T"}]}
+
+    with mock.patch.object(module, "render_chunk_media") as render_media:
+        module.show_chunk_details(ctx)
+
+    st.caption.assert_called_once_with("Source: Paper A pages 1-2 · Cited in the answer: yes")
+    assert st.subheader.call_args_list == [mock.call("Chunk text"), mock.call("Images and tables")]
+    # Plain text, so nothing in the PDF text is read as Markdown or maths.
+    st.text.assert_called_once_with("Costs $5 and *more*")
+    render_media.assert_called_once_with([{"text": "T"}])
+
+
+def test_show_chunk_details_says_so_when_a_passage_has_no_chunk_text_or_media(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.text):
+        shown.reset_mock()
+
+    with mock.patch.object(module, "render_chunk_media") as render_media:
+        module.show_chunk_details({"name": "Paper A"})
+
+    st.text.assert_not_called()
+    assert st.caption.call_args_list == [mock.call("Source: Paper A"), mock.call(module.NO_CHUNK_TEXT_NOTE)]
+    render_media.assert_called_once_with([])
+
+
+def test_render_chunk_media_explains_when_a_chunk_has_no_media(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.image, st.markdown):
+        shown.reset_mock()
+
+    module.render_chunk_media([])
+
+    st.caption.assert_called_once_with(module.NO_MEDIA_NOTE)
+    assert "Images and tables" in module.NO_MEDIA_NOTE
+    st.image.assert_not_called()
+    st.markdown.assert_not_called()
+
+
+def test_render_chunk_media_shows_the_image_table_text_and_description(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.image, st.markdown):
+        shown.reset_mock()
+    media = {"kind": "table", "page": 3, "image": "aW1hZ2U=", "url": "", "text": "| a | $5 |", "description": "Prices"}
+
+    module.render_chunk_media([media])
+
+    assert st.markdown.call_args_list == [mock.call("**Table, page 3**"), mock.call(r"| a | \$5 |")]
+    st.image.assert_called_once_with(b"image")
+    st.caption.assert_called_once_with("Prices")
+
+
+def test_render_chunk_media_shows_a_linked_image_without_text_or_description(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.image, st.markdown):
+        shown.reset_mock()
+
+    module.render_chunk_media([{"url": "https://example.org/figure.png"}])
+
+    st.markdown.assert_called_once_with("**Image**")
+    st.image.assert_called_once_with("https://example.org/figure.png")
+    st.caption.assert_not_called()
+
+
+def test_render_chunk_media_shows_table_text_when_there_is_no_image(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.image, st.markdown):
+        shown.reset_mock()
+
+    module.render_chunk_media([{"kind": "table", "text": "| a | b |"}])
+
+    assert st.markdown.call_args_list == [mock.call("**Table**"), mock.call("| a | b |")]
+    st.image.assert_not_called()
+
+
+@pytest.mark.parametrize("media", [{"image": "not base64!"}, {"image": "aW1hZ2U="}])
+def test_render_chunk_media_says_when_an_image_cannot_be_shown(pdf_research_assistant_module, media):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.caption.reset_mock()
+    # Streamlit raises when the stored bytes are not an image it can read.
+    st.image = mock.Mock(side_effect=ValueError("cannot identify image"))
+
+    module.render_chunk_media([media])
+
+    st.caption.assert_called_once_with(module.IMAGE_FAILED_NOTE)
+
+
+@pytest.mark.parametrize(
+    ("media", "label"),
+    [
+        ({"kind": "table", "page": 3}, "Table, page 3"),
+        ({"kind": "drawing"}, "Drawing"),
+        ({"page": 0}, "Image, page 0"),
+        ({"kind": None, "page": None}, "Image"),
+    ],
+)
+def test_describe_media_names_the_kind_and_page_when_known(pdf_research_assistant_module, media, label):
+    assert pdf_research_assistant_module.describe_media(media) == label
 
 
 def test_run_query_subprocess_returns_answer_cost_and_contexts_for_successful_json_payload(pdf_research_assistant_module):
@@ -1116,7 +1272,10 @@ def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_a
 
     pdf_research_assistant_module.render_history([item])
 
-    st.button.assert_called_once_with("Copy answer", key="copy_history_7")
+    assert st.button.call_args_list == [
+        mock.call("Copy answer", key="copy_history_7"),
+        mock.call("Open chunk", key="open_chunk_history_7_0"),
+    ]
     st.subheader.assert_called_once_with("Source")
     st.caption.assert_called_once_with("Cost: $0.2500")
     st.download_button.assert_not_called()
@@ -1176,7 +1335,10 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
     assert result == ("Answer text", 1.5, contexts)
     run_query.assert_called_once_with("Q")
     st.markdown.assert_called_once_with("Answer text")
-    st.button.assert_called_once_with("Copy answer", key="copy_current_1")
+    assert st.button.call_args_list == [
+        mock.call("Copy answer", key="copy_current_1"),
+        mock.call("Open chunk", key="open_chunk_current_1_0"),
+    ]
     st.caption.assert_called_once_with("Cost: $1.5000")
     st.error.assert_not_called()
 

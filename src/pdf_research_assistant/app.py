@@ -29,7 +29,8 @@ REINDEX_SETTINGS_NOTE = (
 REBUILD_BADGE = ":orange-badge[Needs rebuild]"
 SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
-SOURCE_SETTINGS_RESET_LABEL = "Go back to PaperQA defaults"
+SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
+SETTINGS_RESET_LABEL = "Go back to PaperQA defaults"
 NO_CHUNK_TEXT_NOTE = "No chunk text came back with this passage."
 NO_MEDIA_NOTE = (
     "No images or tables are stored with this chunk. They are only kept when the index is built with "
@@ -378,8 +379,8 @@ def init_session_state(app_state: dict) -> None:
 
 
 def setting_widget_key(setting_key: str) -> str:
-    """Return the number box key, which changes each time the source settings go back to the defaults."""
-    return f"setting_{setting_key}_{st.session_state.get('source_settings_round', 0)}"
+    """Return a sidebar control's key, which changes each time the saved settings go back to the defaults."""
+    return f"setting_{setting_key}_{st.session_state.get('answer_settings_round', 0)}"
 
 
 def pick_whole_number(setting: settings_groups.Setting, current: int, high: int) -> int:
@@ -414,13 +415,44 @@ def render_source_settings(settings) -> None:
     # PaperQA cannot cite more passages than it gathered.
     pick_whole_number(sources_setting, sources_setting.read(settings), min(sources_setting.check.high, gathered))
     st.caption(SOURCE_SETTINGS_NOTE)
+
+
+def describe_answer_length(phrase: str) -> str:
+    """Return an answer length as its name and phrase, or just the phrase if it is not one of the choices."""
+    name = settings_groups.get_setting("answer_length").check.name_for(phrase)
+    return f"{name} ({phrase})" if name else phrase
+
+
+def render_answer_length(settings) -> None:
+    """Let the user choose how long the answer is asked to be, saving a new choice at once.
+
+    A length that is not one of the choices, such as a changed PaperQA default, is offered as well, so
+    drawing the control never changes the setting by itself.
+    """
+    setting = settings_groups.get_setting("answer_length")
+    current = setting.read(settings)
+    options = list(setting.check.values)
+    if current not in options:
+        options.append(current)
+    chosen = st.selectbox(
+        setting.label,
+        options,
+        index=options.index(current),
+        format_func=describe_answer_length,
+        help=setting.help,
+        key=setting_widget_key(setting.key),
+    )
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+
+
+def render_settings_reset() -> None:
+    """Offer to remove every saved sidebar setting, once at least one is saved."""
     saved = saved_settings.load()
-    if any(key in saved for key in SOURCE_SETTING_KEYS) and st.button(
-        SOURCE_SETTINGS_RESET_LABEL, key="source_settings_reset"
-    ):
-        saved_settings.forget(SOURCE_SETTING_KEYS)
-        # The browser keeps the old numbers in boxes it has already drawn, so draw new ones.
-        st.session_state.source_settings_round = st.session_state.get("source_settings_round", 0) + 1
+    if any(key in saved for key in SAVED_SETTING_KEYS) and st.button(SETTINGS_RESET_LABEL, key="answer_settings_reset"):
+        saved_settings.forget(SAVED_SETTING_KEYS)
+        # The browser keeps the old values in controls it has already drawn, so draw new ones.
+        st.session_state.answer_settings_round = st.session_state.get("answer_settings_round", 0) + 1
         st.rerun()
 
 
@@ -436,6 +468,8 @@ def render_instant_settings(settings) -> str:
             help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
         )
         render_source_settings(settings)
+        render_answer_length(settings)
+        render_settings_reset()
     render_local_llm_setup()
     return search_mode
 

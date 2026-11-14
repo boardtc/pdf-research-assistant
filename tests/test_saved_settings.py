@@ -173,6 +173,7 @@ def test_a_saved_value_reaches_the_settings_each_answer_records(real_bootstrap, 
     path = tmp_path / "saved_settings.json"
     saved_settings.save_value("evidence_k", 3, path)
     saved_settings.save_value("answer_max_sources", 2, path)
+    saved_settings.save_value("answer_length", "50 to 100 words", path)
 
     with mock.patch.object(saved_settings, "SETTINGS_PATH", path), \
             mock.patch.object(real_bootstrap.local_llm, "load_config", return_value=None):
@@ -181,3 +182,4 @@ def test_a_saved_value_reaches_the_settings_each_answer_records(real_bootstrap, 
     shown = {item["key"]: item["value"] for item in settings_groups.record_answer_settings(settings)["values"]}
     assert shown["evidence_k"] == "3"
     assert shown["answer_max_sources"] == "2"
+    assert shown["answer_length"] == "50 to 100 words"

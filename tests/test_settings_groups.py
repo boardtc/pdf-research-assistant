@@ -215,14 +215,16 @@ def test_describe_recorded_setting_says_where_a_value_came_from_when_known():
 # Settings the user can change from the sidebar.
 
 
-def test_only_the_source_settings_can_be_saved_from_the_sidebar_so_far():
+def test_only_the_source_and_answer_length_settings_can_be_saved_from_the_sidebar_so_far():
     saved = [setting.key for setting in settings_groups.SETTINGS if setting.write is not None]
 
-    assert saved == ["evidence_k", "answer_max_sources"]
+    assert saved == ["evidence_k", "answer_max_sources", "answer_length"]
     assert all(setting.check is not None for setting in settings_groups.SETTINGS if setting.write is not None)
 
 
-@pytest.mark.parametrize(("key", "value"), [("evidence_k", 3), ("answer_max_sources", 2)])
+@pytest.mark.parametrize(
+    ("key", "value"), [("evidence_k", 3), ("answer_max_sources", 2), ("answer_length", "50 to 100 words")]
+)
 def test_writing_a_source_setting_changes_the_paperqa_value_it_reads(key, value, tmp_path):
     settings = _real_settings(tmp_path)
     setting = settings_groups.get_setting(key)
@@ -266,3 +268,43 @@ def test_source_setting_help_mentions_cost_and_speed_in_plain_words():
 
     assert "cost" in gathered and "longer" in gathered
     assert "cost" in sources
+
+
+# Answer length choices.
+
+
+def test_answer_length_offers_named_choices_including_paperqa_s_default(tmp_path):
+    check = settings_groups.get_setting("answer_length").check
+    default = settings_groups.get_setting("answer_length").read(_real_settings(tmp_path))
+
+    assert [name for name, _phrase in check.choices] == ["Short", "Standard", "Long"]
+    assert check.name_for(default) == "Standard"
+    # PaperQA's own fast preset uses the short phrase.
+    assert check.name_for("50 to 100 words") == "Short"
+
+
+def test_one_of_returns_an_offered_value():
+    check = settings_groups.OneOf((("Short", "a few words"), ("Long", "many words")))
+
+    assert check("a few words") == "a few words"
+    assert check.values == ("a few words", "many words")
+
+
+@pytest.mark.parametrize("value", ["some words", "Short", None, 3])
+def test_one_of_rejects_anything_that_was_not_offered(value):
+    with pytest.raises(ValueError, match="Expected one of"):
+        settings_groups.OneOf((("Short", "a few words"),))(value)
+
+
+def test_one_of_names_an_offered_value_and_returns_none_for_any_other():
+    check = settings_groups.OneOf((("Short", "a few words"),))
+
+    assert check.name_for("a few words") == "Short"
+    assert check.name_for("some words") is None
+
+
+def test_answer_length_help_mentions_cost_speed_and_exhaustive_search():
+    help_text = settings_groups.get_setting("answer_length").help
+
+    assert "cost" in help_text and "longer" in help_text
+    assert "Exhaustive search ignores" in help_text

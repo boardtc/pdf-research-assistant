@@ -31,6 +31,27 @@ class WholeNumber:
 
 
 @dataclass(frozen=True)
+class OneOf:
+    """Accepts only one of the offered values. Each value has a short name to show in the sidebar."""
+
+    # (name, value) pairs, in the order they are offered.
+    choices: tuple[tuple[str, object], ...]
+
+    @property
+    def values(self) -> tuple:
+        return tuple(value for _name, value in self.choices)
+
+    def name_for(self, value: object) -> str | None:
+        """Return the name of an offered value, or None if it was not offered."""
+        return next((name for name, offered in self.choices if offered == value), None)
+
+    def __call__(self, value: object) -> object:
+        if self.name_for(value) is None:
+            raise ValueError(f"Expected one of {list(self.values)}, got {value!r}.")
+        return value
+
+
+@dataclass(frozen=True)
 class Setting:
     key: str
     label: str
@@ -81,9 +102,22 @@ INSTANT_SETTINGS = (
     Setting(
         key="answer_length",
         label="Answer length",
-        help="How long the answer is asked to be.",
+        help=(
+            "How long the answer is asked to be. PaperQA puts this phrase into the request that writes the "
+            "answer, so a longer answer costs a little more and takes a little longer to write, but the same "
+            "passages are read either way. Exhaustive search ignores it, because it writes no combined answer."
+        ),
         needs_reindex=False,
         read=lambda settings: settings.answer.answer_length,
+        write=lambda settings, value: setattr(settings.answer, "answer_length", value),
+        # Standard is PaperQA's default; Short is the phrase its fast preset uses.
+        check=OneOf(
+            (
+                ("Short", "50 to 100 words"),
+                ("Standard", "about 200 words, but can be longer"),
+                ("Long", "about 400 words, but can be longer"),
+            )
+        ),
     ),
 )
 

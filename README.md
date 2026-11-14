@@ -85,10 +85,17 @@ Streamlit usually opens the app in your browser automatically and prints the loc
 
 The Streamlit sidebar puts settings in two groups:
 
-- **Applies to your next question**: the search mode and the local LLM setup. Change these whenever you like; the index is not rebuilt.
+- **Applies to your next question**: the search mode, how many sources an answer uses, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
 - **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page reading, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again. They are set in `.env` and in `src/pdf_research_assistant/bootstrap.py`, and the sidebar shows their current values.
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
+
+Two numbers control how much evidence goes into an answer. They are PaperQA's `answer.evidence_k` and `answer.answer_max_sources` settings:
+
+- **Passages gathered** (PaperQA default 10, from 1 to 30): how many passages are pulled from your PDFs and checked against the question. The model reads each one, so more passages cost more and take longer, but can find evidence that fewer would miss.
+- **Most sources in the answer** (PaperQA default 5, from 1 to 15, and never more than the passages gathered): the largest number of those passages the answer may cite. More sources cost a little more, because the model is sent more text to write the answer from.
+
+A changed number is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to PaperQA defaults` removes the saved numbers. Exhaustive search ignores both, because it checks every passage in scope.
 
 The sidebar also shows:
 

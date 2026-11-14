@@ -81,7 +81,11 @@ def bootstrap_module(workspace_tmp_path):
             )
             sys.modules.pop("pdf_research_assistant.bootstrap", None)
             module = importlib.import_module("pdf_research_assistant.bootstrap")
-            yield module
+            # Point the saved sidebar choices at an empty test folder, so a real saved file never leaks in.
+            with mock.patch.object(
+                module.saved_settings, "SETTINGS_PATH", workspace_tmp_path / "saved_settings.json"
+            ):
+                yield module
             sys.modules.pop("pdf_research_assistant.bootstrap", None)
 
 
@@ -577,3 +581,10 @@ def test_build_settings_keeps_the_hosted_rate_limit_for_each_model_role(bootstra
 
     expected = {"rate_limit": {bootstrap_module.MODEL_NAME: "30000 per 1 minute"}}
     assert settings.llm_config == settings.summary_llm_config == settings.agent.agent_llm_config == expected
+
+
+def test_build_settings_applies_the_choices_saved_in_the_sidebar(bootstrap_module):
+    with mock.patch.object(bootstrap_module.saved_settings, "apply") as apply_saved:
+        settings = bootstrap_module.build_settings()
+
+    apply_saved.assert_called_once_with(settings)

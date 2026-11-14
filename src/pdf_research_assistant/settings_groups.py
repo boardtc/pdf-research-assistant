@@ -222,13 +222,42 @@ def describe_setting(setting: Setting, settings: object) -> str:
     return describe_line(setting.label, describe_value(setting.read(settings)))
 
 
-def record_answer_settings(settings: object) -> dict:
+def usable(key: str, value: object) -> bool:
+    """Return whether a value chosen in the app can be put on this setting."""
+    try:
+        setting = get_setting(key)
+    except KeyError:
+        return False
+    if setting.write is None:
+        return False
+    try:
+        setting.check(value)
+    except ValueError:
+        return False
+    return True
+
+
+def apply_usable(settings: object, values: dict) -> list[str]:
+    """Put each usable value onto a PaperQA Settings object, skip the rest, and return the keys applied."""
+    applied = []
+    for key, value in values.items():
+        if usable(key, value):
+            get_setting(key).write(settings, value)
+            applied.append(key)
+    return applied
+
+
+ONE_OFF_SOURCE = "This question only"
+
+
+def record_answer_settings(settings: object, one_off: Iterable[str] = ()) -> dict:
     """Return what to keep with an answer: the index it searched and each instant setting, as plain text.
 
     Only the instant settings are listed, because the index name already stands for every rebuild setting.
-    "source" says where a value came from, such as a one-off change for this question; None means the
-    usual settings.
+    "source" says where a value came from: ONE_OFF_SOURCE for the keys in one_off, which were changed for
+    this question only; None means the usual settings.
     """
+    one_off = set(one_off)
     return {
         "index": settings.get_index_name(),
         "values": [
@@ -236,7 +265,7 @@ def record_answer_settings(settings: object) -> dict:
                 "key": setting.key,
                 "label": setting.label,
                 "value": describe_value(setting.read(settings)),
-                "source": None,
+                "source": ONE_OFF_SOURCE if setting.key in one_off else None,
             }
             for setting in INSTANT_SETTINGS
         ],

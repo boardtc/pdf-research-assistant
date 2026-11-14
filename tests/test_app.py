@@ -108,6 +108,7 @@ def imported_pdf_research_assistant(
     streamlit_module.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: options[index])
     streamlit_module.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
     streamlit_module.number_input = mock.Mock(side_effect=lambda _label, value=None, **_kwargs: value)
+    streamlit_module.toggle = mock.Mock(return_value=False)
     streamlit_module.success = mock.Mock()
     streamlit_module.expander = mock.Mock(return_value=_ContextManagerStub())
     streamlit_module.subheader = mock.Mock()
@@ -723,6 +724,15 @@ def test_run_query_subprocess_returns_answer_cost_contexts_and_settings_for_succ
     assert run_mock.call_args.args[0][-1] == "What is new?"
 
 
+def test_run_query_subprocess_sends_one_off_settings_after_the_question(pdf_research_assistant_module):
+    result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
+
+    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
+        pdf_research_assistant_module.run_query_subprocess("What is new?", {"evidence_k": 3})
+
+    assert run_mock.call_args.args[0][-2:] == ["What is new?", json.dumps({"evidence_k": 3})]
+
+
 def test_run_query_subprocess_returns_no_settings_when_the_payload_has_none(pdf_research_assistant_module):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
@@ -1199,16 +1209,27 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
 
     settings = _fake_settings()
 
-    with mock.patch.object(module, "render_local_llm_setup") as local_llm_panel, \
-            mock.patch.object(module, "render_source_settings") as source_settings,             mock.patch.object(module, "render_answer_length") as answer_length,             mock.patch.object(module, "render_settings_reset") as settings_reset:
-        assert module.render_instant_settings(settings) == "Exhaustive"
+    steps = mock.Mock()
+    steps.one_off.return_value = {"evidence_k": 3}
+    with mock.patch.multiple(
+        module,
+        render_local_llm_setup=steps.local_llm,
+        render_source_settings=steps.sources,
+        render_answer_length=steps.length,
+        render_settings_reset=steps.reset,
+        render_one_off_settings=steps.one_off,
+    ):
+        assert module.render_instant_settings(settings) == ("Exhaustive", {"evidence_k": 3})
 
     st.subheader.assert_called_once_with(module.INSTANT_SETTINGS_TITLE)
     st.caption.assert_called_once_with(module.INSTANT_SETTINGS_NOTE)
-    source_settings.assert_called_once_with(settings)
-    answer_length.assert_called_once_with(settings)
-    settings_reset.assert_called_once_with()
-    local_llm_panel.assert_called_once_with()
+    assert steps.mock_calls == [
+        mock.call.sources(settings),
+        mock.call.length(settings),
+        mock.call.reset(),
+        mock.call.one_off(settings),
+        mock.call.local_llm(),
+    ]
 
 
 def test_render_reindex_settings_marks_every_index_setting_as_needing_a_rebuild(pdf_research_assistant_module):
@@ -1252,7 +1273,7 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
     settings = _fake_settings()
     app_state = {}
     steps = mock.Mock()
-    steps.instant.return_value = "Exhaustive"
+    steps.instant.return_value = ("Exhaustive", {"evidence_k": 3})
 
     with mock.patch.multiple(
         module,
@@ -1260,7 +1281,7 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
         render_reindex_settings=steps.reindex,
         render_usage=steps.usage,
     ):
-        assert module.render_sidebar(app_state, settings) == "Exhaustive"
+        assert module.render_sidebar(app_state, settings) == ("Exhaustive", {"evidence_k": 3})
 
     module.st.header.assert_called_once_with("Settings")
     assert steps.mock_calls == [mock.call.instant(settings), mock.call.reindex(settings), mock.call.usage(app_state)]
@@ -1273,7 +1294,12 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
         panels = [call.args[0] for call in st.expander.call_args_list]
 
         assert titles == [module.INSTANT_SETTINGS_TITLE, module.REINDEX_SETTINGS_TITLE]
-        assert panels == ["Active index details", "Local LLM setup", "Library and index settings"]
+        assert panels == [
+            "Active index details",
+            module.ONE_OFF_TITLE,
+            "Local LLM setup",
+            "Library and index settings",
+        ]
         module.bootstrap.build_settings.assert_called_once_with()
 
 
@@ -1423,10 +1449,10 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
     with mock.patch.object(module, "run_query_subprocess", return_value=returned) as run_query, mock.patch.object(
         module, "render_answer_settings"
     ) as render_answer_settings:
-        result = module.answer_question("Q")
+        result = module.answer_question("Q", {"evidence_k": 3})
 
     assert result == returned
-    run_query.assert_called_once_with("Q")
+    run_query.assert_called_once_with("Q", {"evidence_k": 3})
     render_answer_settings.assert_called_once_with(recorded)
     st.markdown.assert_called_once_with("Answer text")
     assert st.button.call_args_list == [
@@ -1467,9 +1493,11 @@ def test_submit_question_records_the_question_answer_and_cost(pdf_research_assis
     with mock.patch.object(
         module, "answer_question", return_value=("Answer text", 0.5, [], recorded)
     ) as answer_question:
-        module.submit_question("What is new?", saved)
+        module.submit_question("What is new?", saved, {"evidence_k": 3})
 
-    answer_question.assert_called_once_with("What is new?")
+    answer_question.assert_called_once_with("What is new?", {"evidence_k": 3})
+    # The one-off settings are used once: their controls start again, switched off, for the next question.
+    assert st.session_state.one_off_round == 1
     assert st.chat_message.call_args_list == [mock.call("user"), mock.call("assistant")]
     assert st.session_state.history == [
         {"role": "user", "content": "What is new?"},
@@ -1498,10 +1526,12 @@ def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assist
     module = pdf_research_assistant_module
     module.st.chat_input = mock.Mock(return_value="What is new?")
 
-    with mock.patch.object(module, "submit_question") as submit_question:
+    with mock.patch.object(module, "submit_question") as submit_question, mock.patch.object(
+        module, "render_one_off_settings", return_value={"evidence_k": 3}
+    ):
         module.main()
 
-    submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state())
+    submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state(), {"evidence_k": 3})
 
 
 # Sidebar controls for how many passages are gathered and how many sources an answer may use.
@@ -1707,6 +1737,105 @@ def test_page_draws_the_source_settings_from_the_settings_it_built():
 
         assert labels == ["Passages gathered", "Most sources in the answer"]
         assert module.st.number_input.call_args_list[0].kwargs["value"] == 10
+
+
+# Settings for the next question only, which leave the saved settings alone.
+
+
+def draw_one_off_settings(module, *, settings=None, switched_on=True, typed=None, picked=None):
+    """Draw the one-off settings panel, switched on or off, with chosen numbers and answer length."""
+    st = module.st
+    for shown in (st.caption, st.expander):
+        shown.reset_mock()
+    typed = typed or {}
+    st.toggle = mock.Mock(return_value=switched_on)
+    st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: typed.get(label, value))
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with mock.patch.object(module.saved_settings, "save_value") as save_value:
+        chosen = module.render_one_off_settings(settings or _fake_settings())
+    # Nothing chosen here is ever saved as a usual setting.
+    save_value.assert_not_called()
+    return chosen
+
+
+def test_one_off_settings_are_off_until_switched_on_and_draw_no_controls(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert draw_one_off_settings(module, switched_on=False) == {}
+
+    st = module.st
+    st.expander.assert_called_once_with(module.ONE_OFF_TITLE)
+    st.caption.assert_called_once_with(module.ONE_OFF_NOTE)
+    st.toggle.assert_called_once_with(module.ONE_OFF_TOGGLE_LABEL, key="one_off_enabled_0")
+    st.number_input.assert_not_called()
+    st.selectbox.assert_not_called()
+
+
+def test_one_off_note_says_the_values_are_used_once_and_ignored_by_exhaustive_search(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert "next question" in module.ONE_OFF_NOTE
+    assert "usual settings" in module.ONE_OFF_NOTE
+    assert "Exhaustive search ignores" in module.ONE_OFF_NOTE
+
+
+def test_switched_on_one_off_settings_start_at_the_usual_values_and_change_nothing(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, settings=_fake_settings(evidence_k=12, answer_max_sources=4))
+
+    assert chosen == {}
+    gathered = _number_box(module, "Passages gathered")
+    sources = _number_box(module, "Most sources in the answer")
+    assert (gathered.kwargs["value"], gathered.kwargs["max_value"]) == (12, 30)
+    assert (sources.kwargs["value"], sources.kwargs["max_value"]) == (4, 12)
+    # The usual value is part of each key, so a change to the usual settings starts the box again from it.
+    assert gathered.kwargs["key"] == "one_off_evidence_k_0_12"
+    assert sources.kwargs["key"] == "one_off_answer_max_sources_0_4"
+    length = module.st.selectbox.call_args
+    assert length.args == ("Answer length", [SHORT, STANDARD, LONG])
+    assert length.kwargs["index"] == 1
+    assert length.kwargs["key"] == f"one_off_answer_length_0_{STANDARD}"
+    assert length.kwargs["format_func"](SHORT) == "Short (50 to 100 words)"
+
+
+def test_one_off_settings_return_only_the_values_that_differ_from_the_usual_ones(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, typed={"Passages gathered": 20}, picked=SHORT)
+
+    assert chosen == {"evidence_k": 20, "answer_length": SHORT}
+
+
+def test_one_off_sources_can_never_be_more_than_the_one_off_passages(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, typed={"Passages gathered": 3})
+
+    sources = _number_box(module, "Most sources in the answer")
+    assert (sources.kwargs["max_value"], sources.kwargs["value"]) == (3, 3)
+    assert chosen == {"evidence_k": 3, "answer_max_sources": 3}
+
+
+def test_one_off_answer_length_offers_a_usual_length_that_is_not_one_of_the_choices(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, settings=_fake_settings(answer_length="one paragraph"))
+
+    length = module.st.selectbox.call_args
+    assert length.args[1] == [SHORT, STANDARD, LONG, "one paragraph"]
+    assert length.kwargs["index"] == 3
+    assert chosen == {}
+
+
+def test_one_off_controls_get_new_keys_after_a_question_has_used_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.one_off_round = 2
+
+    draw_one_off_settings(module)
+
+    module.st.toggle.assert_called_once_with(module.ONE_OFF_TOGGLE_LABEL, key="one_off_enabled_2")
+    assert _number_box(module, "Passages gathered").kwargs["key"] == "one_off_evidence_k_2_10"
 
 
 # Local LLM setup panel.

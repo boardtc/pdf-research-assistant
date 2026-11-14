@@ -30,23 +30,11 @@ def _write_file(values: dict, path: Path) -> None:
     path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
 
 
-def _usable(key: str, value: object) -> bool:
-    try:
-        setting = settings_groups.get_setting(key)
-    except KeyError:
-        return False
-    if setting.write is None:
-        return False
-    try:
-        setting.check(value)
-    except ValueError:
-        return False
-    return True
-
-
 def load(path: Path | None = None) -> dict:
     """Return the saved values that can still be used, by setting key."""
-    return {key: value for key, value in _read_file(path or SETTINGS_PATH).items() if _usable(key, value)}
+    return {
+        key: value for key, value in _read_file(path or SETTINGS_PATH).items() if settings_groups.usable(key, value)
+    }
 
 
 def save_value(key: str, value: object, path: Path | None = None) -> None:
@@ -74,5 +62,4 @@ def forget(keys: Iterable[str], path: Path | None = None) -> bool:
 
 def apply(settings: object, path: Path | None = None) -> None:
     """Put each saved value onto a PaperQA Settings object."""
-    for key, value in load(path).items():
-        settings_groups.get_setting(key).write(settings, value)
+    settings_groups.apply_usable(settings, load(path))

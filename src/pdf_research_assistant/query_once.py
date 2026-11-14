@@ -4,6 +4,7 @@ Runs a single PaperQA query in a fresh process so the Streamlit app and CLI
 can avoid cross-query asyncio/LiteLLM state issues.
 """
 
+import base64
 import json
 import os
 import sys
@@ -17,16 +18,38 @@ from paperqa.utils import run_or_ensure
 from pdf_research_assistant.bootstrap import build_settings
 
 
-def serialize_contexts(contexts):
-    """Convert PaperQA context objects into JSON-safe dictionaries for the UI."""
+def serialize_media(media) -> dict:
+    """Convert one image or table stored with a chunk into a JSON-safe dictionary for the UI."""
+    info = getattr(media, "info", None) or {}
+    data = getattr(media, "data", None) or b""
+    return {
+        "index": getattr(media, "index", 0),
+        "kind": info.get("type"),
+        "page": info.get("page_num"),
+        "text": getattr(media, "text", None) or "",
+        "description": info.get("enriched_description") or "",
+        "image": base64.b64encode(data).decode("ascii"),
+        "url": getattr(media, "url", None) or "",
+    }
+
+
+def serialize_contexts(contexts, cited_ids=()):
+    """Convert PaperQA context objects into JSON-safe dictionaries for the UI.
+
+    cited_ids holds the ids of the contexts the answer cites.
+    """
     items = []
     for ctx in list(contexts or []):
         text = getattr(ctx, "text", None)
+        context_id = getattr(ctx, "id", "")
         items.append(
             {
+                "id": context_id,
                 "name": getattr(text, "name", "Source") if text else "Source",
+                "cited": context_id in cited_ids,
                 "context": getattr(ctx, "context", "") or "",
                 "raw_text": getattr(text, "text", "") if text else "",
+                "media": [serialize_media(media) for media in (getattr(text, "media", None) or [])],
             }
         )
     return items
@@ -48,7 +71,10 @@ def run_query_payload(question: str) -> dict:
             "ok": True,
             "answer": response.session.formatted_answer,
             "cost": response.session.cost,
-            "contexts": serialize_contexts(getattr(response.session, "contexts", [])),
+            "contexts": serialize_contexts(
+                getattr(response.session, "contexts", []),
+                cited_ids=getattr(response.session, "used_contexts", ()),
+            ),
         }
     except Exception as exc:
         return {

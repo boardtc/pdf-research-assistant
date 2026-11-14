@@ -100,6 +100,7 @@ Each assistant response also includes:
 
 - a `Copy answer` button that copies the full answer text to the clipboard on Windows
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
+- an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 

@@ -55,9 +55,12 @@ def test_serialize_contexts_uses_source_defaults_when_context_has_no_text_object
 
     assert result == [
         {
+            "id": "",
             "name": "Source",
+            "cited": False,
             "context": "Quoted passage",
             "raw_text": "",
+            "media": [],
         }
     ]
 
@@ -100,6 +103,81 @@ def test_serialize_contexts_uses_empty_raw_text_when_context_text_object_is_miss
     assert result[0]["raw_text"] == ""
 
 
+def test_serialize_contexts_records_the_context_id_and_whether_the_answer_cited_it(query_once_module):
+    chunk = SimpleNamespace(name="My Paper", text="Chunk text")
+    contexts = [
+        SimpleNamespace(id="pqac-1", context="Used", text=chunk),
+        SimpleNamespace(id="pqac-2", context="Unused", text=chunk),
+    ]
+
+    result = query_once_module.serialize_contexts(contexts, cited_ids={"pqac-1"})
+
+    assert [(item["id"], item["cited"]) for item in result] == [("pqac-1", True), ("pqac-2", False)]
+
+
+def test_serialize_contexts_includes_the_media_stored_with_the_chunk(query_once_module):
+    media = SimpleNamespace(index=0, data=b"image", url=None, text=None, info={})
+    context = SimpleNamespace(context="Quoted", text=SimpleNamespace(name="My Paper", text="Chunk", media=[media]))
+
+    result = query_once_module.serialize_contexts([context])
+
+    assert result[0]["media"] == [query_once_module.serialize_media(media)]
+
+
+def test_serialize_contexts_gives_an_empty_media_list_when_the_chunk_has_none(query_once_module):
+    with_text = SimpleNamespace(context="Quoted", text=SimpleNamespace(name="My Paper", text="Chunk", media=None))
+    without_text = SimpleNamespace(context="Quoted")
+
+    result = query_once_module.serialize_contexts([with_text, without_text])
+
+    assert [item["media"] for item in result] == [[], []]
+
+
+def test_serialize_media_turns_image_bytes_and_details_into_json_safe_values(query_once_module):
+    media = SimpleNamespace(
+        index=2,
+        data=b"image",
+        url=None,
+        text="| a | b |",
+        info={"type": "table", "page_num": 3, "enriched_description": "A table of prices"},
+    )
+
+    result = query_once_module.serialize_media(media)
+
+    assert result == {
+        "index": 2,
+        "kind": "table",
+        "page": 3,
+        "text": "| a | b |",
+        "description": "A table of prices",
+        "image": "aW1hZ2U=",
+        "url": "",
+    }
+    json.dumps(result)
+
+
+def test_serialize_media_keeps_a_link_when_the_image_is_stored_elsewhere(query_once_module):
+    media = SimpleNamespace(index=0, data=b"", url="https://example.org/figure.png", text=None, info={})
+
+    result = query_once_module.serialize_media(media)
+
+    assert result == {
+        "index": 0,
+        "kind": None,
+        "page": None,
+        "text": "",
+        "description": "",
+        "image": "",
+        "url": "https://example.org/figure.png",
+    }
+
+
+def test_serialize_media_uses_defaults_when_details_are_missing(query_once_module):
+    result = query_once_module.serialize_media(SimpleNamespace())
+
+    assert result == {"index": 0, "kind": None, "page": None, "text": "", "description": "", "image": "", "url": ""}
+
+
 def test_run_query_payload_returns_success_payload_for_completed_query(query_once_module):
     settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
     response = SimpleNamespace(
@@ -107,6 +185,7 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
             formatted_answer="Answer text",
             cost=1.25,
             contexts=["ctx-1"],
+            used_contexts={"pqac-1"},
         )
     )
 
@@ -144,7 +223,19 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
         agent_type="stub-agent",
     )
     query_once_module.run_or_ensure.assert_called_once_with(coro=fake_coro)
-    query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"])
+    query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"], cited_ids={"pqac-1"})
+
+
+def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(query_once_module):
+    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="Answer text", cost=0.0, contexts=["ctx-1"]))
+    query_once_module.build_settings = mock.Mock(return_value=settings)
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+    query_once_module.serialize_contexts = mock.Mock(return_value=[])
+
+    query_once_module.run_query_payload("What is the answer?")
+
+    query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"], cited_ids=())
 
 
 def test_run_query_payload_returns_error_payload_when_query_execution_raises(query_once_module):

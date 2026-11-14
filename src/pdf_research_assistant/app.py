@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -26,6 +27,12 @@ REINDEX_SETTINGS_NOTE = (
     "so they are shown here for reference."
 )
 REBUILD_BADGE = ":orange-badge[Needs rebuild]"
+NO_CHUNK_TEXT_NOTE = "No chunk text came back with this passage."
+NO_MEDIA_NOTE = (
+    "No images or tables are stored with this chunk. They are only kept when the index is built with "
+    "the Images and tables setting turned on."
+)
+IMAGE_FAILED_NOTE = "This image could not be shown."
 LOCAL_LLM_GUIDE = (
     "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
     "1. Install and start [Ollama](https://ollama.com), or another local server such as LM Studio.\n"
@@ -73,17 +80,70 @@ def render_copy_button(text: str, key: str) -> None:
             st.toast("Answer copied")
 
 
-def render_source_passages(contexts):
+def describe_chunk_facts(ctx: dict) -> list[tuple[str, str]]:
+    """Return the labelled facts shown at the top of the chunk view, in order.
+
+    Anything else known about a chunk, such as a retrieval score, is added here as one more pair.
+    """
+    facts = [("Source", ctx.get("name", "Source"))]
+    if "cited" in ctx:
+        facts.append(("Cited in the answer", "yes" if ctx["cited"] else "no"))
+    return facts
+
+
+def describe_media(media: dict) -> str:
+    label = (media.get("kind") or "Image").capitalize()
+    if media.get("page") is not None:
+        label += f", page {media['page']}"
+    return label
+
+
+def render_media_image(media: dict) -> None:
+    """Show a chunk's image from its link or its stored bytes, or say that it could not be shown."""
+    try:
+        st.image(media.get("url") or base64.b64decode(media["image"], validate=True))
+    except Exception:
+        st.caption(IMAGE_FAILED_NOTE)
+
+
+def render_chunk_media(media_items: list[dict]) -> None:
+    if not media_items:
+        st.caption(NO_MEDIA_NOTE)
+        return
+    for media in media_items:
+        st.markdown(f"**{describe_media(media)}**")
+        if media.get("url") or media.get("image"):
+            render_media_image(media)
+        if media.get("text"):
+            st.markdown(escape_dollars(media["text"]))
+        if media.get("description"):
+            st.caption(media["description"])
+
+
+@st.dialog("Chunk details", width="large")
+def show_chunk_details(ctx: dict) -> None:
+    """Show one retrieved chunk as the query returned it: its facts, then its text, then its media."""
+    st.caption(" · ".join(f"{label}: {value}" for label, value in describe_chunk_facts(ctx)))
+    st.subheader("Chunk text")
+    if ctx.get("raw_text"):
+        # Plain text, so nothing in the PDF text is read as Markdown or maths.
+        st.text(ctx["raw_text"])
+    else:
+        st.caption(NO_CHUNK_TEXT_NOTE)
+    st.subheader("Images and tables")
+    render_chunk_media(ctx.get("media") or [])
+
+
+def render_source_passages(contexts, key: str = "passages"):
+    """List each passage's summary with a button that opens the chunk behind it."""
     if not contexts:
         return
     with st.expander("Show source passages"):
-        for ctx in contexts:
+        for position, ctx in enumerate(contexts):
             st.subheader(ctx.get("name", "Source"))
             st.write(ctx.get("context", ""))
-            raw_text = ctx.get("raw_text", "")
-            if raw_text:
-                st.caption("Raw chunk text")
-                st.write(raw_text)
+            if st.button("Open chunk", key=f"open_chunk_{key}_{position}"):
+                show_chunk_details(ctx)
 
 
 def run_query_subprocess(question: str) -> tuple[str, float, list[dict]]:
@@ -399,7 +459,7 @@ def render_history(history: list[dict]) -> None:
             st.markdown(item["content"])
             if item["role"] == "assistant" and "cost" in item:
                 render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
-                render_source_passages(item.get("contexts", []))
+                render_source_passages(item.get("contexts", []), key=f"history_{item.get('id', 0)}")
                 if "report_path" in item:
                     render_exhaustive_report(item["report_path"])
                 st.caption(f"Cost: ${item['cost']:.4f}")
@@ -429,7 +489,7 @@ def answer_question(question: str) -> tuple[str, float, list[dict]]:
             return answer, 0.0, []
         st.markdown(answer)
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
-        render_source_passages(contexts)
+        render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
         st.caption(f"Cost: ${cost:.4f}")
         return answer, cost, contexts
 

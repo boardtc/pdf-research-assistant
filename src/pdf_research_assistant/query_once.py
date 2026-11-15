@@ -51,6 +51,8 @@ def serialize_contexts(contexts, cited_ids=()):
                 "context": getattr(ctx, "context", "") or "",
                 "raw_text": getattr(text, "text", "") if text else "",
                 "media": [serialize_media(media) for media in (getattr(text, "media", None) or [])],
+                # PaperQA's 0-10 relevance rating from the summary step; -1 means it was never set.
+                "score": getattr(ctx, "score", -1),
             }
         )
     return items

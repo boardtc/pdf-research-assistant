@@ -117,7 +117,8 @@ Each assistant response also includes:
 
 - a `Copy answer` button that copies the full answer text to the clipboard on Windows
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
-- an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
+- an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, its relevance score, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
+- a relevance score under each source passage, out of 10. This is PaperQA's `Context.score`: the rating the summary model gave the passage for your question while summarising it, not a search similarity. Scores tend to bunch at 0 or 8 to 9, so use them as a rough guide to which chunk to open. Answers given before scores were kept, and passages PaperQA did not score, show none.
 - a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, and the answer length. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.

@@ -44,6 +44,11 @@ NO_MEDIA_NOTE = (
     "the Images and tables setting turned on."
 )
 IMAGE_FAILED_NOTE = "This image could not be shown."
+SCORE_NOTE = (
+    "Relevance score: the 0 to 10 rating the summary model gave each passage for your question while "
+    "summarising it, not a measure of how closely the search matched. Scores tend to bunch at 0 or "
+    "8 to 9, so treat them as a rough guide."
+)
 ANSWER_SETTINGS_TITLE = "Show settings used"
 LOCAL_LLM_GUIDE = (
     "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
@@ -92,14 +97,28 @@ def render_copy_button(text: str, key: str) -> None:
             st.toast("Answer copied")
 
 
+def describe_score(ctx: dict) -> str | None:
+    """Return a passage's relevance score as text, or None when PaperQA set none.
+
+    PaperQA uses -1 for a score that was never set; answers saved before scores were kept have none.
+    """
+    score = ctx.get("score")
+    if isinstance(score, bool) or not isinstance(score, int) or score < 0:
+        return None
+    return f"{score} out of 10"
+
+
 def describe_chunk_facts(ctx: dict) -> list[tuple[str, str]]:
     """Return the labelled facts shown at the top of the chunk view, in order.
 
-    Anything else known about a chunk, such as a retrieval score, is added here as one more pair.
+    Anything else known about a chunk is added here as one more pair.
     """
     facts = [("Source", ctx.get("name", "Source"))]
     if "cited" in ctx:
         facts.append(("Cited in the answer", "yes" if ctx["cited"] else "no"))
+    score = describe_score(ctx)
+    if score:
+        facts.append(("Relevance score", score))
     return facts
 
 
@@ -136,6 +155,8 @@ def render_chunk_media(media_items: list[dict]) -> None:
 def show_chunk_details(ctx: dict) -> None:
     """Show one retrieved chunk as the query returned it: its facts, then its text, then its media."""
     st.caption(" · ".join(f"{label}: {value}" for label, value in describe_chunk_facts(ctx)))
+    if describe_score(ctx):
+        st.caption(SCORE_NOTE)
     st.subheader("Chunk text")
     if ctx.get("raw_text"):
         # Plain text, so nothing in the PDF text is read as Markdown or maths.
@@ -147,12 +168,17 @@ def show_chunk_details(ctx: dict) -> None:
 
 
 def render_source_passages(contexts, key: str = "passages"):
-    """List each passage's summary with a button that opens the chunk behind it."""
+    """List each passage's summary and relevance score with a button that opens the chunk behind it."""
     if not contexts:
         return
     with st.expander("Show source passages"):
+        if any(describe_score(ctx) for ctx in contexts):
+            st.caption(SCORE_NOTE)
         for position, ctx in enumerate(contexts):
             st.subheader(ctx.get("name", "Source"))
+            score = describe_score(ctx)
+            if score:
+                st.caption(f"Relevance score: {score}")
             st.write(ctx.get("context", ""))
             if st.button("Open chunk", key=f"open_chunk_{key}_{position}"):
                 show_chunk_details(ctx)

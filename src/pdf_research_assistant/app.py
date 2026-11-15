@@ -9,7 +9,14 @@ from pathlib import Path
 
 import streamlit as st
 
-from pdf_research_assistant import bootstrap, exhaustive_client, local_llm, saved_settings, settings_groups
+from pdf_research_assistant import (
+    bootstrap,
+    exhaustive_client,
+    local_llm,
+    rate_profiles,
+    saved_settings,
+    settings_groups,
+)
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
@@ -30,7 +37,12 @@ REBUILD_BADGE = ":orange-badge[Needs rebuild]"
 SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
-SETTINGS_RESET_LABEL = "Go back to PaperQA defaults"
+SETTINGS_RESET_LABEL = "Go back to the default settings"
+NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
+LOCAL_PROFILE_NOTE = (
+    "Answers come from a local model, which has no account limits. Only the number of requests sent at once "
+    "matters: a lower profile sends fewer, which a small local server may handle better."
+)
 ONE_OFF_TITLE = "Change for the next question only"
 ONE_OFF_TOGGLE_LABEL = "Use different settings for my next question"
 ONE_OFF_NOTE = (
@@ -493,6 +505,34 @@ def render_answer_length(settings) -> None:
         saved_settings.save_value(setting.key, chosen)
 
 
+def render_rate_profile(settings) -> None:
+    """Let the user choose how fast PaperQA may send requests, saving a new choice at once.
+
+    Limits that match no profile are offered as they are, so drawing the control never changes them.
+    """
+    setting = settings_groups.get_setting("rate_profile")
+    current = setting.read(settings)
+    options = list(setting.check.values)
+    if current not in options:
+        options.append(current)
+    chosen = st.selectbox(
+        setting.label,
+        options,
+        index=options.index(current),
+        help=setting.help,
+        key=setting_widget_key(setting.key),
+    )
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+        current = chosen
+    if current == rate_profiles.NO_PROFILE:
+        st.caption(NO_PROFILE_NOTE)
+    else:
+        st.caption(rate_profiles.describe_profile(rate_profiles.get_profile(current)))
+    if local_llm.load_config():
+        st.caption(LOCAL_PROFILE_NOTE)
+
+
 def render_settings_reset() -> None:
     """Offer to remove every saved sidebar setting, once at least one is saved."""
     saved = saved_settings.load()
@@ -558,6 +598,7 @@ def render_instant_settings(settings) -> tuple[str, dict]:
         )
         render_source_settings(settings)
         render_answer_length(settings)
+        render_rate_profile(settings)
         render_settings_reset()
         one_off = render_one_off_settings(settings)
     render_local_llm_setup()

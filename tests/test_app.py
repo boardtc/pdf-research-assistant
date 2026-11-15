@@ -8,6 +8,8 @@ from unittest import mock
 
 import pytest
 
+from pdf_research_assistant import rate_profiles
+
 
 class _ContextManagerStub:
     def __enter__(self):
@@ -41,14 +43,19 @@ def _fake_settings(**changes):
         "evidence_k": 10,
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
+        "rate_profile": None,
     } | changes
-    return SimpleNamespace(
+    settings = SimpleNamespace(
         llm=values["llm"],
+        summary_llm=values["llm"],
+        summary_llm_config={},
+        llm_config={},
         embedding=values["embedding"],
         answer=SimpleNamespace(
             evidence_k=values["evidence_k"],
             answer_max_sources=values["answer_max_sources"],
             answer_length=values["answer_length"],
+            max_concurrent_requests=4,
         ),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
@@ -57,9 +64,14 @@ def _fake_settings(**changes):
             index=SimpleNamespace(
                 paper_directory=values["paper_directory"],
                 use_absolute_paper_directory=values["use_absolute_paper_directory"],
-            )
+            ),
+            agent_llm=values["llm"],
+            agent_llm_config={},
         ),
     )
+    if values["rate_profile"]:
+        rate_profiles.apply_profile(settings, values["rate_profile"])
+    return settings
 
 
 def _fake_pdf_reader():
@@ -99,7 +111,7 @@ def imported_pdf_research_assistant(
         # So do the Open chunk buttons drawn beside each source passage.
         if str(key or "").startswith("open_chunk_"):
             return False
-        # And the button that puts the sidebar settings back to PaperQA's defaults.
+        # And the button that puts the sidebar settings back to the defaults.
         if str(key or "").startswith("answer_settings_"):
             return False
         return queued_button_values.pop(0)
@@ -140,7 +152,8 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
-    bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings())
+    # Like the real build_settings, which always applies a rate profile.
+    bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(rate_profile=rate_profiles.DEFAULT_PROFILE))
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
     bootstrap_module.MANIFEST_PATH = Path(r"D:\papers-list\manifest.csv")
     bootstrap_module.PAPER_DIR = Path(r"D:\papers")
@@ -1282,6 +1295,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         render_local_llm_setup=steps.local_llm,
         render_source_settings=steps.sources,
         render_answer_length=steps.length,
+        render_rate_profile=steps.profile,
         render_settings_reset=steps.reset,
         render_one_off_settings=steps.one_off,
     ):
@@ -1292,6 +1306,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     assert steps.mock_calls == [
         mock.call.sources(settings),
         mock.call.length(settings),
+        mock.call.profile(settings),
         mock.call.reset(),
         mock.call.one_off(settings),
         mock.call.local_llm(),
@@ -1700,14 +1715,16 @@ def test_the_defaults_button_is_hidden_until_a_sidebar_setting_is_saved(pdf_rese
     module.st.button.assert_not_called()
 
 
-@pytest.mark.parametrize("saved", [{"evidence_k": 3}, {"answer_length": "50 to 100 words"}])
+@pytest.mark.parametrize(
+    "saved", [{"evidence_k": 3}, {"answer_length": "50 to 100 words"}, {"rate_profile": "Low limits"}]
+)
 def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
     patched = draw_settings_reset(module, saved=saved, clicked={"answer_settings_reset"})
 
     module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
-    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources", "answer_length"])
+    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources", "answer_length", "rate_profile"])
     # The browser keeps a control's old value, so the controls get new keys and start again from the defaults.
     assert module.st.session_state.answer_settings_round == 1
     module.st.rerun.assert_called_once_with()
@@ -1723,6 +1740,8 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     keys = [call.kwargs["key"] for call in module.st.number_input.call_args_list]
     assert keys == ["setting_evidence_k_1", "setting_answer_max_sources_1"]
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_length_1"
+    draw_rate_profile(module)
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_rate_profile_1"
 
 
 def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
@@ -1803,6 +1822,82 @@ def test_page_draws_the_source_settings_from_the_settings_it_built():
 
         assert labels == ["Passages gathered", "Most sources in the answer"]
         assert module.st.number_input.call_args_list[0].kwargs["value"] == 10
+
+
+# Sidebar control for the rate-limit profile.
+
+
+def draw_rate_profile(module, *, settings=None, picked=None, local=None):
+    """Draw the rate profile control, with the user picking a profile or leaving it as it is."""
+    st = module.st
+    st.caption.reset_mock()
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with mock.patch.object(module.saved_settings, "save_value") as save_value, \
+            mock.patch.object(module.local_llm, "load_config", return_value=local):
+        module.render_rate_profile(settings or _fake_settings(rate_profile="High limits"))
+        return save_value
+
+
+PROFILE_NAMES = ["Low limits", "Standard", "High limits"]
+
+
+def test_rate_profile_offers_the_profiles_starting_at_the_one_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_rate_profile(module, settings=_fake_settings(rate_profile="Standard"))
+
+    call = module.st.selectbox.call_args
+    assert call.args == ("Speed limits", PROFILE_NAMES)
+    assert call.kwargs["index"] == 1
+    assert call.kwargs["help"] == module.settings_groups.get_setting("rate_profile").help
+    assert call.kwargs["key"] == "setting_rate_profile_0"
+    save_value.assert_not_called()
+
+
+def test_rate_profile_explains_the_profile_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_rate_profile(module, settings=_fake_settings(rate_profile="Low limits"))
+
+    profile = rate_profiles.get_profile("Low limits")
+    module.st.caption.assert_called_once_with(rate_profiles.describe_profile(profile))
+
+
+def test_picking_another_rate_profile_saves_it_for_the_next_question(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_rate_profile(module, settings=_fake_settings(rate_profile="High limits"), picked="Low limits")
+
+    save_value.assert_called_once_with("rate_profile", "Low limits")
+
+
+def test_limits_that_match_no_profile_are_kept_until_a_profile_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_rate_profile(module, settings=_fake_settings())
+
+    call = module.st.selectbox.call_args
+    assert call.args[1] == PROFILE_NAMES + [rate_profiles.NO_PROFILE]
+    assert call.kwargs["index"] == 3
+    module.st.caption.assert_called_once_with(module.NO_PROFILE_NOTE)
+    save_value.assert_not_called()
+
+
+def test_rate_profile_says_what_it_means_for_a_local_model(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    local = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+
+    draw_rate_profile(module, settings=_fake_settings(rate_profile="Standard"), local=local)
+
+    shown = [call.args[0] for call in module.st.caption.call_args_list]
+    assert shown == [rate_profiles.describe_profile(rate_profiles.get_profile("Standard")), module.LOCAL_PROFILE_NOTE]
+
+
+def test_page_draws_the_rate_profile_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Speed limits")
+
+        assert call.args[1][call.kwargs["index"]] == rate_profiles.DEFAULT_PROFILE
 
 
 # Settings for the next question only, which leave the saved settings alone.

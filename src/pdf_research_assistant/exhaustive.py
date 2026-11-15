@@ -31,7 +31,7 @@ import litellm
 from paperqa import Docs, Settings
 from paperqa.core import llm_parse_json, map_fxn_summary
 
-from pdf_research_assistant import bootstrap
+from pdf_research_assistant import bootstrap, rate_profiles
 from pdf_research_assistant.bootstrap import FAILED_DOCUMENT_ADD_ID
 
 STATUS_LOADABLE = "loadable"
@@ -74,9 +74,6 @@ REPORT_NOTICE = (
 )
 
 EVIDENCE_SUMMARY_LENGTH = "about 200 words"
-MAX_CONCURRENT_REQUESTS = 40
-# Stays under the account's 2,000,000 tokens-a-minute limit, measured on 2026-11-06.
-TOKENS_PER_MINUTE = 1_500_000
 MAX_CONSECUTIVE_FAILED_CHUNKS = 20
 ABANDONED_CHUNK_REASON = "PaperQA abandoned this chunk after a timeout, bad request, or unreadable reply."
 SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_*-]+")
@@ -133,17 +130,21 @@ TokenCounter = Callable[[str], int]
 
 
 def build_exhaustive_settings() -> Settings:
-    """Build settings for scoring every chunk, leaving the index and normal query mode unchanged."""
+    """Build settings for scoring every chunk, leaving the index and normal query mode unchanged.
+
+    The token and request limits come from the chosen rate profile, which also says how many requests
+    to send at once, because exhaustive search makes one request per passage.
+    """
     settings = bootstrap.build_settings()
+    requests_at_once = rate_profiles.exhaustive_requests_at_once(settings)
     settings.summary_llm_config = {
         **settings.summary_llm_config,
-        "rate_limit": {settings.summary_llm: f"{TOKENS_PER_MINUTE} per 1 minute"},
         # Without this, the temperature is not 0 and relevance scores vary between runs.
         "temperature": 0,
     }
     settings.answer.evidence_retrieval = False
     settings.answer.evidence_summary_length = EVIDENCE_SUMMARY_LENGTH
-    settings.answer.max_concurrent_requests = MAX_CONCURRENT_REQUESTS
+    settings.answer.max_concurrent_requests = requests_at_once
     settings.prompts.summary_json_system = STRICT_SUMMARY_SYSTEM_PROMPT
     return settings
 

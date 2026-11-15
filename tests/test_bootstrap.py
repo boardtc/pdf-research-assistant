@@ -51,6 +51,7 @@ def bootstrap_module(workspace_tmp_path):
     paperqa_settings_module.AgentSettings = _CaptureConfig
     paperqa_settings_module.IndexSettings = _CaptureConfig
     paperqa_settings_module.ParsingSettings = _CaptureConfig
+    paperqa_settings_module.AnswerSettings = _CaptureConfig
 
     # Mock dotenv loading so importing bootstrap does not depend on the local shell state.
     dotenv_module.load_dotenv = mock.Mock(name="load_dotenv")
@@ -98,6 +99,7 @@ def test_import_with_existing_manifest_populates_allowed_paths(workspace_tmp_pat
     paperqa_settings_module.AgentSettings = _CaptureConfig
     paperqa_settings_module.IndexSettings = _CaptureConfig
     paperqa_settings_module.ParsingSettings = _CaptureConfig
+    paperqa_settings_module.AnswerSettings = _CaptureConfig
     dotenv_module.load_dotenv = mock.Mock(name="load_dotenv")
 
     paper_dir = workspace_tmp_path / "papers"
@@ -551,7 +553,8 @@ def test_get_model_settings_uses_the_hosted_model_when_no_local_llm_is_saved(boo
         name, config = bootstrap_module.get_model_settings()
 
     assert name == bootstrap_module.MODEL_NAME
-    assert config == {"rate_limit": {bootstrap_module.MODEL_NAME: "30000 per 1 minute"}}
+    # The rate limits come from the chosen profile, which build_settings applies.
+    assert config == {}
 
 
 def test_get_model_settings_uses_the_saved_local_llm(bootstrap_module):
@@ -576,11 +579,37 @@ def test_build_settings_sends_all_three_model_roles_to_the_saved_local_llm(boots
     assert len({id(config) for config in configs}) == 3
 
 
-def test_build_settings_keeps_the_hosted_rate_limit_for_each_model_role(bootstrap_module):
+def test_build_settings_applies_the_default_rate_profile_to_each_model_role(bootstrap_module):
     settings = bootstrap_module.build_settings()
 
-    expected = {"rate_limit": {bootstrap_module.MODEL_NAME: "30000 per 1 minute"}}
+    profile = bootstrap_module.rate_profiles.get_profile(bootstrap_module.rate_profiles.DEFAULT_PROFILE)
+    expected = {
+        "rate_limit": {bootstrap_module.MODEL_NAME: f"{profile.tokens_per_minute} per 1 minute"},
+        "request_limit": {bootstrap_module.MODEL_NAME: f"{profile.requests_per_minute} per 1 minute"},
+    }
     assert settings.llm_config == settings.summary_llm_config == settings.agent.agent_llm_config == expected
+    assert settings.answer.max_concurrent_requests == profile.requests_at_once
+
+
+def test_build_settings_applies_the_saved_rate_profile_over_the_default(bootstrap_module):
+    bootstrap_module.saved_settings.save_value("rate_profile", "Low limits")
+
+    settings = bootstrap_module.build_settings()
+
+    profile = bootstrap_module.rate_profiles.get_profile("Low limits")
+    assert settings.summary_llm_config["rate_limit"] == {
+        bootstrap_module.MODEL_NAME: f"{profile.tokens_per_minute} per 1 minute"
+    }
+    assert settings.answer.max_concurrent_requests == profile.requests_at_once
+
+
+def test_build_settings_applies_the_profile_to_a_saved_local_llm(bootstrap_module):
+    saved = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3.2"}
+    with mock.patch.object(bootstrap_module.local_llm, "load_config", return_value=saved):
+        settings = bootstrap_module.build_settings()
+
+    assert set(settings.summary_llm_config["rate_limit"]) == {"ollama/llama3.2"}
+    assert settings.summary_llm_config["model_list"][0]["model_name"] == "ollama/llama3.2"
 
 
 def test_build_settings_applies_the_choices_saved_in_the_sidebar(bootstrap_module):

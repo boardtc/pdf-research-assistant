@@ -456,14 +456,32 @@ def test_build_exhaustive_settings_scores_at_temperature_zero_without_changing_d
     assert "temperature" not in exhaustive_module.bootstrap.build_settings().summary_llm_config
 
 
-def test_build_exhaustive_settings_raises_speed_limits_without_changing_defaults(exhaustive_module):
+def test_build_exhaustive_settings_sends_more_requests_at_once_without_changing_defaults(exhaustive_module):
     settings = exhaustive_module.build_exhaustive_settings()
     defaults = exhaustive_module.bootstrap.build_settings()
 
-    assert settings.answer.max_concurrent_requests == 40
-    assert settings.summary_llm_config["rate_limit"] == {"gpt-4o-mini": "1500000 per 1 minute"}
-    assert defaults.answer.max_concurrent_requests == 4
-    assert defaults.summary_llm_config["rate_limit"] == {"gpt-4o-mini": "30000 per 1 minute"}
+    profile = exhaustive_module.rate_profiles.get_profile(exhaustive_module.rate_profiles.DEFAULT_PROFILE)
+    assert settings.answer.max_concurrent_requests == profile.exhaustive_requests_at_once
+    assert defaults.answer.max_concurrent_requests == profile.requests_at_once
+
+
+def test_build_exhaustive_settings_keeps_the_rate_profile_limits(exhaustive_module):
+    settings = exhaustive_module.build_exhaustive_settings()
+    defaults = exhaustive_module.bootstrap.build_settings()
+
+    assert settings.summary_llm_config["rate_limit"] == defaults.summary_llm_config["rate_limit"]
+    assert settings.summary_llm_config["request_limit"] == defaults.summary_llm_config["request_limit"]
+
+
+def test_build_exhaustive_settings_follows_the_saved_rate_profile(exhaustive_module, workspace_tmp_path):
+    saved_settings = exhaustive_module.bootstrap.saved_settings
+    with mock.patch.object(saved_settings, "SETTINGS_PATH", workspace_tmp_path / "saved_settings.json"):
+        saved_settings.save_value("rate_profile", "Low limits")
+        settings = exhaustive_module.build_exhaustive_settings()
+
+    profile = exhaustive_module.rate_profiles.get_profile("Low limits")
+    assert settings.answer.max_concurrent_requests == profile.exhaustive_requests_at_once
+    assert settings.summary_llm_config["rate_limit"] == {"gpt-4o-mini": f"{profile.tokens_per_minute} per 1 minute"}
 
 
 def test_build_exhaustive_settings_processes_all_chunks_with_longer_summaries(exhaustive_module):

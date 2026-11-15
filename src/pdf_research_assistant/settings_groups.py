@@ -14,6 +14,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from pdf_research_assistant import rate_profiles
+
 
 @dataclass(frozen=True)
 class WholeNumber:
@@ -118,6 +120,21 @@ INSTANT_SETTINGS = (
                 ("Long", "about 400 words, but can be longer"),
             )
         ),
+    ),
+    Setting(
+        key="rate_profile",
+        label="Speed limits",
+        help=(
+            "How fast PaperQA may send requests to OpenAI. Pick the profile that fits your account's limits, "
+            "which you can see at platform.openai.com/settings/organization/limits. A profile above your limits "
+            "makes OpenAI turn requests away, which slows things down; one below them makes long runs, such as "
+            "exhaustive search, much slower than they need to be. It does not change the cost of a question. "
+            "With a local model there is no account limit, so only the number of requests sent at once matters."
+        ),
+        needs_reindex=False,
+        read=rate_profiles.read_profile_name,
+        write=rate_profiles.apply_profile,
+        check=OneOf(tuple((profile.name, profile.name) for profile in rate_profiles.PROFILES)),
     ),
 )
 

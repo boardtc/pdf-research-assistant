@@ -90,6 +90,8 @@ The Streamlit sidebar puts settings in two groups:
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
 
+If you change one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings. Changing a setting in the other group never raises it.
+
 Two numbers control how much evidence goes into an answer. They are PaperQA's `answer.evidence_k` and `answer.answer_max_sources` settings:
 
 - **Passages gathered** (PaperQA default 10, from 1 to 30): how many passages are pulled from your PDFs and checked against the question. The model reads each one, so more passages cost more and take longer, but can find evidence that fewer would miss.

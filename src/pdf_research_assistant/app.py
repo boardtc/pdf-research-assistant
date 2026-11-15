@@ -13,6 +13,7 @@ from pdf_research_assistant import (
     bootstrap,
     estimate,
     exhaustive_client,
+    index_record,
     local_llm,
     rate_profiles,
     saved_settings,
@@ -35,6 +36,10 @@ REINDEX_SETTINGS_NOTE = (
     "so they are shown here for reference."
 )
 REBUILD_BADGE = ":orange-badge[Needs rebuild]"
+INDEX_CHANGES_NOTE = (
+    "To keep using that index, put these settings back as they were. Otherwise the app has to index every PDF "
+    "again with the new settings, which can take a long time and may cost money for embeddings."
+)
 SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
@@ -440,6 +445,26 @@ def describe_active_index(
     }
 
 
+def describe_index_changes(changes: dict) -> str:
+    """Return the warning for library and index settings that changed since the last index was built."""
+    parts = [
+        "**Your library and index settings no longer match the index.** They have changed since the index "
+        f"`{changes['index']}` was built, so the app is now looking for an index built with the new settings, "
+        "and there is none yet."
+    ]
+    if changes["settings"]:
+        parts.append(
+            "\n".join(f"- {item['label']}: was `{item['was']}`, now `{item['now']}`" for item in changes["settings"])
+        )
+    parts.append(INDEX_CHANGES_NOTE)
+    return "\n\n".join(parts)
+
+
+def render_index_changes(changes: dict | None) -> None:
+    if changes:
+        st.warning(describe_index_changes(changes))
+
+
 def render_active_index(details: dict[str, str | None]) -> None:
     st.caption(f"Active index: `{details['name']}` · Paper list: {details['paper_list']}")
     with st.expander("Active index details"):
@@ -646,8 +671,12 @@ def render_instant_settings(settings) -> tuple[str, dict]:
     return search_mode, one_off
 
 
-def render_reindex_settings(settings) -> None:
-    """Show the current value of each setting that cannot change without rebuilding the index."""
+def render_reindex_settings(settings, index_changes: dict | None = None) -> None:
+    """Show the current value of each setting that cannot change without rebuilding the index.
+
+    index_changes comes from index_record.find_changes; each changed setting also says what it was.
+    """
+    changed = {item["key"]: item["was"] for item in (index_changes or {}).get("settings", [])}
     with st.sidebar:
         st.subheader(REINDEX_SETTINGS_TITLE)
         st.caption(REINDEX_SETTINGS_NOTE)
@@ -655,6 +684,8 @@ def render_reindex_settings(settings) -> None:
             for setting in settings_groups.REINDEX_SETTINGS:
                 st.markdown(f"{settings_groups.describe_setting(setting, settings)} {REBUILD_BADGE}")
                 st.caption(setting.help)
+                if setting.key in changed:
+                    st.caption(f"Changed. The index `{index_changes['index']}` was built with `{changed[setting.key]}`.")
 
 
 def render_usage(app_state: dict) -> None:
@@ -670,12 +701,12 @@ def render_usage(app_state: dict) -> None:
             st.rerun()
 
 
-def render_sidebar(app_state: dict, settings) -> tuple[str, dict]:
+def render_sidebar(app_state: dict, settings, index_changes: dict | None = None) -> tuple[str, dict]:
     """Show the sidebar, with settings in two groups; return the search mode and any one-off changes."""
     with st.sidebar:
         st.header("Settings")
     search_mode, one_off = render_instant_settings(settings)
-    render_reindex_settings(settings)
+    render_reindex_settings(settings, index_changes)
     render_usage(app_state)
     return search_mode, one_off
 
@@ -829,6 +860,14 @@ def main() -> None:
     settings = bootstrap.build_settings()
     active_index_dir = bootstrap.get_active_index_dir(settings)
     indexed_count = bootstrap.get_indexed_doc_count(index_dir=active_index_dir)
+    # An index holding PDFs was built with the settings in use, so it becomes the one to compare against.
+    # An empty one may mean a library or index setting changed since the last index was built.
+    if indexed_count:
+        index_record.remember(settings, active_index_dir)
+        index_changes = None
+    else:
+        index_changes = index_record.find_changes(settings, active_index_dir)
+    render_index_changes(index_changes)
     render_index_status(select_index_status(indexed_count, manifest_count))
     render_active_index(
         describe_active_index(active_index_dir, bootstrap.MANIFEST_PATH, manifest_count, bootstrap.PAPER_DIR)
@@ -837,7 +876,7 @@ def main() -> None:
 
     app_state = get_persistent_app_state()
     init_session_state(app_state)
-    search_mode, one_off = render_sidebar(app_state, settings)
+    search_mode, one_off = render_sidebar(app_state, settings, index_changes)
     render_history(st.session_state.history)
 
     exhaustive_pending = st.session_state.get("exhaustive_pending")

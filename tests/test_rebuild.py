@@ -54,7 +54,9 @@ def rebuild_index_module():
     ):
         sys.modules.pop("pdf_research_assistant.rebuild", None)
         module = importlib.import_module("pdf_research_assistant.rebuild")
-        yield module
+        # Never write a record of the index during tests.
+        with mock.patch.object(module, "index_record"):
+            yield module
         sys.modules.pop("pdf_research_assistant.rebuild", None)
 
 
@@ -204,6 +206,26 @@ def test_main_prints_exception_messages_when_directory_rebuild_raises_exception_
         mock.call("Indexed after run: 3"),
         mock.call("Failed PDFs: 0"),
     ]
+
+
+def test_main_records_the_rebuilt_index_so_the_app_stops_warning_about_changed_settings(rebuild_index_module):
+    rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[0, 2])
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    rebuild_index_module.index_record.remember.assert_called_once_with(
+        rebuild_index_module.settings, Path("index-root") / "active-index"
+    )
+
+
+def test_main_records_nothing_when_the_rebuild_left_the_index_empty(rebuild_index_module):
+    rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[0, 0])
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    rebuild_index_module.index_record.remember.assert_not_called()
 
 
 def test_summarize_exception_messages_returns_single_message_for_non_group_exception(rebuild_index_module):

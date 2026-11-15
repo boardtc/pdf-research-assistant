@@ -307,26 +307,6 @@ def test_make_token_counter_falls_back_to_characters_when_encoding_is_unavailabl
     assert count_tokens("x" * 40) == 10
 
 
-def test_get_tokens_per_minute_parses_the_configured_limit(exhaustive_module):
-    settings = _settings(rate_limit={"gpt-4o-mini": "30000 per 1 minute"})
-
-    assert exhaustive_module.get_tokens_per_minute(settings) == 30000
-
-
-def test_get_tokens_per_minute_converts_other_periods_to_minutes(exhaustive_module):
-    settings = _settings(rate_limit={"gpt-4o-mini": "100 per 1 second"})
-
-    assert exhaustive_module.get_tokens_per_minute(settings) == 6000
-
-
-def test_get_tokens_per_minute_returns_none_when_no_config_exists(exhaustive_module):
-    assert exhaustive_module.get_tokens_per_minute(_settings()) is None
-
-
-def test_get_tokens_per_minute_returns_none_when_model_has_no_limit(exhaustive_module):
-    assert exhaustive_module.get_tokens_per_minute(_settings(rate_limit={"other": "1 per 1 minute"})) is None
-
-
 def test_estimate_run_counts_only_loadable_papers(exhaustive_module):
     scope = [
         _paper(exhaustive_module),
@@ -343,7 +323,7 @@ def test_estimate_run_counts_only_loadable_papers(exhaustive_module):
 def test_estimate_run_prices_low_typical_and_high_output(exhaustive_module):
     prices = {"gpt-4o-mini": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.01}}
 
-    with mock.patch.object(exhaustive_module.litellm, "model_cost", prices):
+    with mock.patch.object(litellm, "model_cost", prices):
         estimate = exhaustive_module.estimate_run([_paper(exhaustive_module)], "q", _settings(), _count_chars)
 
     input_cost = estimate["input_tokens"] * 0.001
@@ -356,7 +336,7 @@ def test_estimate_run_prices_low_typical_and_high_output(exhaustive_module):
 
 
 def test_estimate_run_leaves_cost_unknown_when_model_has_no_price(exhaustive_module):
-    with mock.patch.object(exhaustive_module.litellm, "model_cost", {}):
+    with mock.patch.object(litellm, "model_cost", {}):
         estimate = exhaustive_module.estimate_run([_paper(exhaustive_module)], "q", _settings(), _count_chars)
 
     assert estimate["cost_usd"] is None

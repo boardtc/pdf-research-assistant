@@ -121,6 +121,15 @@ A changed setting is saved straight away in `saved_settings.json` in the project
 
 To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source and length controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
 
+Just above the question box, `Next question:` gives a rough sense of what your next question will cost and how long it will take: `Fast`, `Balanced`, `Slower` or `Higher cost`, followed by a rough cost and time such as "less than 1 cent, under half a minute". It is worked out from the settings the question will run with, including any values changed for the next question only, and changes as soon as you change a setting:
+
+- how many passages are gathered: each one is read by the model, a batch at a time
+- the most sources in the answer and the answer length: these set how much the answer model reads and writes
+- the answer model: its price per token comes from LiteLLM's price list
+- the speed limits profile: how many passages are read at once, and whether the token limit holds the question back
+
+It also counts a few short calls PaperQA's agent makes to plan the search. It is a rough guide, not a quote: the real figures depend on the question and on how many searches PaperQA decides to make. With PaperQA's defaults and `gpt-4o-mini` it shows `Balanced`. With a local model there is no cost figure, and the time, which is based on OpenAI's speed, may be well short. In Exhaustive mode it shows `Higher cost`, and the run's own estimate appears after you ask.
+
 The sidebar also shows:
 
 - query count for the current session

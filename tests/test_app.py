@@ -55,8 +55,10 @@ def _fake_settings(**changes):
             evidence_k=values["evidence_k"],
             answer_max_sources=values["answer_max_sources"],
             answer_length=values["answer_length"],
+            evidence_summary_length="about 100 words",
             max_concurrent_requests=4,
         ),
+        prompts=SimpleNamespace(summary_json_system="system", summary_json="summary", qa="answer", system="system"),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
         ),
@@ -1380,8 +1382,11 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
             module.ONE_OFF_TITLE,
             "Local LLM setup",
             "Library and index settings",
+            # Drawn under the chat, after the sidebar.
+            module.ESTIMATE_DETAILS_TITLE,
         ]
-        module.bootstrap.build_settings.assert_called_once_with()
+        # Once for the page, and once more for the estimate, after the sidebar may have saved a change.
+        assert module.bootstrap.build_settings.call_args_list == [mock.call(), mock.call()]
 
 
 def test_render_history_shows_a_user_message_without_answer_actions(pdf_research_assistant_module):
@@ -1613,6 +1618,99 @@ def test_main_sends_a_query_mode_question_to_submit_question(pdf_research_assist
         module.main()
 
     submit_question.assert_called_once_with("What is new?", module.get_persistent_app_state(), {"evidence_k": 3})
+
+
+# The rough cost and speed shown before a question is sent.
+
+
+def draw_estimate(module, *, search_mode="Query", one_off=None, settings=None, local=None):
+    """Draw the estimate from freshly built settings, as the page does after the sidebar."""
+    st = module.st
+    for shown in (st.markdown, st.caption, st.expander):
+        shown.reset_mock()
+    module.bootstrap.build_settings = mock.Mock(return_value=settings or _fake_settings())
+    with mock.patch.object(module.local_llm, "load_config", return_value=local):
+        module.render_estimate(search_mode, one_off or {})
+    return st.markdown.call_args.args[0]
+
+
+def test_estimate_shows_a_label_with_a_rough_cost_and_time(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    line = draw_estimate(module)
+
+    assert line.startswith(f"{module.ESTIMATE_LABEL} :")
+    assert "roughly less than 1 cent" in line
+    module.st.expander.assert_called_once_with(module.ESTIMATE_DETAILS_TITLE)
+    shown = [call.args[0] for call in module.st.caption.call_args_list]
+    assert shown[0].startswith("PaperQA reads 10 passages")
+    assert shown[-1] == module.estimate.ROUGH_NOTE
+
+
+def test_estimate_uses_the_settings_built_after_the_sidebar(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    line = draw_estimate(module, settings=_fake_settings(evidence_k=30, answer_max_sources=15))
+
+    module.bootstrap.build_settings.assert_called_once_with()
+    assert module.estimate.badge(module.estimate.HIGHER_COST) in line
+
+
+def test_estimate_puts_one_off_values_on_top_of_the_usual_settings(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    usual = draw_estimate(module)
+    one_off = draw_estimate(module, one_off={"evidence_k": 30, "answer_max_sources": 15})
+
+    assert module.estimate.badge(module.estimate.HIGHER_COST) not in usual
+    assert module.estimate.badge(module.estimate.HIGHER_COST) in one_off
+
+
+def test_estimate_says_a_local_model_has_no_cost(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    line = draw_estimate(module, local={"model": "llama3.2"})
+
+    assert "no cost for the answer model" in line
+    assert module.estimate.LOCAL_COST_NOTE in [call.args[0] for call in module.st.caption.call_args_list]
+
+
+def test_estimate_for_exhaustive_search_points_to_its_own_estimate(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    line = draw_estimate(module, search_mode=module.EXHAUSTIVE_MODE)
+
+    assert line == f"{module.ESTIMATE_LABEL} {module.estimate.badge(module.estimate.HIGHER_COST)}"
+    module.st.caption.assert_called_once_with(module.EXHAUSTIVE_ESTIMATE_NOTE)
+    module.bootstrap.build_settings.assert_not_called()
+
+
+def test_exhaustive_estimate_note_says_it_asks_before_starting(pdf_research_assistant_module):
+    assert "confirm" in pdf_research_assistant_module.EXHAUSTIVE_ESTIMATE_NOTE
+
+
+def test_main_shows_the_estimate_with_the_search_mode_and_one_off_values(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module, "render_estimate") as render_estimate, mock.patch.object(
+        module, "render_one_off_settings", return_value={"evidence_k": 3}
+    ):
+        module.main()
+
+    render_estimate.assert_called_once_with("Query", {"evidence_k": 3})
+
+
+@pytest.mark.parametrize("state", ["exhaustive_pending", "exhaustive_run"])
+def test_main_hides_the_estimate_while_an_exhaustive_search_is_waiting_or_running(pdf_research_assistant_module, state):
+    module = pdf_research_assistant_module
+    module.st.session_state[state] = {"question": "q"}
+
+    with mock.patch.object(module, "render_estimate") as render_estimate, mock.patch.multiple(
+        module, render_exhaustive_pending=mock.DEFAULT, render_exhaustive_run=mock.DEFAULT
+    ):
+        module.main()
+
+    render_estimate.assert_not_called()
 
 
 # Sidebar controls for how many passages are gathered and how many sources an answer may use.

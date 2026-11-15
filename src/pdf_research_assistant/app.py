@@ -11,6 +11,7 @@ import streamlit as st
 
 from pdf_research_assistant import (
     bootstrap,
+    estimate,
     exhaustive_client,
     local_llm,
     rate_profiles,
@@ -62,6 +63,12 @@ SCORE_NOTE = (
     "8 to 9, so treat them as a rough guide."
 )
 ANSWER_SETTINGS_TITLE = "Show settings used"
+ESTIMATE_LABEL = "**Next question:**"
+ESTIMATE_DETAILS_TITLE = "What this estimate is based on"
+EXHAUSTIVE_ESTIMATE_NOTE = (
+    "Exhaustive search reads every passage in scope, so it costs and takes far more than a question. "
+    "After you ask, it shows its own estimate and waits for you to confirm."
+)
 LOCAL_LLM_GUIDE = (
     "Use a model running on your own computer to write answers, instead of OpenAI.\n\n"
     "1. Install and start [Ollama](https://ollama.com), or another local server such as LM Studio.\n"
@@ -696,6 +703,25 @@ def render_history(history: list[dict]) -> None:
                 st.caption(f"Cost: ${item['cost']:.4f}")
 
 
+def render_estimate(search_mode: str, one_off: dict) -> None:
+    """Show a rough sense of what the next question will cost and how long it will take.
+
+    The settings are built again here, after the sidebar may have saved a change, with any one-off values
+    on top, just as the query process will build them, so the estimate follows every control at once.
+    """
+    if search_mode == EXHAUSTIVE_MODE:
+        st.markdown(f"{ESTIMATE_LABEL} {estimate.badge(estimate.HIGHER_COST)}")
+        st.caption(EXHAUSTIVE_ESTIMATE_NOTE)
+        return
+    settings = bootstrap.build_settings()
+    settings_groups.apply_usable(settings, one_off)
+    result = estimate.estimate_question(settings, local=bool(local_llm.load_config()))
+    st.markdown(f"{ESTIMATE_LABEL} {estimate.badge(estimate.label_for(result))} {estimate.summarize(result)}")
+    with st.expander(ESTIMATE_DETAILS_TITLE):
+        for line in estimate.describe_estimate(result):
+            st.caption(line)
+
+
 def describe_query_failure(exc: BaseException) -> str:
     return (
         "Indexing/search failed.\n\n"
@@ -778,6 +804,8 @@ def main() -> None:
 
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
+    if not (exhaustive_pending or exhaustive_run):
+        render_estimate(search_mode, one_off)
     question = st.chat_input("Ask a question about your PDFs...", disabled=bool(exhaustive_pending or exhaustive_run))
 
     if exhaustive_run:

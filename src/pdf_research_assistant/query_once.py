@@ -34,14 +34,24 @@ def serialize_media(media) -> dict:
     }
 
 
-def serialize_contexts(contexts, cited_ids=()):
+def passage_key(text) -> tuple:
+    """Identify a chunk by its name and the document it came from."""
+    return getattr(text, "name", None), getattr(getattr(text, "doc", None), "dockey", None)
+
+
+def serialize_contexts(contexts, cited_ids=(), passages=()):
     """Convert PaperQA context objects into JSON-safe dictionaries for the UI.
 
-    cited_ids holds the ids of the contexts the answer cites.
+    cited_ids holds the ids of the contexts the answer cites. passages holds the full chunks the
+    question read (the Docs object's texts). PaperQA's answer empties each context's chunk text and
+    drops its images and tables, so each chunk is looked up again there by name and document.
     """
+    full_chunks = {passage_key(passage): passage for passage in passages}
     items = []
     for ctx in list(contexts or []):
         text = getattr(ctx, "text", None)
+        if text:
+            text = full_chunks.get(passage_key(text), text)
         context_id = getattr(ctx, "id", "")
         items.append(
             {
@@ -70,9 +80,11 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
     try:
         settings = build_settings()
         applied = settings_groups.apply_usable(settings, one_off or {})
+        # PaperQA adds every chunk the question reads to this Docs object, text, images and tables included.
+        docs = Docs()
         response = run_or_ensure(
             coro=run_agent(
-                Docs(),
+                docs,
                 question,
                 settings,
                 agent_type=settings.agent.agent_type,
@@ -85,6 +97,7 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
             "contexts": serialize_contexts(
                 getattr(response.session, "contexts", []),
                 cited_ids=getattr(response.session, "used_contexts", ()),
+                passages=docs.texts,
             ),
             "settings": settings_groups.record_answer_settings(settings, one_off=applied),
         }

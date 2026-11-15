@@ -7,7 +7,8 @@ from unittest import mock
 
 import pytest
 # Imported before the fixture swaps in a fake paperqa, so tests can build real PaperQA contexts.
-from paperqa.types import Context, Doc, Text
+from paperqa.docs import Docs
+from paperqa.types import Context, Doc, ParsedMedia, PQASession, Text
 
 
 @pytest.fixture
@@ -19,7 +20,8 @@ def query_once_module():
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
 
     # Mock the PaperQA Docs constructor so importing query_once never needs the real dependency.
-    paperqa_module.Docs = mock.Mock(name="Docs")
+    # Like a real Docs, it starts with no chunks.
+    paperqa_module.Docs = mock.Mock(name="Docs", side_effect=lambda: SimpleNamespace(texts=[]))
 
     # Mock PaperQA's async agent entry point so each test can control the query behavior explicitly.
     agents_main_module.run_agent = mock.Mock(name="run_agent")
@@ -153,6 +155,64 @@ def test_serialize_contexts_gives_an_empty_media_list_when_the_chunk_has_none(qu
     assert [item["media"] for item in result] == [[], []]
 
 
+def stripped_session_and_docs(*chunks):
+    """Build real PaperQA passages and contexts, then empty the contexts the way AnswerResponse does."""
+    docs = Docs()
+    docs.texts = list(chunks)
+    session = PQASession(
+        question="Q",
+        contexts=[Context(id=f"pqac-{n}", context=f"Summary {n}", text=chunk) for n, chunk in enumerate(chunks)],
+    )
+    session.filter_content_for_user()
+    return session, docs
+
+
+def test_serialize_contexts_takes_chunk_text_and_media_from_the_passages_the_question_read(query_once_module):
+    figure = ParsedMedia(index=1, data=b"png", info={"type": "picture", "page_num": 4})
+    chunk = Text(
+        text="Full chunk text", name="Paper pages 3-4", media=[figure], doc=Doc(docname="d", citation="c", dockey="k")
+    )
+    session, docs = stripped_session_and_docs(chunk)
+    assert session.contexts[0].text.text == ""
+    assert not session.contexts[0].text.media
+
+    result = query_once_module.serialize_contexts(session.contexts, passages=docs.texts)
+
+    assert result[0]["raw_text"] == "Full chunk text"
+    assert result[0]["media"] == [query_once_module.serialize_media(figure)]
+    assert result[0]["context"] == "Summary 0"
+
+
+def test_serialize_contexts_matches_passages_by_document_as_well_as_name(query_once_module):
+    wanted = Text(text="Wanted", name="Paper pages 1-2", doc=Doc(docname="d", citation="c", dockey="k1"))
+    same_name = Text(text="Other paper", name="Paper pages 1-2", doc=Doc(docname="d", citation="c", dockey="k2"))
+    session, _ = stripped_session_and_docs(wanted)
+
+    result = query_once_module.serialize_contexts(session.contexts, passages=[same_name, wanted])
+
+    assert result[0]["raw_text"] == "Wanted"
+
+
+def test_serialize_contexts_keeps_the_context_text_when_no_passage_matches(query_once_module):
+    chunk = Text(text="Chunk", name="Paper pages 1-2", doc=Doc(docname="d", citation="c", dockey="k"))
+    session, _ = stripped_session_and_docs(chunk)
+    elsewhere = Text(text="Other", name="Paper pages 1-2", doc=Doc(docname="d", citation="c", dockey="other"))
+
+    result = query_once_module.serialize_contexts(session.contexts, passages=[elsewhere])
+
+    assert result[0]["raw_text"] == ""
+    assert result[0]["media"] == []
+    assert result[0]["name"] == "Paper pages 1-2"
+
+
+def test_serialize_contexts_uses_source_defaults_when_context_has_no_text_even_with_passages(query_once_module):
+    passage = Text(text="Chunk", name="Source", doc=Doc(docname="d", citation="c", dockey="k"))
+
+    result = query_once_module.serialize_contexts([SimpleNamespace(context="Quoted")], passages=[passage])
+
+    assert (result[0]["name"], result[0]["raw_text"], result[0]["media"]) == ("Source", "", [])
+
+
 def test_serialize_media_turns_image_bytes_and_details_into_json_safe_values(query_once_module):
     media = SimpleNamespace(
         index=2,
@@ -213,7 +273,8 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
     query_once_module.build_settings = mock.Mock(return_value=settings)
 
     # Mock Docs creation so the function can pass a predictable docs object into run_agent.
-    docs_instance = object()
+    # PaperQA fills it with the passages the question read.
+    docs_instance = SimpleNamespace(texts=["text-1"])
     query_once_module.Docs = mock.Mock(return_value=docs_instance)
 
     # Mock run_agent so we can verify the exact coroutine inputs without invoking PaperQA.
@@ -252,7 +313,9 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
         agent_type="stub-agent",
     )
     query_once_module.run_or_ensure.assert_called_once_with(coro=fake_coro)
-    query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"], cited_ids={"pqac-1"})
+    query_once_module.serialize_contexts.assert_called_once_with(
+        ["ctx-1"], cited_ids={"pqac-1"}, passages=["text-1"]
+    )
 
 
 def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(query_once_module):
@@ -265,7 +328,9 @@ def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(
     with mock.patch.object(query_once_module.settings_groups, "record_answer_settings"):
         query_once_module.run_query_payload("What is the answer?")
 
-    query_once_module.serialize_contexts.assert_called_once_with(["ctx-1"], cited_ids=())
+    query_once_module.serialize_contexts.assert_called_once_with(
+        ["ctx-1"], cited_ids=(), passages=[]
+    )
 
 
 def test_run_query_payload_returns_error_payload_when_query_execution_raises(query_once_module):

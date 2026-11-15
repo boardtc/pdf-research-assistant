@@ -593,6 +593,72 @@ def test_describe_chunk_facts_leaves_out_cited_when_it_was_not_recorded(pdf_rese
     assert pdf_research_assistant_module.describe_chunk_facts({}) == [("Source", "Source")]
 
 
+def test_describe_chunk_facts_adds_the_relevance_score_when_paperqa_set_one(pdf_research_assistant_module):
+    facts = pdf_research_assistant_module.describe_chunk_facts({"name": "Paper A", "cited": True, "score": 8})
+
+    assert facts[-1] == ("Relevance score", "8 out of 10")
+
+
+def test_describe_chunk_facts_leaves_out_the_score_when_none_was_set(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.describe_chunk_facts({"name": "Paper A", "score": -1}) == [
+        ("Source", "Paper A")
+    ]
+
+
+def test_describe_score_shows_a_score_of_zero(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.describe_score({"score": 0}) == "0 out of 10"
+
+
+@pytest.mark.parametrize("ctx", [{}, {"score": -1}, {"score": None}, {"score": "8"}, {"score": True}])
+def test_describe_score_gives_none_when_there_is_no_usable_score(pdf_research_assistant_module, ctx):
+    assert pdf_research_assistant_module.describe_score(ctx) is None
+
+
+def test_render_source_passages_shows_each_passage_score_under_its_source(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    module.st.caption.reset_mock()
+    contexts = [{"name": "Paper A", "context": "First", "score": 9}, {"name": "Paper B", "context": "Second"}]
+
+    module.render_source_passages(contexts)
+
+    assert module.st.caption.call_args_list == [
+        mock.call(module.SCORE_NOTE),
+        mock.call("Relevance score: 9 out of 10"),
+    ]
+
+
+def test_render_source_passages_leaves_out_the_score_note_when_no_passage_has_a_score(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    module.st.caption.reset_mock()
+
+    module.render_source_passages([{"name": "Paper A", "context": "First", "score": -1}])
+
+    module.st.caption.assert_not_called()
+
+
+def test_show_chunk_details_explains_the_score_when_one_is_shown(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    module.show_chunk_details({"name": "Paper A", "cited": True, "score": 8, "raw_text": "Chunk", "media": []})
+
+    assert module.st.caption.call_args_list[:2] == [
+        mock.call("Source: Paper A · Cited in the answer: yes · Relevance score: 8 out of 10"),
+        mock.call(module.SCORE_NOTE),
+    ]
+
+
+def test_show_chunk_details_leaves_out_the_score_note_without_a_score(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    module.show_chunk_details({"name": "Paper A", "raw_text": "Chunk", "media": []})
+
+    assert mock.call(module.SCORE_NOTE) not in module.st.caption.call_args_list
+
+
 def test_show_chunk_details_shows_the_facts_then_the_chunk_text_then_the_media(pdf_research_assistant_module):
     module = pdf_research_assistant_module
     st = module.st

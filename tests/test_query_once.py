@@ -6,6 +6,8 @@ from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
+# Imported before the fixture swaps in a fake paperqa, so tests can build real PaperQA contexts.
+from paperqa.types import Context, Doc, Text
 
 
 @pytest.fixture
@@ -61,8 +63,26 @@ def test_serialize_contexts_uses_source_defaults_when_context_has_no_text_object
             "context": "Quoted passage",
             "raw_text": "",
             "media": [],
+            "score": -1,
         }
     ]
+
+
+def test_serialize_contexts_records_the_relevance_score_paperqa_gave_the_chunk(query_once_module):
+    context = SimpleNamespace(context="Quoted", score=8, text=SimpleNamespace(name="My Paper", text="Chunk"))
+
+    result = query_once_module.serialize_contexts([context])
+
+    assert result[0]["score"] == 8
+
+
+def test_serialize_contexts_keeps_paperqa_unset_score_for_a_real_context(query_once_module):
+    chunk = Text(text="Chunk", name="Paper p1", doc=Doc(docname="d", citation="c", dockey="k"))
+    contexts = [Context(context="Unscored", text=chunk), Context(context="Scored", text=chunk, score=7)]
+
+    result = query_once_module.serialize_contexts(contexts)
+
+    assert [item["score"] for item in result] == [Context.UNSET_RELEVANCE, 7]
 
 
 def test_serialize_contexts_uses_text_name_when_present_on_context_text_object(query_once_module):

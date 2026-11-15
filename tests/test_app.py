@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime
 import importlib
 import json
 import sys
@@ -40,6 +41,7 @@ def _fake_settings(**changes):
         "parse_pdf": _fake_pdf_reader,
         "reader_config": {"chunk_chars": 5000, "overlap": 250},
         "multimodal": False,
+        "enrichment_llm": "gpt-4o",
         "evidence_k": 10,
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
@@ -60,7 +62,10 @@ def _fake_settings(**changes):
         ),
         prompts=SimpleNamespace(summary_json_system="system", summary_json="summary", qa="answer", system="system"),
         parsing=SimpleNamespace(
-            parse_pdf=values["parse_pdf"], reader_config=values["reader_config"], multimodal=values["multimodal"]
+            parse_pdf=values["parse_pdf"],
+            reader_config=values["reader_config"],
+            multimodal=values["multimodal"],
+            enrichment_llm=values["enrichment_llm"],
         ),
         agent=SimpleNamespace(
             index=SimpleNamespace(
@@ -95,6 +100,8 @@ def imported_pdf_research_assistant(
     client_patches=None,
     active_index_dir=Path(r"C:\index\active-shard"),
     index_changes=None,
+    clicked_keys=(),
+    rebuild_patches=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -120,6 +127,9 @@ def imported_pdf_research_assistant(
         # And the one that does the same for the library and index settings.
         if str(key or "").startswith("index_settings_"):
             return False
+        # The rebuild buttons are clicked by key, through clicked_keys.
+        if str(key or "").startswith("rebuild_"):
+            return key in clicked_keys
         return queued_button_values.pop(0)
 
     streamlit_module.button = mock.Mock(side_effect=click)
@@ -183,6 +193,20 @@ def imported_pdf_research_assistant(
                 mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")), \
                 mock.patch.multiple(
                     "pdf_research_assistant.exhaustive_client", RUNS_DIR=Path("unused"), **(client_patches or {})
+                ), \
+                mock.patch.multiple(
+                    # No rebuild is running unless a test says so, and none is ever started for real.
+                    "pdf_research_assistant.rebuild_client",
+                    **(
+                        {
+                            "get_run": mock.Mock(return_value=None),
+                            "take_result": mock.Mock(return_value=None),
+                            "collect_result": mock.Mock(return_value=None),
+                            "start": mock.Mock(),
+                            "count_pdfs": mock.Mock(return_value=0),
+                        }
+                        | (rebuild_patches or {})
+                    ),
                 ), \
                 mock.patch.multiple(
                     # Never write a record of the index during tests; report the index changes asked for.
@@ -354,7 +378,8 @@ def test_running_search_shows_progress_without_restarting_the_page(tmp_path):
 
 def test_progress_refreshes_by_itself_on_a_timer():
     with imported_pdf_research_assistant(app_state=_empty_state()) as module:
-        module.st.fragment.assert_called_once_with(run_every=module.PROGRESS_POLL_SECONDS)
+        # Once for an exhaustive search and once for an index rebuild.
+        assert module.st.fragment.call_args_list == [mock.call(run_every=module.PROGRESS_POLL_SECONDS)] * 2
 
 
 def test_escape_dollars_stops_streamlit_reading_amounts_as_maths(pdf_research_assistant_module):
@@ -939,7 +964,9 @@ def test_import_warns_when_manifest_index_is_missing():
         module.st.warning.assert_called_once_with(
             "Index not found. The first question will rebuild the index for 2 manifest PDFs, which may take a long time."
         )
-        module.st.info.assert_called_once_with("A rebuild starts only after you submit a question below.")
+        module.st.info.assert_called_once_with(
+            "A rebuild starts only when you click **Rebuild the index** or submit a question below."
+        )
 
 
 def test_import_warns_when_manifest_index_is_incomplete():
@@ -1110,7 +1137,7 @@ def test_import_question_submission_error_renders_diagnostics_and_still_appends_
                     "Index not found. The first question will rebuild the index for 2 manifest PDFs, "
                     "which may take a long time.",
                 ),
-                ("info", "A rebuild starts only after you submit a question below."),
+                ("info", "A rebuild starts only when you click **Rebuild the index** or submit a question below."),
             ],
         ),
         (
@@ -1329,7 +1356,9 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     ]
 
 
-def draw_index_settings(module, *, settings=None, changes=None, chosen=None, submitted=False, saved=None, clicked=()):
+def draw_index_settings(
+    module, *, settings=None, changes=None, chosen=None, submitted=False, saved=None, clicked=(), busy=False
+):
     """Draw the library and index settings, with the user choosing values and perhaps clicking a button.
 
     chosen maps a control's label to the value the user leaves in it.
@@ -1347,7 +1376,7 @@ def draw_index_settings(module, *, settings=None, changes=None, chosen=None, sub
     with mock.patch.multiple(
         module.saved_settings, load=mock.Mock(return_value=saved or {}), save_value=mock.DEFAULT, forget=mock.DEFAULT
     ) as patched:
-        module.render_reindex_settings(settings or _fake_settings(), changes)
+        module.render_reindex_settings(settings or _fake_settings(), changes, busy)
         return patched
 
 
@@ -1424,7 +1453,7 @@ def test_index_controls_sit_in_one_form_so_nothing_changes_until_it_is_saved(pdf
     patched = draw_index_settings(module, chosen={"Chunk size (characters)": 3000})
 
     module.st.form.assert_called_once_with("index_settings_form")
-    module.st.form_submit_button.assert_called_once_with(module.INDEX_SETTINGS_SAVE_LABEL)
+    module.st.form_submit_button.assert_called_once_with(module.INDEX_SETTINGS_SAVE_LABEL, disabled=False)
     patched["save_value"].assert_not_called()
     module.st.rerun.assert_not_called()
 
@@ -1541,7 +1570,7 @@ def test_the_index_defaults_button_is_hidden_until_an_index_setting_is_saved(pdf
 
     draw_index_settings(module, saved={"evidence_k": 3})
 
-    module.st.button.assert_not_called()
+    assert "index_settings_reset" not in _button_keys(module)
 
 
 def test_the_index_defaults_button_forgets_every_saved_index_setting(pdf_research_assistant_module):
@@ -1549,7 +1578,7 @@ def test_the_index_defaults_button_forgets_every_saved_index_setting(pdf_researc
 
     patched = draw_index_settings(module, saved={"chunk_chars": 3000}, clicked={"index_settings_reset"})
 
-    module.st.button.assert_called_once_with(module.INDEX_SETTINGS_RESET_LABEL, key="index_settings_reset")
+    module.st.button.assert_any_call(module.INDEX_SETTINGS_RESET_LABEL, key="index_settings_reset")
     patched["forget"].assert_called_once_with(["embedding", "chunk_chars", "overlap", "full_page", "multimodal"])
     assert module.st.session_state.index_settings_round == 1
     module.st.rerun.assert_called_once_with()
@@ -1560,7 +1589,7 @@ def test_the_index_defaults_button_changes_nothing_until_clicked(pdf_research_as
 
     patched = draw_index_settings(module, saved={"multimodal": "on_without_enrichment"})
 
-    module.st.button.assert_called_once()
+    assert "index_settings_reset" in _button_keys(module)
     patched["forget"].assert_not_called()
     assert "index_settings_round" not in module.st.session_state
 
@@ -1642,6 +1671,7 @@ def test_index_changes_note_says_how_to_end_the_warning(pdf_research_assistant_m
     assert "put these settings back" in note
     assert "Library and index settings" in note
     assert "index every PDF again" in note
+    assert f"**{pdf_research_assistant_module.REBUILD_LABEL}**" in note
 
 
 def test_render_index_changes_warns_only_when_there_are_changes(pdf_research_assistant_module):
@@ -1697,6 +1727,7 @@ def test_settings_notes_say_which_group_needs_a_rebuild(pdf_research_assistant_m
     assert "index every PDF again" in module.REINDEX_SETTINGS_NOTE
     assert module.INDEX_SETTINGS_SAVE_LABEL in module.REINDEX_SETTINGS_NOTE
     assert "indexed again" in module.INDEX_SETTINGS_SAVED_NOTICE
+    assert f"**{module.REBUILD_LABEL}**" in module.INDEX_SETTINGS_SAVED_NOTICE
     assert "pypdfium2" in module.MEDIA_PACKAGE_NOTE
     assert "rebuild" in module.REBUILD_BADGE.lower()
 
@@ -1715,12 +1746,12 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
         render_reindex_settings=steps.reindex,
         render_usage=steps.usage,
     ):
-        assert module.render_sidebar(app_state, settings, CHUNK_CHANGES) == ("Exhaustive", {"evidence_k": 3})
+        assert module.render_sidebar(app_state, settings, CHUNK_CHANGES, True) == ("Exhaustive", {"evidence_k": 3})
 
     module.st.header.assert_called_once_with("Settings")
     assert steps.mock_calls == [
         mock.call.instant(settings),
-        mock.call.reindex(settings, CHUNK_CHANGES),
+        mock.call.reindex(settings, CHUNK_CHANGES, True),
         mock.call.usage(app_state),
     ]
 
@@ -2653,3 +2684,308 @@ def test_local_llm_help_names_both_usual_addresses_and_what_the_model_needs(pdf_
 def test_page_draws_the_local_llm_panel():
     with imported_pdf_research_assistant() as module:
         module.st.expander.assert_any_call("Local LLM setup")
+
+
+# Rebuilding the index from the app
+
+
+def _rebuild_run(tmp_path, done=0, pdf_count=4):
+    return {
+        "process": mock.Mock(),
+        "index_dir": tmp_path / "pqa_index_abc",
+        "log_path": tmp_path / "rebuild.log",
+        "pdf_count": pdf_count,
+        "done": done,
+        "started": datetime(2026, 1, 2, 9, 5),
+    }
+
+
+def _button_keys(module):
+    return [call.kwargs.get("key") for call in module.st.button.call_args_list]
+
+
+@pytest.mark.parametrize(
+    "indexed_count, manifest_count, failed_files, expected",
+    [
+        (0, 0, [], True),
+        (0, 3, [], True),
+        (2, 3, [], True),
+        (3, 3, ["a.pdf"], True),
+        (3, 3, [], False),
+        (5, 0, [], False),
+    ],
+)
+def test_index_needs_rebuild_when_it_is_empty_incomplete_or_has_failed_pdfs(
+    pdf_research_assistant_module, indexed_count, manifest_count, failed_files, expected
+):
+    module = pdf_research_assistant_module
+
+    assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files) is expected
+
+
+def test_a_rebuild_is_offered_on_the_page_when_the_index_is_empty():
+    with imported_pdf_research_assistant(indexed_count=0) as module:
+        offer = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_offer_main")
+
+        assert offer.args[0] == "Rebuild the index"
+        assert offer.kwargs["help"] == module.REBUILD_HELP
+        assert "rebuild_pending" not in module.st.session_state
+
+
+def test_a_rebuild_is_offered_on_the_page_when_pdfs_failed_to_index():
+    with imported_pdf_research_assistant(failed_files=["bad.pdf"]) as module:
+        assert "rebuild_offer_main" in _button_keys(module)
+
+
+def test_an_up_to_date_index_offers_a_rebuild_in_the_sidebar_only():
+    with imported_pdf_research_assistant() as module:
+        keys = _button_keys(module)
+
+    assert "rebuild_offer_main" not in keys
+    assert "rebuild_offer_sidebar" in keys
+
+
+def test_no_rebuild_is_offered_while_an_exhaustive_search_waits_to_be_confirmed():
+    state = _empty_state() | {"exhaustive_pending": {"question": "q", "plan": READY_PLAN}}
+
+    with imported_pdf_research_assistant(app_state=state, indexed_count=0, button_values=[False, False, False]) as module:
+        keys = _button_keys(module)
+
+    assert "rebuild_offer_main" not in keys
+    assert "rebuild_offer_sidebar" not in keys
+
+
+@pytest.mark.parametrize("key", ["rebuild_offer_main", "rebuild_offer_sidebar"])
+def test_clicking_a_rebuild_button_asks_for_confirmation_without_starting_anything(key):
+    start = mock.Mock()
+
+    with imported_pdf_research_assistant(
+        indexed_count=0, clicked_keys={key}, rebuild_patches={"start": start}
+    ) as module:
+        assert module.st.session_state.rebuild_pending is True
+        module.st.rerun.assert_called_with()
+
+    start.assert_not_called()
+
+
+def test_a_pending_rebuild_shows_what_it_involves_and_switches_questions_off():
+    start = mock.Mock()
+    state = _empty_state() | {"rebuild_pending": True}
+
+    with imported_pdf_research_assistant(
+        app_state=state,
+        allowed_paths={"a.pdf", "b.pdf"},
+        indexed_count=0,
+        chat_input_value="q",
+        rebuild_patches={"start": start},
+    ) as module:
+        text = _markdown_text(module)
+        keys = _button_keys(module)
+        confirm = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_confirm")
+
+        assert "- PDFs in scope: 2" in text
+        assert "`text-embedding-3-small`, which costs money" in text
+        assert confirm.args[0] == "Start paid rebuild"
+        assert "rebuild_cancel" in keys
+        assert "rebuild_offer_main" not in keys
+        assert "rebuild_offer_sidebar" not in keys
+        assert module.st.chat_input.call_args.kwargs["disabled"] is True
+        # A question that still arrives is not run.
+        assert module.st.session_state.history == []
+        module.st.warning.assert_any_call(module.REBUILD_QUESTION_NOTE)
+
+    start.assert_not_called()
+
+
+def test_confirming_starts_the_rebuild_for_the_active_index_and_the_manifest_pdfs():
+    start = mock.Mock()
+    state = _empty_state() | {"rebuild_pending": True}
+
+    with imported_pdf_research_assistant(
+        app_state=state,
+        allowed_paths={"a.pdf", "b.pdf"},
+        indexed_count=0,
+        clicked_keys={"rebuild_confirm"},
+        rebuild_patches={"start": start},
+    ) as module:
+        assert module.st.session_state.rebuild_pending is False
+        module.st.rerun.assert_called_with()
+
+    start.assert_called_once_with(Path(r"C:\index\active-shard"), 2)
+
+
+def test_confirming_without_a_manifest_counts_the_pdfs_in_the_pdf_folder():
+    start = mock.Mock()
+    count_pdfs = mock.Mock(return_value=7)
+    state = _empty_state() | {"rebuild_pending": True}
+
+    with imported_pdf_research_assistant(
+        app_state=state,
+        indexed_count=0,
+        clicked_keys={"rebuild_confirm"},
+        rebuild_patches={"start": start, "count_pdfs": count_pdfs},
+    ):
+        pass
+
+    count_pdfs.assert_called_once_with(Path(r"D:\papers"))
+    start.assert_called_once_with(Path(r"C:\index\active-shard"), 7)
+
+
+def test_cancelling_a_pending_rebuild_starts_nothing():
+    start = mock.Mock()
+    state = _empty_state() | {"rebuild_pending": True}
+
+    with imported_pdf_research_assistant(
+        app_state=state, indexed_count=0, clicked_keys={"rebuild_cancel"}, rebuild_patches={"start": start}
+    ) as module:
+        assert module.st.session_state.rebuild_pending is False
+        module.st.rerun.assert_called_with()
+
+    start.assert_not_called()
+
+
+def test_describe_rebuild_plan_says_how_many_pdfs_are_already_indexed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    lines = module.describe_rebuild_plan(_fake_settings(), Path("index/pqa_index_abc"), 10, 4)
+
+    assert lines[0] == "PDFs in scope: 10. 4 are already in this index and are not indexed again"
+    assert lines[1].startswith("Index: `pqa_index_abc`")
+    assert lines[-1] == module.REBUILD_TIME_NOTE
+    assert not any("enrichment" in line for line in lines)
+
+
+def test_describe_rebuild_plan_leaves_out_the_indexed_count_for_an_empty_index(pdf_research_assistant_module):
+    lines = pdf_research_assistant_module.describe_rebuild_plan(_fake_settings(), Path("index/pqa_index_abc"), 10, 0)
+
+    assert lines[0] == "PDFs in scope: 10"
+
+
+def test_describe_rebuild_plan_warns_that_enrichment_pays_a_model_for_every_image(pdf_research_assistant_module):
+    lines = pdf_research_assistant_module.describe_rebuild_plan(
+        _fake_settings(multimodal=True), Path("index/pqa_index_abc"), 10, 0
+    )
+
+    assert any("`gpt-4o` is also paid to describe every image and table" in line for line in lines)
+
+
+def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_settings_off(tmp_path):
+    run = _rebuild_run(tmp_path, pdf_count=4)
+    patches = {
+        "get_run": mock.Mock(return_value=run),
+        "describe_progress": mock.Mock(return_value="1 of 4 PDFs done"),
+    }
+
+    with imported_pdf_research_assistant(
+        indexed_count=1, failed_files=[], chat_input_value="q", rebuild_patches=patches
+    ) as module:
+        keys = _button_keys(module)
+
+        module.st.progress.assert_called_once_with(0.25, text="1 of 4 PDFs done")
+        module.st.info.assert_any_call(module.REBUILD_RUNNING_NOTE)
+        module.st.caption.assert_any_call(f"Details are written to `{run['log_path']}`.")
+        module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
+        module.st.form_submit_button.assert_called_once_with(module.INDEX_SETTINGS_SAVE_LABEL, disabled=True)
+        module.bootstrap.get_indexed_doc_count.assert_any_call(index_dir=run["index_dir"])
+        assert not any(str(key).startswith("rebuild_") for key in keys)
+        assert module.st.chat_input.call_args.kwargs["disabled"] is True
+        assert module.st.session_state.history == []
+        module.st.rerun.assert_not_called()
+
+
+def test_rebuild_progress_counts_failed_pdfs_as_done(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path, pdf_count=4)
+    module.st.progress.reset_mock()
+    module.bootstrap.get_failed_files.return_value = ["bad.pdf"]
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        module.render_rebuild_run()
+
+    assert run["done"] == 2
+    assert module.st.progress.call_args.args[0] == 0.5
+
+
+def test_a_finished_rebuild_draws_the_whole_page_again(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.progress.reset_mock()
+    module.st.rerun.reset_mock()
+
+    with mock.patch.multiple(
+        module.rebuild_client,
+        get_run=mock.Mock(return_value=_rebuild_run(tmp_path)),
+        collect_result=mock.Mock(return_value={"ok": True}),
+    ):
+        module.render_rebuild_run()
+
+    module.st.rerun.assert_called_once_with()
+    module.st.progress.assert_not_called()
+
+
+def test_a_rebuild_that_another_session_saw_finish_draws_the_whole_page_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.progress.reset_mock()
+    module.st.rerun.reset_mock()
+
+    module.render_rebuild_run()
+
+    module.st.rerun.assert_called_once_with()
+    module.st.progress.assert_not_called()
+
+
+def test_a_finished_rebuild_is_reported_with_the_end_of_its_log():
+    result = {"ok": True, "log_path": "index/rebuild.log", "lines": ["Indexed after run: 3", "Failed PDFs: 0"]}
+
+    with imported_pdf_research_assistant(rebuild_patches={"take_result": mock.Mock(return_value=result)}) as module:
+        module.st.success.assert_any_call(module.REBUILD_FINISHED_NOTICE)
+        module.st.expander.assert_any_call(module.REBUILD_LOG_TITLE)
+        module.st.code.assert_any_call("Indexed after run: 3\nFailed PDFs: 0")
+        module.st.error.assert_not_called()
+
+
+def test_a_rebuild_that_stopped_unexpectedly_is_reported_as_an_error(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.expander.reset_mock()
+
+    module.render_rebuild_result({"ok": False, "log_path": "index/rebuild.log", "lines": []})
+
+    module.st.error.assert_called_once_with(f"{module.REBUILD_FAILED_NOTICE} See `index/rebuild.log`.")
+    module.st.expander.assert_not_called()
+
+
+def test_no_rebuild_result_shows_nothing(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+
+    module.render_rebuild_result(None)
+
+    module.st.success.assert_not_called()
+    module.st.error.assert_not_called()
+
+
+def test_the_sidebar_offers_no_rebuild_while_the_page_is_busy(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module, busy=True)
+
+    assert "rebuild_offer_sidebar" not in _button_keys(module)
+
+
+def test_the_sidebar_rebuild_button_asks_for_confirmation(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module, clicked={"rebuild_offer_sidebar"})
+
+    assert module.st.session_state.rebuild_pending is True
+    module.st.rerun.assert_called_once_with()
+
+
+def test_index_settings_cannot_be_saved_while_a_rebuild_runs(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=_rebuild_run(tmp_path)):
+        patched = draw_index_settings(module, chosen={"Chunk size (characters)": 3000}, submitted=True)
+
+    patched["save_value"].assert_not_called()
+    module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
+    assert _button_keys(module) == []

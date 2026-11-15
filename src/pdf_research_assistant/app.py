@@ -17,6 +17,7 @@ from pdf_research_assistant import (
     index_record,
     local_llm,
     rate_profiles,
+    rebuild_client,
     saved_settings,
     settings_groups,
 )
@@ -40,15 +41,32 @@ REBUILD_BADGE = ":orange-badge[Needs rebuild]"
 INDEX_CHANGES_NOTE = (
     "To keep using that index, put these settings back as they were, under **Library and index settings** in "
     "the sidebar. Otherwise the app has to index every PDF again with the new settings, which can take a long "
-    "time and may cost money for embeddings."
+    "time and may cost money for embeddings. Click **Rebuild the index** below to start that."
 )
 INDEX_SETTING_KEYS = [setting.key for setting in settings_groups.REINDEX_SETTINGS if setting.write is not None]
 INDEX_SETTINGS_SAVE_LABEL = "Save index settings"
 INDEX_SETTINGS_RESET_LABEL = "Go back to the default index settings"
 INDEX_SETTINGS_SAVED_NOTICE = (
     "Index settings saved. PaperQA now looks for an index built with them, so your PDFs have to be indexed "
-    "again before they can be searched."
+    "again before they can be searched. Click **Rebuild the index** to do that."
 )
+REBUILD_LABEL = "Rebuild the index"
+REBUILD_HELP = (
+    "Indexes your PDFs with the library and index settings saved here. PDFs already in the index are left "
+    "alone; new ones, and ones that failed before, are indexed. You are shown what it involves and asked "
+    "to confirm before anything starts."
+)
+REBUILD_CONFIRM_LABEL = "Start paid rebuild"
+REBUILD_TIME_NOTE = (
+    "A large library can take hours. Questions are switched off until the rebuild finishes, and it carries on "
+    "if you close this page."
+)
+REBUILD_RUNNING_NOTE = "The index is being rebuilt. Questions and index settings are switched off until it finishes."
+REBUILD_QUESTION_NOTE = "Your question was not sent, because the index is being rebuilt. Ask it again afterwards."
+REBUILD_LOCKED_NOTE = "These cannot be changed while the index is being rebuilt."
+REBUILD_FINISHED_NOTICE = "The index rebuild has finished. This page shows what the index holds now."
+REBUILD_FAILED_NOTICE = "The index rebuild stopped unexpectedly, so the index may be incomplete."
+REBUILD_LOG_TITLE = "Show the end of the rebuild log"
 INDEX_SETTINGS_UNCHANGED_NOTE = "These are the settings already in use, so nothing was saved."
 MEDIA_PACKAGE_NOTE = (
     "Images and tables cannot be read yet, because the `pypdfium2` package is not installed. Install it with "
@@ -413,7 +431,7 @@ def select_index_status(indexed_count: int, manifest_count: int) -> list[tuple[s
                 f"Index not found. The first question will rebuild the index for {manifest_count} manifest PDFs, "
                 "which may take a long time.",
             ),
-            ("info", "A rebuild starts only after you submit a question below."),
+            ("info", f"A rebuild starts only when you click **{REBUILD_LABEL}** or submit a question below."),
         ]
     if use_manifest_scope and indexed_count < manifest_count:
         return [
@@ -486,6 +504,104 @@ def render_active_index(details: dict[str, str | None]) -> None:
         if details["paper_list_path"]:
             st.markdown(f"**Paper list:** `{details['paper_list_path']}`")
         st.markdown(f"**PDF folder:** `{details['paper_dir']}`")
+
+
+def index_needs_rebuild(indexed_count: int, manifest_count: int, failed_files: list[str]) -> bool:
+    """Return whether the page can tell that the index is out of date; a manifest count of 0 means no manifest.
+
+    An empty index covers changed index settings too, because PaperQA then looks for a new, empty index.
+    Without a manifest the page cannot tell that PDFs were added, so the sidebar always offers a rebuild.
+    """
+    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files)
+
+
+def describe_rebuild_plan(settings, active_index_dir: Path, pdf_count: int, indexed_count: int) -> list[str]:
+    """Describe what a rebuild will do and what is paid for, so the user can decide whether to start it."""
+    scope = f"PDFs in scope: {pdf_count}"
+    if indexed_count:
+        scope += f". {indexed_count} are already in this index and are not indexed again"
+    lines = [
+        scope,
+        f"Index: `{active_index_dir.name}`, built with the library and index settings saved in the sidebar",
+        f"Each PDF that is indexed is read, split into passages and sent to the embedding model "
+        f"`{settings.embedding}`, which costs money. The app cannot estimate how much before reading the PDFs",
+    ]
+    media = settings_groups.current_choice(settings_groups.get_setting("multimodal"), settings)
+    if media == "on_with_enrichment":
+        lines.append(
+            "Images and tables are on with enrichment, so the model "
+            f"`{settings.parsing.enrichment_llm}` is also paid to describe every image and table"
+        )
+    lines.append(REBUILD_TIME_NOTE)
+    return lines
+
+
+def request_rebuild() -> None:
+    """Ask the user to confirm a rebuild. Nothing starts here."""
+    st.session_state.rebuild_pending = True
+    st.rerun()
+
+
+def render_rebuild_pending(settings, active_index_dir: Path, manifest_count: int, indexed_count: int) -> None:
+    """Show what the rebuild involves and start it only when the user confirms."""
+    pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR)
+    st.markdown(f"**{REBUILD_LABEL}**")
+    st.markdown(
+        "\n".join(f"- {line}" for line in describe_rebuild_plan(settings, active_index_dir, pdf_count, indexed_count))
+    )
+    if st.button(REBUILD_CONFIRM_LABEL, key="rebuild_confirm"):
+        rebuild_client.start(active_index_dir, pdf_count)
+        st.session_state.rebuild_pending = False
+        st.rerun()
+        return
+    if st.button("Cancel", key="rebuild_cancel"):
+        st.session_state.rebuild_pending = False
+        st.rerun()
+
+
+@st.fragment(run_every=PROGRESS_POLL_SECONDS)
+def render_rebuild_run() -> None:
+    """Show how far the rebuild has got, and draw the whole page again once it has finished."""
+    run = rebuild_client.get_run()
+    # No run means another browser session already saw it finish.
+    if run is None or rebuild_client.collect_result():
+        st.rerun()
+        return
+    # PaperQA saves the index's file list after each PDF, whether it was indexed or failed.
+    done = rebuild_client.note_progress(
+        run,
+        bootstrap.get_indexed_doc_count(index_dir=run["index_dir"])
+        + len(bootstrap.get_failed_files(index_dir=run["index_dir"])),
+    )
+    st.info(REBUILD_RUNNING_NOTE)
+    st.progress(rebuild_client.progress_fraction(run, done), text=rebuild_client.describe_progress(run, done))
+    st.caption(f"Details are written to `{run['log_path']}`.")
+
+
+def render_rebuild_result(result: dict | None) -> None:
+    """Say how the last rebuild ended, with the end of its log."""
+    if not result:
+        return
+    if result["ok"]:
+        st.success(REBUILD_FINISHED_NOTICE)
+    else:
+        st.error(f"{REBUILD_FAILED_NOTICE} See `{result['log_path']}`.")
+    if result["lines"]:
+        with st.expander(REBUILD_LOG_TITLE):
+            st.code("\n".join(result["lines"]))
+
+
+def render_rebuild(
+    settings, active_index_dir: Path, manifest_count: int, indexed_count: int, out_of_date: bool, busy: bool
+) -> None:
+    """Show the rebuild's result, progress or confirm step, or offer a rebuild when the index is out of date."""
+    render_rebuild_result(rebuild_client.take_result())
+    if rebuild_client.get_run():
+        render_rebuild_run()
+    elif st.session_state.get("rebuild_pending"):
+        render_rebuild_pending(settings, active_index_dir, manifest_count, indexed_count)
+    elif out_of_date and not busy and st.button(REBUILD_LABEL, key="rebuild_offer_main", help=REBUILD_HELP):
+        request_rebuild()
 
 
 def render_failed_files(failed_files: list[str]) -> None:
@@ -770,12 +886,15 @@ def render_changed_note(setting: settings_groups.Setting, changed: dict, index_c
         st.caption(f"Changed. The index `{index_changes['index']}` was built with `{changed[setting.key]}`.")
 
 
-def render_reindex_settings(settings, index_changes: dict | None = None) -> None:
+def render_reindex_settings(settings, index_changes: dict | None = None, busy: bool = False) -> None:
     """Show each setting that cannot change without rebuilding the index, with a control where it can change.
 
     The controls sit in one form, so several can be changed and saved together; nothing is saved before then.
     index_changes comes from index_record.find_changes; each changed setting also says what it was.
+    busy means a rebuild or an exhaustive search is under way or waiting to be confirmed, so no rebuild is
+    offered. While a rebuild runs the settings cannot be saved either, because it is using them.
     """
+    rebuilding = rebuild_client.get_run() is not None
     changed = {item["key"]: item["was"] for item in (index_changes or {}).get("settings", [])}
     with st.sidebar:
         st.subheader(REINDEX_SETTINGS_TITLE)
@@ -790,10 +909,15 @@ def render_reindex_settings(settings, index_changes: dict | None = None) -> None
                     if setting.write is not None:
                         chosen[setting.key] = draw_index_setting(setting, settings)
                         render_changed_note(setting, changed, index_changes)
-                submitted = st.form_submit_button(INDEX_SETTINGS_SAVE_LABEL)
-            if submitted:
-                save_index_settings(chosen, settings)
-            render_index_settings_reset()
+                submitted = st.form_submit_button(INDEX_SETTINGS_SAVE_LABEL, disabled=rebuilding)
+            if rebuilding:
+                st.caption(REBUILD_LOCKED_NOTE)
+            else:
+                if submitted:
+                    save_index_settings(chosen, settings)
+                render_index_settings_reset()
+                if not busy and st.button(REBUILD_LABEL, key="rebuild_offer_sidebar", help=REBUILD_HELP):
+                    request_rebuild()
             # The settings with no control come last, below the ones that can be saved.
             for setting in settings_groups.REINDEX_SETTINGS:
                 if setting.write is None:
@@ -815,12 +939,14 @@ def render_usage(app_state: dict) -> None:
             st.rerun()
 
 
-def render_sidebar(app_state: dict, settings, index_changes: dict | None = None) -> tuple[str, dict]:
+def render_sidebar(
+    app_state: dict, settings, index_changes: dict | None = None, busy: bool = False
+) -> tuple[str, dict]:
     """Show the sidebar, with settings in two groups; return the search mode and any one-off changes."""
     with st.sidebar:
         st.header("Settings")
     search_mode, one_off = render_instant_settings(settings)
-    render_reindex_settings(settings, index_changes)
+    render_reindex_settings(settings, index_changes, busy)
     render_usage(app_state)
     return search_mode, one_off
 
@@ -981,28 +1107,43 @@ def main() -> None:
         index_changes = None
     else:
         index_changes = index_record.find_changes(settings, active_index_dir)
+    failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
+    exhaustive_pending = st.session_state.get("exhaustive_pending")
+    exhaustive_run = st.session_state.get("exhaustive_run")
+    # A rebuild and a question both write to the index, so only one of them goes ahead at a time.
+    rebuild_busy = bool(rebuild_client.get_run() or st.session_state.get("rebuild_pending"))
+    busy = bool(exhaustive_pending or exhaustive_run or rebuild_busy)
     render_index_changes(index_changes)
     render_index_status(select_index_status(indexed_count, manifest_count))
+    render_rebuild(
+        settings,
+        active_index_dir,
+        manifest_count,
+        indexed_count,
+        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files),
+        busy=busy,
+    )
     render_active_index(
         describe_active_index(active_index_dir, bootstrap.MANIFEST_PATH, manifest_count, bootstrap.PAPER_DIR)
     )
-    render_failed_files(bootstrap.get_failed_files(index_dir=active_index_dir))
+    render_failed_files(failed_files)
 
     app_state = get_persistent_app_state()
     init_session_state(app_state)
-    search_mode, one_off = render_sidebar(app_state, settings, index_changes)
+    search_mode, one_off = render_sidebar(app_state, settings, index_changes, busy)
     render_history(st.session_state.history)
 
-    exhaustive_pending = st.session_state.get("exhaustive_pending")
-    exhaustive_run = st.session_state.get("exhaustive_run")
-    if not (exhaustive_pending or exhaustive_run):
+    if not busy:
         render_estimate(search_mode, one_off)
-    question = st.chat_input("Ask a question about your PDFs...", disabled=bool(exhaustive_pending or exhaustive_run))
+    question = st.chat_input("Ask a question about your PDFs...", disabled=busy)
 
     if exhaustive_run:
         render_exhaustive_run(exhaustive_run, app_state)
     elif exhaustive_pending:
         render_exhaustive_pending(exhaustive_pending, app_state)
+    elif question and rebuild_busy:
+        # The chat box is switched off, so this is a question sent just as a rebuild began. It must not run.
+        st.warning(REBUILD_QUESTION_NOTE)
     elif question and search_mode == EXHAUSTIVE_MODE:
         plan_exhaustive_question(question)
     elif question:

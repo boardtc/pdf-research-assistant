@@ -104,7 +104,7 @@ Each control's help says what the setting does and what it costs. Nothing change
 
 Images and tables need the `pypdfium2` package (`pip install paper-qa-pypdf[media]`); the app will not save that setting without it. Enrichment is an extra paid model call for every image and table while indexing.
 
-When you save a change to one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings. Changing a setting in the other group never raises it.
+When you save a change to one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings, which **Rebuild the index** does from the page (see [Rebuild Index](#rebuild-index)). Changing a setting in the other group never raises it.
 
 Two numbers control how much evidence goes into an answer. They are PaperQA's `answer.evidence_k` and `answer.answer_max_sources` settings:
 
@@ -234,12 +234,24 @@ The settings are saved in `local_llm.json` in the project folder, which Git igno
 
 ### Rebuild Index
 
+From the app, click **Rebuild the index**. The button appears at the top of the page whenever the index is out of date: it is empty, which includes having just saved new index settings, it is missing PDFs from the paper list, or some PDFs failed to index. It is always under **Library and index settings** in the sidebar as well, for when you have added PDFs.
+
+1. The page lists how many PDFs are in scope, the index that will be built and what is paid for: the embedding model and, with images and tables on with enrichment, a model call for every image and table. It gives no cost figure, because that depends on the text in the PDFs.
+2. Nothing starts until you click **Start paid rebuild**. **Cancel** leaves everything as it was.
+3. The rebuild runs the same code as `pdf-research-rebuild`, in its own process, with the library and index settings saved in the sidebar. PDFs already in the index are left alone; new ones, and ones that failed before, are indexed.
+4. A progress bar shows how many PDFs are done. Questions and the index settings are switched off until it finishes, and the output goes to `rebuild.log` in `INDEX_DIR`.
+5. When it finishes, the page shows the end of the log and the new state of the index, and the warning about changed settings goes away.
+
+The rebuild carries on if you close the page, and a reloaded page picks its progress up again. Stopping the Streamlit server does not stop it, but the page then no longer follows it. There is no stop button; PaperQA saves the index after each PDF, so a rebuild that is interrupted carries on from there next time.
+
+From a terminal:
+
 ```bash
 cd ~/gitrepos/pdf-research-assistant
 pdf-research-rebuild
 ```
 
-Use this when:
+Use the terminal command when:
 
 - running the project for the first time and you want to build the index explicitly
 - you add new PDFs and want to rebuild the index before querying again

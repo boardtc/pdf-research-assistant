@@ -129,11 +129,13 @@ def test_parse_pdf_with_fallback_uses_pdfplumber_when_pypdf_hits_symbol_set_enco
     fallback_parser.assert_called_once_with("example.pdf", page_range=2)
 
 
-def test_parse_pdf_with_fallback_retries_without_media_when_primary_parser_hits_crop_exceeds_page_dimensions(
-    pdf_parser_module,
-):
+CROP_ERROR = ValueError("Crop exceeds page dimensions")
+
+
+def _parse_with_primary_results(pdf_parser_module, results, **kwargs):
+    """Parse example.pdf with the primary parser giving each result in turn; return the pages and both mocks."""
     paperqa_pypdf_module = ModuleType("paperqa_pypdf")
-    paperqa_pypdf_module.parse_pdf_to_pages = mock.Mock(side_effect=ValueError("Crop exceeds page dimensions"))
+    paperqa_pypdf_module.parse_pdf_to_pages = mock.Mock(side_effect=results)
 
     with mock.patch.dict(sys.modules, {"paperqa_pypdf": paperqa_pypdf_module}):
         with mock.patch.object(
@@ -141,13 +143,64 @@ def test_parse_pdf_with_fallback_retries_without_media_when_primary_parser_hits_
             "parse_pdf_with_pdfplumber",
             return_value={"1": "fallback parser"},
         ) as fallback_parser:
-            parsed_pages = pdf_parser_module.parse_pdf_with_fallback(
-                "example.pdf",
-                page_range=2,
-                parse_media=True,
-            )
+            parsed_pages = pdf_parser_module.parse_pdf_with_fallback("example.pdf", page_range=2, **kwargs)
+    return parsed_pages, paperqa_pypdf_module.parse_pdf_to_pages, fallback_parser
+
+
+def test_parse_pdf_with_fallback_keeps_whole_page_pictures_when_cutting_out_a_figure_fails(pdf_parser_module):
+    parsed_pages, primary_parser, fallback_parser = _parse_with_primary_results(
+        pdf_parser_module, [CROP_ERROR, {"1": "whole pages"}], parse_media=True, dpi=150
+    )
+
+    assert parsed_pages == {"1": "whole pages"}
+    assert primary_parser.call_args_list[1] == mock.call(
+        "example.pdf", page_range=2, parse_media=True, dpi=150, full_page=True
+    )
+    fallback_parser.assert_not_called()
+
+
+def test_parse_pdf_with_fallback_treats_unset_media_as_on_like_the_primary_parser(pdf_parser_module):
+    parsed_pages, primary_parser, _fallback_parser = _parse_with_primary_results(
+        pdf_parser_module, [CROP_ERROR, {"1": "whole pages"}]
+    )
+
+    assert parsed_pages == {"1": "whole pages"}
+    assert primary_parser.call_args_list[1] == mock.call("example.pdf", page_range=2, full_page=True)
+
+
+def test_parse_pdf_with_fallback_reads_text_only_when_whole_page_pictures_also_fail(pdf_parser_module):
+    parsed_pages, _primary_parser, fallback_parser = _parse_with_primary_results(
+        pdf_parser_module, [CROP_ERROR, CROP_ERROR], parse_media=True
+    )
 
     assert parsed_pages == {"1": "fallback parser"}
+    fallback_parser.assert_called_once_with("example.pdf", page_range=2, parse_media=False)
+
+
+def test_parse_pdf_with_fallback_reraises_other_errors_from_the_whole_page_retry(pdf_parser_module):
+    with pytest.raises(RuntimeError, match="render failed"):
+        _parse_with_primary_results(pdf_parser_module, [CROP_ERROR, RuntimeError("render failed")], parse_media=True)
+
+
+def test_parse_pdf_with_fallback_reads_text_only_when_whole_page_pictures_were_already_asked_for(
+    pdf_parser_module,
+):
+    parsed_pages, primary_parser, fallback_parser = _parse_with_primary_results(
+        pdf_parser_module, [CROP_ERROR], parse_media=True, full_page=True
+    )
+
+    assert parsed_pages == {"1": "fallback parser"}
+    primary_parser.assert_called_once()
+    fallback_parser.assert_called_once_with("example.pdf", page_range=2, parse_media=False, full_page=True)
+
+
+def test_parse_pdf_with_fallback_reads_text_only_after_a_crop_error_with_media_off(pdf_parser_module):
+    parsed_pages, primary_parser, fallback_parser = _parse_with_primary_results(
+        pdf_parser_module, [CROP_ERROR], parse_media=False
+    )
+
+    assert parsed_pages == {"1": "fallback parser"}
+    primary_parser.assert_called_once()
     fallback_parser.assert_called_once_with("example.pdf", page_range=2, parse_media=False)
 
 

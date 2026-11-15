@@ -35,6 +35,10 @@ DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "manifest.csv"
 FAILED_DOCUMENT_ADD_ID = "ERROR"
 MODEL_NAME = "gpt-4o-mini"
 PDF_EXTENSIONS = {".pdf"}
+# How sharply images and tables are drawn when they are read from PDFs. PaperQA's reader draws them at 72
+# dots per inch, where the text in a table is barely readable. PaperQA does not name an index after this,
+# so changing it keeps the index in use and only affects PDFs read afterwards.
+PICTURE_DPI = 150
 
 
 def sanitize_proxy_environment() -> None:
@@ -194,7 +198,13 @@ def build_settings() -> Settings:
         llm_config=deepcopy(model_config),
         summary_llm_config=deepcopy(model_config),
         answer=AnswerSettings(),
-        parsing=ParsingSettings(multimodal=False, use_doc_details=False, parse_pdf=parse_pdf_with_fallback),
+        parsing=ParsingSettings(
+            multimodal=False,
+            use_doc_details=False,
+            parse_pdf=parse_pdf_with_fallback,
+            # PaperQA's own chunk size and overlap, plus sharper pictures.
+            reader_config={"chunk_chars": 5000, "overlap": 250, "dpi": PICTURE_DPI},
+        ),
         agent=AgentSettings(
             agent_llm=model_name,
             agent_llm_config=deepcopy(model_config),

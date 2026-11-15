@@ -157,3 +157,23 @@ def test_exhaustive_run_reports_no_evidence_when_every_chunk_scores_zero(tiny_in
     assert paper["status"] == tiny_index.exhaustive.RESULT_NO_EVIDENCE
     assert paper["evidence"] == []
     assert "## Papers with no relevant evidence" in result["report"]
+
+
+def test_pictures_are_drawn_at_the_apps_sharpness_when_paperqa_reads_a_pdf(tiny_index):
+    """With images and tables on, PaperQA passes the app's picture sharpness through to its PDF reader."""
+    from paperqa import Docs
+    from paperqa.settings import MultimodalOptions
+
+    settings = tiny_index.settings.model_copy(deep=True)
+    settings.parsing.multimodal = MultimodalOptions.ON_WITHOUT_ENRICHMENT
+    settings.parsing.reader_config["full_page"] = True
+    docs = Docs()
+
+    asyncio.run(docs.aadd(FIXTURE_PDF, citation=f"Tests (2026) {PDF_TITLE}", docname="tiny", settings=settings))
+
+    pictures = [media.info for text in docs.texts for media in text.media]
+    assert pictures
+    dpi = settings.parsing.reader_config["dpi"]
+    assert dpi == 150
+    for picture in pictures:
+        assert picture["bitmap_width"] == pytest.approx(picture["page_width"] * dpi / 72, abs=1)

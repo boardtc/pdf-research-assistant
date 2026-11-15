@@ -102,7 +102,15 @@ Open **Library and index settings** in the rebuild group to change how your PDFs
 
 Each control's help says what the setting does and what it costs. Nothing changes until you click **Save index settings**. The choices are saved to `saved_settings.json`, so the command line, `pdf-research-rebuild` and exhaustive search use them too. **Go back to the default index settings** removes them. The PDF folder (`PAPER_DIR` in `.env`), the PDF reader and the path style are shown but cannot be changed there.
 
-Images and tables need the `pypdfium2` package (`pip install paper-qa-pypdf[media]`); the app will not save that setting without it. Enrichment is an extra paid model call for every image and table while indexing.
+### Figure-heavy and table-heavy PDFs
+
+Turn **Images and tables** on when the answers you need are in charts, diagrams, tables or slides rather than in the text. Leave it off for PDFs that are mostly text: it makes indexing slower and every question that finds a picture cost more, because the pictures are sent to the model with their passages. Enrichment is an extra paid model call (`parsing.enrichment_llm`, `gpt-4o` by default) for every image and table while indexing, so a search can find them by what they show; without it they are found only through the text around them.
+
+**Whole-page pictures** decides what is cut out of each page. With it off, PaperQA's PDF reader keeps each picture stored in the PDF (photos, scanned pages, pasted-in charts) and each table with ruled lines as a separate picture. Charts and diagrams drawn with lines and shapes, and tables without lines, are missed. With it on, every page is kept as one picture, which catches everything at the cost of a larger picture for every page. The sidebar says the same under the Images and tables control.
+
+Pictures are drawn at 150 dots per inch (`parsing.reader_config["dpi"]`, set in `bootstrap.PICTURE_DPI`), twice as sharp as PaperQA's default, which leaves the text in a table hard to read. PaperQA does not name an index after this, so it is not a sidebar setting. If a figure cannot be cut out of a page, the app reads that PDF again with whole-page pictures instead of dropping its pictures.
+
+Reading images and tables needs the `pypdfium2` package, which is installed with this project (`paper-qa-pypdf[media]`). An older install may lack it; the app will not save the setting until it is installed.
 
 When you save a change to one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings, which **Rebuild the index** does from the page (see [Rebuild Index](#rebuild-index)). Changing a setting in the other group never raises it.
 

@@ -6,14 +6,14 @@ import importlib
 from pathlib import Path
 
 
+def is_crop_error(error: BaseException) -> bool:
+    """Return whether cutting a figure or table out of a page failed because it reached past the page."""
+    return isinstance(error, ValueError) and "Crop exceeds page dimensions" in str(error)
+
+
 def should_fallback_pdf_parse(error: BaseException) -> bool:
-    """Return whether a parser error matches the known SymbolSetEncoding failure."""
-    return (
-        isinstance(error, LookupError)
-        and "/SymbolSetEncoding" in str(error)
-        or isinstance(error, ValueError)
-        and "Crop exceeds page dimensions" in str(error)
-    )
+    """Return whether a parser error matches the known SymbolSetEncoding or figure-crop failure."""
+    return isinstance(error, LookupError) and "/SymbolSetEncoding" in str(error) or is_crop_error(error)
 
 
 def resolve_pdfplumber_page_indexes(
@@ -65,16 +65,25 @@ def parse_pdf_with_pdfplumber(
 
 
 def parse_pdf_with_fallback(path: str | Path, **kwargs: object) -> dict[str, str]:
-    """Parse PDFs with PaperQA's default pypdf parser, falling back for SymbolSetEncoding errors."""
+    """Parse PDFs with PaperQA's default pypdf parser, falling back for SymbolSetEncoding and figure-crop errors.
+
+    When a figure or table cannot be cut out of a page, the PDF is read again with a picture of each whole
+    page, so a figure-heavy PDF keeps its pictures. Only if that fails too is the text read on its own.
+    """
     paperqa_pypdf = importlib.import_module("paperqa_pypdf")
     try:
         return paperqa_pypdf.parse_pdf_to_pages(path, **kwargs)
     except Exception as exc:
         if not should_fallback_pdf_parse(exc):
             raise
-        if isinstance(exc, ValueError) and "Crop exceeds page dimensions" in str(exc):
-            safe_kwargs = dict(kwargs)
-            safe_kwargs["parse_media"] = False
-            return parse_pdf_with_pdfplumber(path, **safe_kwargs)
-    return parse_pdf_with_pdfplumber(path, **kwargs)
+        if not is_crop_error(exc):
+            return parse_pdf_with_pdfplumber(path, **kwargs)
+    # PaperQA's reader reads media unless told not to, so a missing parse_media means on.
+    if kwargs.get("parse_media", True) and not kwargs.get("full_page", False):
+        try:
+            return paperqa_pypdf.parse_pdf_to_pages(path, **(kwargs | {"full_page": True}))
+        except ValueError as exc:
+            if not is_crop_error(exc):
+                raise
+    return parse_pdf_with_pdfplumber(path, **(kwargs | {"parse_media": False}))
 

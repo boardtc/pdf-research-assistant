@@ -83,6 +83,8 @@ streamlit run src/pdf_research_assistant/app.py
 
 Streamlit usually opens the app in your browser automatically and prints the local URL in the terminal. By default, it uses `http://localhost:8501` unless that port is already in use.
 
+Under the title, the page names the active index and the paper list in use. PaperQA names each index folder after a hash of its library and index settings, such as `pqa_index_1a2b...`, so to tell indexes apart, open **Active index details**, type a name in **Index name** and click **Save name**. The page then shows that name instead of the folder name: in the active index line, in the warning about changed settings, in the rebuild confirm step and in each answer's `Show settings used`. The folder name stays beside it, and the full folder path stays in **Active index details**. Names are saved to `index_names.json` in `INDEX_DIR`, keyed by folder name, so a name survives a restart and stays with its index: change a library or index setting and the page shows the other index's name, or its folder if it has none; put the setting back and the old name returns. Save an empty name to go back to the folder name. Two indexes cannot share a name.
+
 The Streamlit sidebar puts settings in two groups:
 
 - **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, and the local LLM setup. Change these whenever you like; the index is not rebuilt.

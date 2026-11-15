@@ -102,6 +102,7 @@ def imported_pdf_research_assistant(
     index_changes=None,
     clicked_keys=(),
     rebuild_patches=None,
+    index_names=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -176,6 +177,7 @@ def imported_pdf_research_assistant(
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
     bootstrap_module.MANIFEST_PATH = Path(r"D:\papers-list\manifest.csv")
     bootstrap_module.PAPER_DIR = Path(r"D:\papers")
+    bootstrap_module.INDEX_DIR = active_index_dir.parent
 
     with mock.patch.dict(
         sys.modules,
@@ -213,6 +215,12 @@ def imported_pdf_research_assistant(
                     "pdf_research_assistant.index_record",
                     remember=mock.Mock(return_value=False),
                     find_changes=mock.Mock(return_value=index_changes),
+                ), \
+                mock.patch.multiple(
+                    # Read only the index names a test gives, and never save one for real.
+                    "pdf_research_assistant.index_names",
+                    load=mock.Mock(return_value=dict(index_names or {})),
+                    save_name=mock.Mock(),
                 ):
             # Mock traceback formatting before import so assistant error rendering stays deterministic.
             with mock.patch(
@@ -1188,12 +1196,22 @@ def test_describe_active_index_names_the_folder_and_the_manifest_in_use(pdf_rese
     )
 
     assert details == {
-        "name": "pqa_index_abc",
+        "name": None,
+        "folder_name": "pqa_index_abc",
         "folder": str(Path("index") / "pqa_index_abc"),
         "paper_list": "`manifest.csv` (3 PDFs)",
         "paper_list_path": str(Path("lists") / "manifest.csv"),
         "paper_dir": "papers",
     }
+
+
+def test_describe_active_index_keeps_the_friendly_name_given_to_the_index(pdf_research_assistant_module):
+    details = pdf_research_assistant_module.describe_active_index(
+        Path("index") / "pqa_index_abc", Path("manifest.csv"), 0, Path("papers"), "My library"
+    )
+
+    assert details["name"] == "My library"
+    assert details["folder_name"] == "pqa_index_abc"
 
 
 def test_describe_active_index_says_all_pdfs_are_in_scope_without_a_manifest(pdf_research_assistant_module):
@@ -1205,21 +1223,52 @@ def test_describe_active_index_says_all_pdfs_are_in_scope_without_a_manifest(pdf
     assert details["paper_list_path"] is None
 
 
-def test_render_active_index_shows_the_name_and_puts_the_paths_in_details(pdf_research_assistant_module):
-    st = pdf_research_assistant_module.st
-    for shown in (st.caption, st.markdown, st.expander):
-        shown.reset_mock()
+def _active_index_details(**changes):
+    return {
+        "name": None,
+        "folder_name": "pqa_index_abc",
+        "folder": "C:/index/pqa_index_abc",
+        "paper_list": "`manifest.csv` (3 PDFs)",
+        "paper_list_path": "D:/lists/manifest.csv",
+        "paper_dir": "D:/papers",
+    } | changes
 
-    pdf_research_assistant_module.render_active_index(
-        {
-            "name": "pqa_index_abc",
-            "folder": "C:/index/pqa_index_abc",
-            "paper_list": "`manifest.csv` (3 PDFs)",
-            "paper_list_path": "D:/lists/manifest.csv",
-            "paper_dir": "D:/papers",
-        }
+
+def draw_active_index(module, details, *, typed=None, submitted=False):
+    """Draw the active index line and details, with the user perhaps typing a name and saving it."""
+    st = module.st
+    for shown in (st.caption, st.markdown, st.expander, st.success, st.error, st.rerun):
+        shown.reset_mock()
+    st.form = mock.Mock(return_value=_ContextManagerStub())
+    st.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value if typed is None else typed)
+    st.form_submit_button = mock.Mock(return_value=submitted)
+    module.index_names.save_name.reset_mock()
+    module.render_active_index(details)
+
+
+def test_describe_index_name_shows_the_folder_when_the_index_has_no_name(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.describe_index_name("pqa_index_abc") == "`pqa_index_abc`"
+
+
+def test_describe_index_name_puts_the_friendly_name_first_and_keeps_the_folder(pdf_research_assistant_module):
+    assert (
+        pdf_research_assistant_module.describe_index_name("pqa_index_abc", "My library")
+        == "**My library** (`pqa_index_abc`)"
     )
 
+
+def test_escape_markdown_stops_a_name_being_read_as_formatting(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.escape_markdown("My *big* [x]:red `y`") == r"My \*big\* \[x\]\:red \`y\`"
+
+
+def test_render_active_index_shows_the_folder_and_puts_the_paths_and_name_box_in_details(
+    pdf_research_assistant_module,
+):
+    module = pdf_research_assistant_module
+
+    draw_active_index(module, _active_index_details())
+
+    st = module.st
     st.caption.assert_called_once_with("Active index: `pqa_index_abc` · Paper list: `manifest.csv` (3 PDFs)")
     st.expander.assert_called_once_with("Active index details")
     assert st.markdown.call_args_list == [
@@ -1227,26 +1276,108 @@ def test_render_active_index_shows_the_name_and_puts_the_paths_in_details(pdf_re
         mock.call("**Paper list:** `D:/lists/manifest.csv`"),
         mock.call("**PDF folder:** `D:/papers`"),
     ]
+    st.form.assert_called_once_with("index_name_form")
+    name_box = st.text_input.call_args
+    assert name_box.args == (module.INDEX_NAME_LABEL,)
+    assert name_box.kwargs["value"] == ""
+    assert name_box.kwargs["key"] == "index_name_pqa_index_abc"
+    assert name_box.kwargs["max_chars"] == module.index_names.MAX_LENGTH
+    assert name_box.kwargs["help"] == module.INDEX_NAME_HELP
+    st.form_submit_button.assert_called_once_with(module.INDEX_NAME_SAVE_LABEL)
+    module.index_names.save_name.assert_not_called()
+    st.success.assert_not_called()
+
+
+def test_render_active_index_shows_the_friendly_name_and_starts_the_box_with_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_active_index(module, _active_index_details(name="My *big* library"))
+
+    module.st.caption.assert_called_once_with(
+        r"Active index: **My \*big\* library** · Paper list: `manifest.csv` (3 PDFs)"
+    )
+    module.st.markdown.assert_any_call("**Index folder:** `C:/index/pqa_index_abc`")
+    assert module.st.text_input.call_args.kwargs["value"] == "My *big* library"
 
 
 def test_render_active_index_skips_the_paper_list_path_without_a_manifest(pdf_research_assistant_module):
-    st = pdf_research_assistant_module.st
-    st.markdown.reset_mock()
+    module = pdf_research_assistant_module
 
-    pdf_research_assistant_module.render_active_index(
-        {
-            "name": "pqa_index_abc",
-            "folder": "C:/index/pqa_index_abc",
-            "paper_list": "none, so all PDFs under PAPER_DIR are in scope",
-            "paper_list_path": None,
-            "paper_dir": "D:/papers",
-        }
+    draw_active_index(
+        module,
+        _active_index_details(paper_list="none, so all PDFs under PAPER_DIR are in scope", paper_list_path=None),
     )
 
-    assert st.markdown.call_args_list == [
+    assert module.st.markdown.call_args_list == [
         mock.call("**Index folder:** `C:/index/pqa_index_abc`"),
         mock.call("**PDF folder:** `D:/papers`"),
     ]
+
+
+def test_saving_a_name_saves_it_for_the_active_folder_and_draws_the_page_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_active_index(module, _active_index_details(), typed="My library", submitted=True)
+
+    module.index_names.save_name.assert_called_once_with(Path("C:/index/pqa_index_abc"), "My library")
+    assert module.st.session_state.index_name_notice == module.INDEX_NAME_SAVED_NOTICE
+    module.st.rerun.assert_called_once_with()
+    module.st.error.assert_not_called()
+
+
+def test_saving_an_empty_name_says_the_folder_name_is_shown_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_active_index(module, _active_index_details(name="My library"), typed="  ", submitted=True)
+
+    module.index_names.save_name.assert_called_once_with(Path("C:/index/pqa_index_abc"), "  ")
+    assert module.st.session_state.index_name_notice == module.INDEX_NAME_REMOVED_NOTICE
+    module.st.rerun.assert_called_once_with()
+
+
+def test_saving_a_name_that_is_refused_says_why_and_keeps_the_page(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.index_names.save_name.side_effect = ValueError("“My *library*” is taken.")
+    try:
+        module.st.error.reset_mock()
+        draw_active_index(module, _active_index_details(), typed="My *library*", submitted=True)
+    finally:
+        module.index_names.save_name.side_effect = None
+
+    module.st.error.assert_called_once_with(r"“My \*library\*” is taken\.")
+    module.st.rerun.assert_not_called()
+    assert "index_name_notice" not in module.st.session_state
+
+
+def test_saving_a_name_that_cannot_be_written_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.index_names.save_name.side_effect = OSError("read-only")
+    try:
+        draw_active_index(module, _active_index_details(), typed="My library", submitted=True)
+    finally:
+        module.index_names.save_name.side_effect = None
+
+    module.st.error.assert_called_once_with(rf"{module.INDEX_NAME_SAVE_FAILED_NOTICE} read\-only")
+    module.st.rerun.assert_not_called()
+
+
+def test_render_active_index_shows_the_notice_left_by_saving_a_name_once(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.index_name_notice = module.INDEX_NAME_SAVED_NOTICE
+
+    draw_active_index(module, _active_index_details(name="My library"))
+
+    module.st.success.assert_called_once_with(module.INDEX_NAME_SAVED_NOTICE)
+    assert "index_name_notice" not in module.st.session_state
+
+
+def test_page_shows_the_friendly_name_of_the_active_index():
+    with imported_pdf_research_assistant(
+        active_index_dir=Path(r"C:\index\active-shard"), index_names={"active-shard": "My library"}
+    ) as module:
+        module.index_names.load.assert_any_call(Path(r"C:\index"))
+        captions = [call.args[0] for call in module.st.caption.call_args_list]
+        assert "Active index: **My library** · Paper list: none, so all PDFs under PAPER_DIR are in scope" in captions
 
 
 def test_render_failed_files_shows_nothing_when_no_file_failed(pdf_research_assistant_module):
@@ -1685,6 +1816,21 @@ def test_describe_index_changes_leaves_out_the_list_when_no_change_is_known(pdf_
     assert text.endswith("there is none yet.\n\n" + module.INDEX_CHANGES_NOTE)
 
 
+def test_describe_index_changes_names_the_old_index_by_its_friendly_name(pdf_research_assistant_module):
+    text = pdf_research_assistant_module.describe_index_changes(CHUNK_CHANGES | {"name": "Old library"})
+
+    assert "since the index **Old library** (`pqa_index_old`) was built" in text
+
+
+def test_page_names_the_old_index_by_its_friendly_name_in_the_warning_and_the_changed_notes():
+    with imported_pdf_research_assistant(
+        indexed_count=0, index_changes=CHUNK_CHANGES, index_names={"pqa_index_old": "Old library"}
+    ) as module:
+        module.st.warning.assert_any_call(module.describe_index_changes(CHUNK_CHANGES | {"name": "Old library"}))
+        captions = [call.args[0] for call in module.st.caption.call_args_list]
+        assert "Changed. The index **Old library** (`pqa_index_old`) was built with `5000`." in captions
+
+
 def test_index_changes_note_says_how_to_end_the_warning(pdf_research_assistant_module):
     note = pdf_research_assistant_module.INDEX_CHANGES_NOTE
 
@@ -1886,6 +2032,20 @@ def test_render_answer_settings_lists_the_index_and_each_setting_in_an_expander(
         mock.call("**Answer model:** `gpt-4o-mini`"),
         mock.call("**Passages gathered:** `3` :gray-badge[This question only]"),
     ]
+
+
+def test_render_answer_settings_names_the_index_by_its_friendly_name(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.markdown.reset_mock()
+    module.index_names.load.reset_mock()
+    module.index_names.load.return_value = {"pqa_index_x": "My library"}
+    try:
+        module.render_answer_settings({"index": "pqa_index_x", "values": []})
+    finally:
+        module.index_names.load.return_value = {}
+
+    module.index_names.load.assert_called_once_with(module.bootstrap.INDEX_DIR)
+    module.st.markdown.assert_called_once_with("**Index:** **My library** (`pqa_index_x`)")
 
 
 def test_render_history_skips_answer_actions_when_an_assistant_item_has_no_cost(pdf_research_assistant_module):
@@ -2875,6 +3035,26 @@ def test_describe_rebuild_plan_says_how_many_pdfs_are_already_indexed(pdf_resear
     assert not any("enrichment" in line for line in lines)
 
 
+def test_describe_rebuild_plan_names_the_index_by_its_friendly_name(pdf_research_assistant_module):
+    lines = pdf_research_assistant_module.describe_rebuild_plan(
+        _fake_settings(), Path("index/pqa_index_abc"), 10, 0, "My library"
+    )
+
+    assert lines[1].startswith("Index: **My library** (`pqa_index_abc`), built with")
+
+
+def test_rebuild_confirm_step_names_the_active_index_by_its_friendly_name():
+    with imported_pdf_research_assistant(
+        indexed_count=0,
+        app_state=_empty_state() | {"rebuild_pending": True},
+        active_index_dir=Path(r"C:\index\active-shard"),
+        index_names={"active-shard": "My library"},
+    ) as module:
+        plans = [call.args[0] for call in module.st.markdown.call_args_list if call.args[0].startswith("- PDFs")]
+        assert len(plans) == 1
+        assert "- Index: **My library** (`active-shard`), built with" in plans[0]
+
+
 def test_describe_rebuild_plan_leaves_out_the_indexed_count_for_an_empty_index(pdf_research_assistant_module):
     lines = pdf_research_assistant_module.describe_rebuild_plan(_fake_settings(), Path("index/pqa_index_abc"), 10, 0)
 
@@ -2905,7 +3085,7 @@ def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_setti
         module.st.info.assert_any_call(module.REBUILD_RUNNING_NOTE)
         module.st.caption.assert_any_call(f"Details are written to `{run['log_path']}`.")
         module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
-        module.st.form_submit_button.assert_called_once_with(module.INDEX_SETTINGS_SAVE_LABEL, disabled=True)
+        module.st.form_submit_button.assert_any_call(module.INDEX_SETTINGS_SAVE_LABEL, disabled=True)
         module.bootstrap.get_indexed_doc_count.assert_any_call(index_dir=run["index_dir"])
         assert not any(str(key).startswith("rebuild_") for key in keys)
         assert module.st.chat_input.call_args.kwargs["disabled"] is True

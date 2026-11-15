@@ -14,6 +14,7 @@ from pdf_research_assistant import (
     bootstrap,
     estimate,
     exhaustive_client,
+    index_names,
     index_record,
     local_llm,
     rate_profiles,
@@ -31,6 +32,19 @@ INSTANT_SETTINGS_TITLE = "Applies to your next question"
 INSTANT_SETTINGS_NOTE = (
     "Change these whenever you like. They take effect on your next question, and the index is not rebuilt."
 )
+INDEX_NAME_LABEL = "Index name"
+INDEX_NAME_HELP = (
+    "A name of your own for this index, shown instead of its folder name across the app. It stays with this "
+    "index folder: change the library and index settings and the page shows the other index's name, put them "
+    "back and this name comes back. Names are kept in `index_names.json` beside the index folders. "
+    "Leave it empty to show the folder name."
+)
+INDEX_NAME_SAVE_LABEL = "Save name"
+INDEX_NAME_SAVED_NOTICE = "Index name saved."
+INDEX_NAME_REMOVED_NOTICE = "Index name removed. The index is shown by its folder name again."
+INDEX_NAME_SAVE_FAILED_NOTICE = "The index name could not be saved:"
+# Characters Streamlit's Markdown would read as formatting, including the colon of :red[...] and badges.
+MARKDOWN_SPECIAL_CHARACTERS = set("\\`*_{}[]()<>#+-.!|~:$")
 REINDEX_SETTINGS_TITLE = "Needs an index rebuild"
 REINDEX_SETTINGS_NOTE = (
     "These decide how your PDFs are read and stored in the index. Changing any of them means the app has to "
@@ -290,7 +304,9 @@ def render_answer_settings(recorded: dict | None) -> None:
     if not recorded:
         return
     with st.expander(ANSWER_SETTINGS_TITLE):
-        st.markdown(settings_groups.describe_line("Index", recorded["index"]))
+        # The index's name now, so an index named after the answer was given is shown by that name too.
+        friendly_name = index_names.load(bootstrap.INDEX_DIR).get(recorded["index"])
+        st.markdown(f"**Index:** {describe_index_name(recorded['index'], friendly_name)}")
         for item in recorded["values"]:
             st.markdown(settings_groups.describe_recorded_setting(item))
 
@@ -464,16 +480,33 @@ def render_index_status(status: list[tuple[str, str]]) -> None:
         getattr(st, level)(message)
 
 
+def escape_markdown(text: str) -> str:
+    """Return text that Streamlit's Markdown shows as typed, such as a name the user gave an index."""
+    return "".join(f"\\{char}" if char in MARKDOWN_SPECIAL_CHARACTERS else char for char in text)
+
+
+def describe_index_name(folder_name: str, friendly_name: str | None = None) -> str:
+    """Return Markdown naming an index: its friendly name with the folder after it, or the folder alone."""
+    if friendly_name:
+        return f"**{escape_markdown(friendly_name)}** (`{folder_name}`)"
+    return f"`{folder_name}`"
+
+
 def describe_active_index(
-    active_index_dir: Path, manifest_path: Path, manifest_count: int, paper_dir: Path
+    active_index_dir: Path,
+    manifest_path: Path,
+    manifest_count: int,
+    paper_dir: Path,
+    friendly_name: str | None = None,
 ) -> dict[str, str | None]:
     """Describe the index the query path uses; a manifest count of 0 means no paper list is in use.
 
-    "name" is the folder name for now, so a friendly name can replace it later without changing the layout.
+    "name" is the friendly name the user gave the index, or None; "folder_name" is PaperQA's own name for it.
     """
     use_manifest_scope = manifest_count > 0
     return {
-        "name": active_index_dir.name,
+        "name": friendly_name,
+        "folder_name": active_index_dir.name,
         "folder": str(active_index_dir),
         "paper_list": (
             f"`{manifest_path.name}` ({manifest_count} PDFs)"
@@ -486,11 +519,14 @@ def describe_active_index(
 
 
 def describe_index_changes(changes: dict) -> str:
-    """Return the warning for library and index settings that changed since the last index was built."""
+    """Return the warning for library and index settings that changed since the last index was built.
+
+    changes comes from index_record.find_changes, with "name" added when the old index has a friendly name.
+    """
     parts = [
         "**Your library and index settings no longer match the index.** They have changed since the index "
-        f"`{changes['index']}` was built, so the app is now looking for an index built with the new settings, "
-        "and there is none yet."
+        f"{describe_index_name(changes['index'], changes.get('name'))} was built, so the app is now looking for an "
+        "index built with the new settings, and there is none yet."
     ]
     if changes["settings"]:
         parts.append(
@@ -505,13 +541,45 @@ def render_index_changes(changes: dict | None) -> None:
         st.warning(describe_index_changes(changes))
 
 
+def save_index_name(active_index_dir: Path, name: str) -> None:
+    """Save the name typed for the active index and draw the page again, or say why it was not saved."""
+    try:
+        index_names.save_name(active_index_dir, name)
+    except ValueError as exc:
+        # The message repeats the typed name, which must show as typed.
+        st.error(escape_markdown(str(exc)))
+        return
+    except OSError as exc:
+        st.error(f"{INDEX_NAME_SAVE_FAILED_NOTICE} {escape_markdown(str(exc))}")
+        return
+    st.session_state.index_name_notice = INDEX_NAME_SAVED_NOTICE if name.strip() else INDEX_NAME_REMOVED_NOTICE
+    st.rerun()
+
+
 def render_active_index(details: dict[str, str | None]) -> None:
-    st.caption(f"Active index: `{details['name']}` · Paper list: {details['paper_list']}")
+    """Show which index is in use, by its friendly name when it has one, with its folder and a name box in details."""
+    shown_name = f"**{escape_markdown(details['name'])}**" if details["name"] else f"`{details['folder_name']}`"
+    st.caption(f"Active index: {shown_name} · Paper list: {details['paper_list']}")
     with st.expander("Active index details"):
+        notice = st.session_state.pop("index_name_notice", None)
+        if notice:
+            st.success(notice)
         st.markdown(f"**Index folder:** `{details['folder']}`")
         if details["paper_list_path"]:
             st.markdown(f"**Paper list:** `{details['paper_list_path']}`")
         st.markdown(f"**PDF folder:** `{details['paper_dir']}`")
+        with st.form("index_name_form"):
+            # Keyed by folder, so a box drawn for one index never carries its name over to another.
+            typed = st.text_input(
+                INDEX_NAME_LABEL,
+                value=details["name"] or "",
+                key=f"index_name_{details['folder_name']}",
+                max_chars=index_names.MAX_LENGTH,
+                help=INDEX_NAME_HELP,
+            )
+            submitted = st.form_submit_button(INDEX_NAME_SAVE_LABEL)
+        if submitted:
+            save_index_name(Path(details["folder"]), typed)
 
 
 def index_needs_rebuild(indexed_count: int, manifest_count: int, failed_files: list[str]) -> bool:
@@ -523,14 +591,17 @@ def index_needs_rebuild(indexed_count: int, manifest_count: int, failed_files: l
     return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files)
 
 
-def describe_rebuild_plan(settings, active_index_dir: Path, pdf_count: int, indexed_count: int) -> list[str]:
+def describe_rebuild_plan(
+    settings, active_index_dir: Path, pdf_count: int, indexed_count: int, friendly_name: str | None = None
+) -> list[str]:
     """Describe what a rebuild will do and what is paid for, so the user can decide whether to start it."""
     scope = f"PDFs in scope: {pdf_count}"
     if indexed_count:
         scope += f". {indexed_count} are already in this index and are not indexed again"
     lines = [
         scope,
-        f"Index: `{active_index_dir.name}`, built with the library and index settings saved in the sidebar",
+        f"Index: {describe_index_name(active_index_dir.name, friendly_name)}, built with the library and index "
+        "settings saved in the sidebar",
         f"Each PDF that is indexed is read, split into passages and sent to the embedding model "
         f"`{settings.embedding}`, which costs money. The app cannot estimate how much before reading the PDFs",
     ]
@@ -554,9 +625,10 @@ def render_rebuild_pending(settings, active_index_dir: Path, manifest_count: int
     """Show what the rebuild involves and start it only when the user confirms."""
     pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR)
     st.markdown(f"**{REBUILD_LABEL}**")
-    st.markdown(
-        "\n".join(f"- {line}" for line in describe_rebuild_plan(settings, active_index_dir, pdf_count, indexed_count))
+    plan = describe_rebuild_plan(
+        settings, active_index_dir, pdf_count, indexed_count, index_names.get_name(active_index_dir)
     )
+    st.markdown("\n".join(f"- {line}" for line in plan))
     if st.button(REBUILD_CONFIRM_LABEL, key="rebuild_confirm"):
         rebuild_client.start(active_index_dir, pdf_count)
         st.session_state.rebuild_pending = False
@@ -891,7 +963,8 @@ def render_index_settings_reset() -> None:
 def render_changed_note(setting: settings_groups.Setting, changed: dict, index_changes: dict | None) -> None:
     """Say what a setting was when the last index was built, if it has changed since."""
     if setting.key in changed:
-        st.caption(f"Changed. The index `{index_changes['index']}` was built with `{changed[setting.key]}`.")
+        index = describe_index_name(index_changes["index"], index_changes.get("name"))
+        st.caption(f"Changed. The index {index} was built with `{changed[setting.key]}`.")
 
 
 def render_reindex_settings(settings, index_changes: dict | None = None, busy: bool = False) -> None:
@@ -1117,6 +1190,10 @@ def main() -> None:
         index_changes = None
     else:
         index_changes = index_record.find_changes(settings, active_index_dir)
+    # Friendly names sit beside the index folders, keyed by folder name.
+    names = index_names.load(active_index_dir.parent)
+    if index_changes:
+        index_changes = index_changes | {"name": names.get(index_changes["index"])}
     failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
@@ -1134,7 +1211,13 @@ def main() -> None:
         busy=busy,
     )
     render_active_index(
-        describe_active_index(active_index_dir, bootstrap.MANIFEST_PATH, manifest_count, bootstrap.PAPER_DIR)
+        describe_active_index(
+            active_index_dir,
+            bootstrap.MANIFEST_PATH,
+            manifest_count,
+            bootstrap.PAPER_DIR,
+            names.get(active_index_dir.name),
+        )
     )
     render_failed_files(failed_files)
 

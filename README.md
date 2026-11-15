@@ -86,11 +86,25 @@ Streamlit usually opens the app in your browser automatically and prints the loc
 The Streamlit sidebar puts settings in two groups:
 
 - **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
-- **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page reading, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again. They are set in `.env` and in `src/pdf_research_assistant/bootstrap.py`, and the sidebar shows their current values.
+- **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page pictures, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again.
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
 
-If you change one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings. Changing a setting in the other group never raises it.
+Open **Library and index settings** in the rebuild group to change how your PDFs are indexed:
+
+| Setting | What it changes in PaperQA | Affects |
+| --- | --- | --- |
+| Embedding model | `embedding`: `text-embedding-3-small` or `text-embedding-3-large` | Indexing and questions |
+| Chunk size | `parsing.reader_config["chunk_chars"]`, from 2000 to 20000 characters | Indexing and questions |
+| Chunk overlap | `parsing.reader_config["overlap"]`, from 0 to 1750 characters | Indexing only |
+| Whole-page pictures | `parsing.reader_config["full_page"]` | Indexing and questions |
+| Images and tables | `parsing.multimodal`: off, on without enrichment, or on with enrichment | Indexing and questions |
+
+Each control's help says what the setting does and what it costs. Nothing changes until you click **Save index settings**. The choices are saved to `saved_settings.json`, so the command line, `pdf-research-rebuild` and exhaustive search use them too. **Go back to the default index settings** removes them. The PDF folder (`PAPER_DIR` in `.env`), the PDF reader and the path style are shown but cannot be changed there.
+
+Images and tables need the `pypdfium2` package (`pip install paper-qa-pypdf[media]`); the app will not save that setting without it. Enrichment is an extra paid model call for every image and table while indexing.
+
+When you save a change to one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings. Changing a setting in the other group never raises it.
 
 Two numbers control how much evidence goes into an answer. They are PaperQA's `answer.evidence_k` and `answer.answer_max_sources` settings:
 

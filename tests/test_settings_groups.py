@@ -218,10 +218,20 @@ def test_describe_recorded_setting_says_where_a_value_came_from_when_known():
 # Settings the user can change from the sidebar.
 
 
-def test_only_the_source_answer_length_and_rate_profile_settings_can_be_saved_from_the_sidebar_so_far():
+def test_the_settings_that_can_be_saved_from_the_sidebar():
     saved = [setting.key for setting in settings_groups.SETTINGS if setting.write is not None]
 
-    assert saved == ["evidence_k", "answer_max_sources", "answer_length", "rate_profile"]
+    assert saved == [
+        "evidence_k",
+        "answer_max_sources",
+        "answer_length",
+        "rate_profile",
+        "embedding",
+        "chunk_chars",
+        "overlap",
+        "full_page",
+        "multimodal",
+    ]
     assert all(setting.check is not None for setting in settings_groups.SETTINGS if setting.write is not None)
 
 
@@ -325,6 +335,7 @@ def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
     [
         ("no_such_setting", 3),
         ("answer_model", "some-other-model"),
+        ("paper_directory", "papers"),
         ("evidence_k", 0),
         ("answer_length", "one paragraph"),
     ],
@@ -370,3 +381,108 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
     }
     assert record["values"][1]["value"] == "3"
     assert settings_groups.ONE_OFF_SOURCE == "This question only"
+
+
+# Library and index settings the user can change from the sidebar.
+
+INDEX_CHOICES = [
+    ("embedding", "text-embedding-3-large"),
+    ("chunk_chars", 3000),
+    ("overlap", 100),
+    ("full_page", True),
+    ("multimodal", "on_without_enrichment"),
+    ("multimodal", "on_with_enrichment"),
+]
+
+
+@pytest.mark.parametrize(("key", "value"), INDEX_CHOICES)
+def test_writing_an_index_setting_changes_the_paperqa_value_and_the_index_name(key, value, tmp_path):
+    settings = _real_settings(tmp_path)
+    setting = settings_groups.get_setting(key)
+    name_before = settings.get_index_name()
+
+    setting.write(settings, setting.check(value))
+
+    assert settings_groups.current_choice(setting, settings) == value
+    assert settings.get_index_name() != name_before
+
+
+def test_every_index_setting_starts_at_a_value_its_control_offers(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    for setting in settings_groups.REINDEX_SETTINGS:
+        if setting.write is not None:
+            assert settings_groups.usable(setting.key, settings_groups.current_choice(setting, settings))
+
+
+def test_saving_an_index_setting_at_the_value_in_use_keeps_the_index_name(tmp_path):
+    """Otherwise saving a form the user left alone would send PaperQA looking for a new index."""
+    settings = _real_settings(tmp_path)
+    name_before = settings.get_index_name()
+
+    for setting in settings_groups.REINDEX_SETTINGS:
+        if setting.write is not None:
+            setting.write(settings, settings_groups.current_choice(setting, settings))
+
+    assert settings.get_index_name() == name_before
+    assert settings.parsing.multimodal is False
+
+
+def test_current_choice_is_the_value_read_unless_the_setting_stores_it_another_way():
+    settings = SimpleNamespace(embedding="text-embedding-3-small", parsing=SimpleNamespace(multimodal=True))
+
+    assert settings_groups.current_choice(settings_groups.get_setting("embedding"), settings) == "text-embedding-3-small"
+    assert settings_groups.current_choice(settings_groups.get_setting("multimodal"), settings) == "on_with_enrichment"
+
+
+def test_images_and_tables_choices_are_named_as_the_value_is_shown_everywhere_else(tmp_path):
+    """The reindex warning and last_index.json show describe_value's text, so the choices use the same words."""
+    setting = settings_groups.get_setting("multimodal")
+    settings = _real_settings(tmp_path)
+
+    for name, value in setting.check.choices:
+        setting.write(settings, value)
+        assert settings_groups.describe_value(setting.read(settings)) == name
+    assert [name for name, _value in setting.check.choices] == ["Off", "On without enrichment", "On with enrichment"]
+
+
+def test_chunk_limits_cover_paperqa_s_presets_and_keep_the_overlap_shorter_than_a_chunk():
+    chunk = settings_groups.get_setting("chunk_chars").check
+    overlap = settings_groups.get_setting("overlap").check
+
+    # PaperQA's bundled presets use chunks of 5000 to 9000 characters and overlaps of 250 to 1750.
+    assert chunk.low <= 5000 and chunk.high >= 9000
+    assert overlap.low == 0 and overlap.high >= 1750
+    # PaperQA's chunking never finishes when the overlap is as long as the chunk.
+    assert overlap.high < chunk.low
+    assert (chunk.step, overlap.step) == (500, 50)
+
+
+def test_whole_number_steps_by_one_unless_told_otherwise():
+    assert settings_groups.WholeNumber(1, 30).step == 1
+
+
+def test_embedding_offers_openai_s_two_current_models():
+    assert settings_groups.get_setting("embedding").check.values == ("text-embedding-3-small", "text-embedding-3-large")
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_on_or_off_returns_either_value(value):
+    assert settings_groups.OnOrOff()(value) is value
+
+
+@pytest.mark.parametrize("value", [1, 0, "on", None])
+def test_on_or_off_rejects_anything_else(value):
+    with pytest.raises(ValueError, match="on or off"):
+        settings_groups.OnOrOff()(value)
+
+
+@pytest.mark.parametrize("setting", settings_groups.REINDEX_SETTINGS, ids=lambda setting: setting.key)
+def test_every_index_setting_says_whether_it_affects_indexing_only(setting):
+    assert ("Affects indexing only" in setting.help) != ("Also affects questions" in setting.help)
+
+
+def test_index_settings_that_cost_money_say_so():
+    assert "cost" in settings_groups.get_setting("embedding").help
+    assert "cost" in settings_groups.get_setting("multimodal").help
+    assert "cost" in settings_groups.get_setting("chunk_chars").help

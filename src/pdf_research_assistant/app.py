@@ -1,4 +1,5 @@
 import base64
+import importlib.util
 import json
 import os
 import subprocess
@@ -32,13 +33,26 @@ INSTANT_SETTINGS_NOTE = (
 REINDEX_SETTINGS_TITLE = "Needs an index rebuild"
 REINDEX_SETTINGS_NOTE = (
     "These decide how your PDFs are read and stored in the index. Changing any of them means the app has to "
-    "index every PDF again, which can take a long time. They are set in `.env` and in the app's code, "
-    "so they are shown here for reference."
+    "index every PDF again, which can take a long time and costs money for embeddings. Nothing changes until "
+    "you click **Save index settings**. The ones without a control are fixed in `.env` or in the app itself."
 )
 REBUILD_BADGE = ":orange-badge[Needs rebuild]"
 INDEX_CHANGES_NOTE = (
-    "To keep using that index, put these settings back as they were. Otherwise the app has to index every PDF "
-    "again with the new settings, which can take a long time and may cost money for embeddings."
+    "To keep using that index, put these settings back as they were, under **Library and index settings** in "
+    "the sidebar. Otherwise the app has to index every PDF again with the new settings, which can take a long "
+    "time and may cost money for embeddings."
+)
+INDEX_SETTING_KEYS = [setting.key for setting in settings_groups.REINDEX_SETTINGS if setting.write is not None]
+INDEX_SETTINGS_SAVE_LABEL = "Save index settings"
+INDEX_SETTINGS_RESET_LABEL = "Go back to the default index settings"
+INDEX_SETTINGS_SAVED_NOTICE = (
+    "Index settings saved. PaperQA now looks for an index built with them, so your PDFs have to be indexed "
+    "again before they can be searched."
+)
+INDEX_SETTINGS_UNCHANGED_NOTE = "These are the settings already in use, so nothing was saved."
+MEDIA_PACKAGE_NOTE = (
+    "Images and tables cannot be read yet, because the `pypdfium2` package is not installed. Install it with "
+    "`pip install paper-qa-pypdf[media]`, restart the app and save again. Nothing was changed."
 )
 SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
@@ -671,9 +685,95 @@ def render_instant_settings(settings) -> tuple[str, dict]:
     return search_mode, one_off
 
 
-def render_reindex_settings(settings, index_changes: dict | None = None) -> None:
-    """Show the current value of each setting that cannot change without rebuilding the index.
+def index_widget_key(setting_key: str) -> str:
+    """Return an index control's key, which changes each time the index settings go back to the defaults."""
+    return f"index_setting_{setting_key}_{st.session_state.get('index_settings_round', 0)}"
 
+
+def draw_index_setting(setting: settings_groups.Setting, settings) -> object:
+    """Draw the control for an index setting, starting at the value in use, and return the value left in it.
+
+    The kind of control follows the setting's check: a number box, a list of choices, or a tick box.
+    A value in use that the list does not offer is offered as well, so drawing never changes a setting.
+    """
+    current = settings_groups.current_choice(setting, settings)
+    label = f"{setting.label} {REBUILD_BADGE}"
+    key = index_widget_key(setting.key)
+    check = setting.check
+    if isinstance(check, settings_groups.WholeNumber):
+        return st.number_input(
+            label,
+            min_value=check.low,
+            max_value=check.high,
+            value=min(max(current, check.low), check.high),
+            step=check.step,
+            help=setting.help,
+            key=key,
+        )
+    if isinstance(check, settings_groups.OneOf):
+        options = list(check.values)
+        if current not in options:
+            options.append(current)
+        return st.selectbox(
+            label,
+            options,
+            index=options.index(current),
+            format_func=lambda value: check.name_for(value) or str(value),
+            help=setting.help,
+            key=key,
+        )
+    return st.checkbox(label, value=bool(current), help=setting.help, key=key)
+
+
+def media_reading_available() -> bool:
+    """Return whether the package PaperQA's PDF reader needs for images and tables is installed."""
+    return importlib.util.find_spec("pypdfium2") is not None
+
+
+def save_index_settings(chosen: dict, settings) -> None:
+    """Save the index settings that differ from the ones in use, then draw the page again.
+
+    Saving changes the index PaperQA looks for, so the next page load shows that the index needs building.
+    """
+    changed = {
+        key: value
+        for key, value in chosen.items()
+        if value != settings_groups.current_choice(settings_groups.get_setting(key), settings)
+    }
+    if not changed:
+        st.info(INDEX_SETTINGS_UNCHANGED_NOTE)
+        return
+    if changed.get("multimodal", settings_groups.MEDIA_OFF) != settings_groups.MEDIA_OFF and not media_reading_available():
+        st.error(MEDIA_PACKAGE_NOTE)
+        return
+    for key, value in changed.items():
+        saved_settings.save_value(key, value)
+    st.session_state.index_settings_notice = INDEX_SETTINGS_SAVED_NOTICE
+    st.rerun()
+
+
+def render_index_settings_reset() -> None:
+    """Offer to remove every saved index setting, once at least one is saved."""
+    saved = saved_settings.load()
+    if any(key in saved for key in INDEX_SETTING_KEYS) and st.button(
+        INDEX_SETTINGS_RESET_LABEL, key="index_settings_reset"
+    ):
+        saved_settings.forget(INDEX_SETTING_KEYS)
+        # The browser keeps the old values in controls it has already drawn, so draw new ones.
+        st.session_state.index_settings_round = st.session_state.get("index_settings_round", 0) + 1
+        st.rerun()
+
+
+def render_changed_note(setting: settings_groups.Setting, changed: dict, index_changes: dict | None) -> None:
+    """Say what a setting was when the last index was built, if it has changed since."""
+    if setting.key in changed:
+        st.caption(f"Changed. The index `{index_changes['index']}` was built with `{changed[setting.key]}`.")
+
+
+def render_reindex_settings(settings, index_changes: dict | None = None) -> None:
+    """Show each setting that cannot change without rebuilding the index, with a control where it can change.
+
+    The controls sit in one form, so several can be changed and saved together; nothing is saved before then.
     index_changes comes from index_record.find_changes; each changed setting also says what it was.
     """
     changed = {item["key"]: item["was"] for item in (index_changes or {}).get("settings", [])}
@@ -681,11 +781,25 @@ def render_reindex_settings(settings, index_changes: dict | None = None) -> None
         st.subheader(REINDEX_SETTINGS_TITLE)
         st.caption(REINDEX_SETTINGS_NOTE)
         with st.expander("Library and index settings"):
+            notice = st.session_state.pop("index_settings_notice", None)
+            if notice:
+                st.success(notice)
+            chosen = {}
+            with st.form("index_settings_form"):
+                for setting in settings_groups.REINDEX_SETTINGS:
+                    if setting.write is not None:
+                        chosen[setting.key] = draw_index_setting(setting, settings)
+                        render_changed_note(setting, changed, index_changes)
+                submitted = st.form_submit_button(INDEX_SETTINGS_SAVE_LABEL)
+            if submitted:
+                save_index_settings(chosen, settings)
+            render_index_settings_reset()
+            # The settings with no control come last, below the ones that can be saved.
             for setting in settings_groups.REINDEX_SETTINGS:
-                st.markdown(f"{settings_groups.describe_setting(setting, settings)} {REBUILD_BADGE}")
-                st.caption(setting.help)
-                if setting.key in changed:
-                    st.caption(f"Changed. The index `{index_changes['index']}` was built with `{changed[setting.key]}`.")
+                if setting.write is None:
+                    st.markdown(f"{settings_groups.describe_setting(setting, settings)} {REBUILD_BADGE}")
+                    st.caption(setting.help)
+                    render_changed_note(setting, changed, index_changes)
 
 
 def render_usage(app_state: dict) -> None:

@@ -117,6 +117,9 @@ def imported_pdf_research_assistant(
         # And the button that puts the sidebar settings back to the defaults.
         if str(key or "").startswith("answer_settings_"):
             return False
+        # And the one that does the same for the library and index settings.
+        if str(key or "").startswith("index_settings_"):
+            return False
         return queued_button_values.pop(0)
 
     streamlit_module.button = mock.Mock(side_effect=click)
@@ -124,6 +127,9 @@ def imported_pdf_research_assistant(
     streamlit_module.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
     streamlit_module.number_input = mock.Mock(side_effect=lambda _label, value=None, **_kwargs: value)
     streamlit_module.toggle = mock.Mock(return_value=False)
+    streamlit_module.checkbox = mock.Mock(side_effect=lambda _label, value=False, **_kwargs: value)
+    streamlit_module.form = mock.Mock(return_value=_ContextManagerStub())
+    streamlit_module.form_submit_button = mock.Mock(return_value=False)
     streamlit_module.success = mock.Mock()
     streamlit_module.expander = mock.Mock(return_value=_ContextManagerStub())
     streamlit_module.subheader = mock.Mock()
@@ -1038,8 +1044,9 @@ def test_import_renders_history_and_assistant_history_actions():
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
         # The active index details (index and PDF folders, no paper list here) and the sidebar's guide and
-        # index settings are Markdown too; they are drawn before the chat.
-        lines_before_chat = 2 + 1 + len(module.settings_groups.REINDEX_SETTINGS)
+        # fixed index settings are Markdown too; they are drawn before the chat.
+        fixed_index_settings = [s for s in module.settings_groups.REINDEX_SETTINGS if s.write is None]
+        lines_before_chat = 2 + 1 + len(fixed_index_settings)
         chat_markdown = module.st.markdown.call_args_list[lines_before_chat:]
         assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
@@ -1322,13 +1329,39 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     ]
 
 
-def test_render_reindex_settings_marks_every_index_setting_as_needing_a_rebuild(pdf_research_assistant_module):
+def draw_index_settings(module, *, settings=None, changes=None, chosen=None, submitted=False, saved=None, clicked=()):
+    """Draw the library and index settings, with the user choosing values and perhaps clicking a button.
+
+    chosen maps a control's label to the value the user leaves in it.
+    """
+    st = module.st
+    chosen = chosen or {}
+    for shown in (st.subheader, st.caption, st.expander, st.markdown, st.rerun, st.error, st.info, st.success):
+        shown.reset_mock()
+    st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: chosen.get(label, value))
+    st.selectbox = mock.Mock(side_effect=lambda label, options, index=0, **_kwargs: chosen.get(label, options[index]))
+    st.checkbox = mock.Mock(side_effect=lambda label, value=False, **_kwargs: chosen.get(label, value))
+    st.form = mock.Mock(return_value=_ContextManagerStub())
+    st.form_submit_button = mock.Mock(return_value=submitted)
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    with mock.patch.multiple(
+        module.saved_settings, load=mock.Mock(return_value=saved or {}), save_value=mock.DEFAULT, forget=mock.DEFAULT
+    ) as patched:
+        module.render_reindex_settings(settings or _fake_settings(), changes)
+        return patched
+
+
+def _control(widget, setting_label):
+    return next(call for call in widget.call_args_list if call.args[0].startswith(setting_label))
+
+
+def test_render_reindex_settings_shows_the_fixed_settings_and_marks_them_as_needing_a_rebuild(
+    pdf_research_assistant_module,
+):
     module = pdf_research_assistant_module
     st = module.st
-    for shown in (st.subheader, st.caption, st.expander, st.markdown):
-        shown.reset_mock()
 
-    module.render_reindex_settings(_fake_settings())
+    draw_index_settings(module)
 
     st.subheader.assert_called_once_with(module.REINDEX_SETTINGS_TITLE)
     st.caption.assert_any_call(module.REINDEX_SETTINGS_NOTE)
@@ -1337,45 +1370,243 @@ def test_render_reindex_settings_marks_every_index_setting_as_needing_a_rebuild(
     assert lines == [
         f"**PDF folder:** `papers` {module.REBUILD_BADGE}",
         f"**Full folder path kept in the index:** `Off` {module.REBUILD_BADGE}",
-        f"**Embedding model:** `text-embedding-3-small` {module.REBUILD_BADGE}",
         f"**PDF reader:** `_fake_pdf_reader` {module.REBUILD_BADGE}",
-        f"**Chunk size (characters):** `5000` {module.REBUILD_BADGE}",
-        f"**Chunk overlap (characters):** `250` {module.REBUILD_BADGE}",
-        f"**Whole-page reading:** `Off` {module.REBUILD_BADGE}",
-        f"**Images and tables:** `Off` {module.REBUILD_BADGE}",
     ]
-    for setting in module.settings_groups.REINDEX_SETTINGS:
-        st.caption.assert_any_call(setting.help)
+    for key in ("paper_directory", "use_absolute_paper_directory", "parse_pdf"):
+        st.caption.assert_any_call(module.settings_groups.get_setting(key).help)
+
+
+def test_index_settings_that_can_change_get_a_control_starting_at_the_value_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    get_setting = module.settings_groups.get_setting
+
+    draw_index_settings(module, settings=_fake_settings(reader_config={"chunk_chars": 7000, "overlap": 300}))
+
+    chunk = _control(st.number_input, "Chunk size (characters)")
+    assert chunk.args[0] == f"Chunk size (characters) {module.REBUILD_BADGE}"
+    assert chunk.kwargs == {
+        "min_value": 2000,
+        "max_value": 20000,
+        "value": 7000,
+        "step": 500,
+        "help": get_setting("chunk_chars").help,
+        "key": "index_setting_chunk_chars_0",
+    }
+    overlap = _control(st.number_input, "Chunk overlap (characters)")
+    assert (overlap.kwargs["min_value"], overlap.kwargs["max_value"], overlap.kwargs["value"]) == (0, 1750, 300)
+    assert overlap.kwargs["step"] == 50
+    embedding = _control(st.selectbox, "Embedding model")
+    assert embedding.args[1] == ["text-embedding-3-small", "text-embedding-3-large"]
+    assert embedding.kwargs["index"] == 0
+    assert embedding.kwargs["key"] == "index_setting_embedding_0"
+    assert embedding.kwargs["help"] == get_setting("embedding").help
+    media = _control(st.selectbox, "Images and tables")
+    assert media.args[0] == f"Images and tables {module.REBUILD_BADGE}"
+    assert media.args[1] == ["off", "on_without_enrichment", "on_with_enrichment"]
+    assert media.kwargs["index"] == 0
+    assert [media.kwargs["format_func"](value) for value in media.args[1]] == [
+        "Off",
+        "On without enrichment",
+        "On with enrichment",
+    ]
+    whole_page = _control(st.checkbox, "Whole-page pictures")
+    assert whole_page.kwargs == {
+        "value": False,
+        "help": get_setting("full_page").help,
+        "key": "index_setting_full_page_0",
+    }
+
+
+def test_index_controls_sit_in_one_form_so_nothing_changes_until_it_is_saved(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_index_settings(module, chosen={"Chunk size (characters)": 3000})
+
+    module.st.form.assert_called_once_with("index_settings_form")
+    module.st.form_submit_button.assert_called_once_with(module.INDEX_SETTINGS_SAVE_LABEL)
+    patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_an_index_value_that_is_not_offered_is_kept_as_a_choice(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module, settings=_fake_settings(embedding="sparse"))
+
+    embedding = _control(module.st.selectbox, "Embedding model")
+    assert embedding.args[1] == ["text-embedding-3-small", "text-embedding-3-large", "sparse"]
+    assert embedding.kwargs["index"] == 2
+    assert embedding.kwargs["format_func"]("sparse") == "sparse"
+
+
+def test_an_index_number_outside_the_limits_starts_at_the_nearest_allowed_value(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module, settings=_fake_settings(reader_config={"chunk_chars": 500, "overlap": 9000}))
+
+    assert _control(module.st.number_input, "Chunk size (characters)").kwargs["value"] == 2000
+    assert _control(module.st.number_input, "Chunk overlap (characters)").kwargs["value"] == 1750
+
+
+def test_saving_index_settings_saves_only_what_changed_and_draws_the_page_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_index_settings(
+        module,
+        chosen={
+            f"Chunk size (characters) {module.REBUILD_BADGE}": 3000,
+            f"Whole-page pictures {module.REBUILD_BADGE}": True,
+        },
+        submitted=True,
+    )
+
+    assert patched["save_value"].call_args_list == [mock.call("chunk_chars", 3000), mock.call("full_page", True)]
+    # The page is drawn again so the warning about the index appears at once.
+    module.st.rerun.assert_called_once_with()
+    assert module.st.session_state.index_settings_notice == module.INDEX_SETTINGS_SAVED_NOTICE
+
+
+def test_saving_index_settings_without_a_change_saves_nothing(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_index_settings(module, submitted=True)
+
+    patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
+    module.st.info.assert_called_once_with(module.INDEX_SETTINGS_UNCHANGED_NOTE)
+
+
+def test_images_and_tables_cannot_be_turned_on_without_the_package_that_reads_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    chosen = {
+        f"Images and tables {module.REBUILD_BADGE}": "on_without_enrichment",
+        f"Chunk size (characters) {module.REBUILD_BADGE}": 3000,
+    }
+
+    with mock.patch.object(module, "media_reading_available", return_value=False):
+        patched = draw_index_settings(module, chosen=chosen, submitted=True)
+
+    module.st.error.assert_called_once_with(module.MEDIA_PACKAGE_NOTE)
+    patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_images_and_tables_can_be_turned_on_when_the_package_is_installed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    chosen = {f"Images and tables {module.REBUILD_BADGE}": "on_with_enrichment"}
+
+    with mock.patch.object(module, "media_reading_available", return_value=True):
+        patched = draw_index_settings(module, chosen=chosen, submitted=True)
+
+    patched["save_value"].assert_called_once_with("multimodal", "on_with_enrichment")
+    module.st.error.assert_not_called()
+
+
+def test_turning_images_and_tables_off_never_needs_the_package(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    settings = _fake_settings(multimodal=True)
+
+    with mock.patch.object(module, "media_reading_available", return_value=False):
+        patched = draw_index_settings(
+            module, settings=settings, chosen={f"Images and tables {module.REBUILD_BADGE}": "off"}, submitted=True
+        )
+
+    patched["save_value"].assert_called_once_with("multimodal", "off")
+
+
+@pytest.mark.parametrize(("found", "available"), [(object(), True), (None, False)])
+def test_media_reading_is_available_when_its_package_is_installed(pdf_research_assistant_module, found, available):
+    module = pdf_research_assistant_module
+
+    with mock.patch("importlib.util.find_spec", return_value=found) as find_spec:
+        assert module.media_reading_available() is available
+
+    find_spec.assert_called_once_with("pypdfium2")
+
+
+def test_index_settings_show_a_saved_notice_once(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.index_settings_notice = "Saved."
+
+    draw_index_settings(module)
+    module.st.success.assert_called_once_with("Saved.")
+
+    draw_index_settings(module)
+    module.st.success.assert_not_called()
+
+
+def test_the_index_defaults_button_is_hidden_until_an_index_setting_is_saved(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module, saved={"evidence_k": 3})
+
+    module.st.button.assert_not_called()
+
+
+def test_the_index_defaults_button_forgets_every_saved_index_setting(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_index_settings(module, saved={"chunk_chars": 3000}, clicked={"index_settings_reset"})
+
+    module.st.button.assert_called_once_with(module.INDEX_SETTINGS_RESET_LABEL, key="index_settings_reset")
+    patched["forget"].assert_called_once_with(["embedding", "chunk_chars", "overlap", "full_page", "multimodal"])
+    assert module.st.session_state.index_settings_round == 1
+    module.st.rerun.assert_called_once_with()
+
+
+def test_the_index_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_index_settings(module, saved={"multimodal": "on_without_enrichment"})
+
+    module.st.button.assert_called_once()
+    patched["forget"].assert_not_called()
+    assert "index_settings_round" not in module.st.session_state
+
+
+def test_index_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.index_settings_round = 2
+
+    draw_index_settings(module)
+
+    assert _control(module.st.number_input, "Chunk size (characters)").kwargs["key"] == "index_setting_chunk_chars_2"
+    assert _control(module.st.checkbox, "Whole-page pictures").kwargs["key"] == "index_setting_full_page_2"
+
+
+def test_the_index_defaults_leave_the_answer_settings_alone(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert not set(module.INDEX_SETTING_KEYS) & set(module.SAVED_SETTING_KEYS)
 
 
 CHUNK_CHANGES = {
     "index": "pqa_index_old",
     "settings": [
         {"key": "chunk_chars", "label": "Chunk size (characters)", "was": "5000", "now": "3000"},
-        {"key": "multimodal", "label": "Images and tables", "was": "Off", "now": "On"},
+        {"key": "paper_directory", "label": "PDF folder", "was": "old-papers", "now": "papers"},
     ],
 }
 
 
 def test_render_reindex_settings_says_what_each_changed_setting_was(pdf_research_assistant_module):
     module = pdf_research_assistant_module
-    module.st.caption.reset_mock()
 
-    module.render_reindex_settings(_fake_settings(), CHUNK_CHANGES)
+    draw_index_settings(module, changes=CHUNK_CHANGES)
 
     captions = [call.args[0] for call in module.st.caption.call_args_list]
-    chunk_help = module.settings_groups.get_setting("chunk_chars").help
-    media_help = module.settings_groups.get_setting("multimodal").help
-    assert captions[captions.index(chunk_help) + 1] == "Changed. The index `pqa_index_old` was built with `5000`."
-    assert captions[captions.index(media_help) + 1] == "Changed. The index `pqa_index_old` was built with `Off`."
+    folder_help = module.settings_groups.get_setting("paper_directory").help
+    # Under a fixed setting's explanation, and under a control.
+    assert captions[captions.index(folder_help) + 1] == "Changed. The index `pqa_index_old` was built with `old-papers`."
+    assert "Changed. The index `pqa_index_old` was built with `5000`." in captions
     assert len([caption for caption in captions if caption.startswith("Changed.")]) == 2
 
 
 def test_render_reindex_settings_marks_nothing_as_changed_without_changes(pdf_research_assistant_module):
     module = pdf_research_assistant_module
-    module.st.caption.reset_mock()
 
-    module.render_reindex_settings(_fake_settings(), None)
+    draw_index_settings(module, changes=None)
 
     captions = [call.args[0] for call in module.st.caption.call_args_list]
     assert not [caption for caption in captions if caption.startswith("Changed.")]
@@ -1391,7 +1622,7 @@ def test_describe_index_changes_lists_each_change_and_how_to_end_the_warning(pdf
         "`pqa_index_old` was built, so the app is now looking for an index built with the new settings, "
         "and there is none yet.\n\n"
         "- Chunk size (characters): was `5000`, now `3000`\n"
-        "- Images and tables: was `Off`, now `On`\n\n"
+        "- PDF folder: was `old-papers`, now `papers`\n\n"
         + module.INDEX_CHANGES_NOTE
     )
 
@@ -1409,6 +1640,7 @@ def test_index_changes_note_says_how_to_end_the_warning(pdf_research_assistant_m
     note = pdf_research_assistant_module.INDEX_CHANGES_NOTE
 
     assert "put these settings back" in note
+    assert "Library and index settings" in note
     assert "index every PDF again" in note
 
 
@@ -1463,6 +1695,9 @@ def test_settings_notes_say_which_group_needs_a_rebuild(pdf_research_assistant_m
     assert "next question" in module.INSTANT_SETTINGS_NOTE
     assert "not rebuilt" in module.INSTANT_SETTINGS_NOTE
     assert "index every PDF again" in module.REINDEX_SETTINGS_NOTE
+    assert module.INDEX_SETTINGS_SAVE_LABEL in module.REINDEX_SETTINGS_NOTE
+    assert "indexed again" in module.INDEX_SETTINGS_SAVED_NOTICE
+    assert "pypdfium2" in module.MEDIA_PACKAGE_NOTE
     assert "rebuild" in module.REBUILD_BADGE.lower()
 
 
@@ -2038,7 +2273,8 @@ def test_page_draws_the_source_settings_from_the_settings_it_built():
     with imported_pdf_research_assistant() as module:
         labels = [call.args[0] for call in module.st.number_input.call_args_list]
 
-        assert labels == ["Passages gathered", "Most sources in the answer"]
+        # The index settings further down the sidebar have number boxes too.
+        assert labels[:2] == ["Passages gathered", "Most sources in the answer"]
         assert module.st.number_input.call_args_list[0].kwargs["value"] == 10
 
 

@@ -7,7 +7,8 @@ Every other setting only changes how a question is answered: INSTANT_SETTINGS.
 
 To add a setting, add one entry to the group it belongs to. The tests check both
 groups against PaperQA itself. A setting the user can change from the sidebar also
-has `write` and `check`; saved_settings.py then saves it and applies it to every query.
+has `write` and `check`; saved_settings.py then saves it and applies it whenever
+settings are built, so a saved index setting changes the index PaperQA looks for.
 """
 
 from collections.abc import Callable, Iterable
@@ -23,6 +24,8 @@ class WholeNumber:
 
     low: int
     high: int
+    # How far one click of the number box moves.
+    step: int = 1
 
     def __call__(self, value: object) -> int:
         if isinstance(value, bool) or not isinstance(value, int):
@@ -54,6 +57,16 @@ class OneOf:
 
 
 @dataclass(frozen=True)
+class OnOrOff:
+    """Accepts only True or False."""
+
+    def __call__(self, value: object) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"Expected on or off, got {value!r}.")
+        return value
+
+
+@dataclass(frozen=True)
 class Setting:
     key: str
     label: str
@@ -65,6 +78,39 @@ class Setting:
     write: Callable[[object, object], None] | None = None
     # Returns a chosen value if it can be used, or raises ValueError.
     check: Callable[[object], object] | None = None
+    # Returns the value in use in the form `check` accepts, when `read` returns it another way.
+    choice: Callable[[object], object] | None = None
+
+
+# How PaperQA's images-and-tables options are saved. The names match describe_value's text for each.
+MEDIA_OFF = "off"
+MEDIA_CHOICES = (
+    ("Off", MEDIA_OFF),
+    ("On without enrichment", "on_without_enrichment"),
+    ("On with enrichment", "on_with_enrichment"),
+)
+
+
+def read_media_choice(settings: object) -> str:
+    """Return the images-and-tables option in use, as it is saved.
+
+    PaperQA takes True and False as well as its own options; True means on with enrichment.
+    """
+    value = settings.parsing.multimodal
+    if isinstance(value, bool):
+        return "on_with_enrichment" if value else MEDIA_OFF
+    return value.name.lower()
+
+
+def write_media_choice(settings: object, value: str) -> None:
+    """Put a saved images-and-tables option onto a PaperQA Settings object.
+
+    Off is written as False, which is how the app has always set it: PaperQA names the index after
+    the text of this value, so its own "off" option would start a new index for the same setting.
+    """
+    from paperqa.settings import MultimodalOptions
+
+    settings.parsing.multimodal = False if value == MEDIA_OFF else MultimodalOptions[value.upper()]
 
 
 INSTANT_SETTINGS = (
@@ -138,63 +184,106 @@ INSTANT_SETTINGS = (
     ),
 )
 
-# One entry for each part of PaperQA's index name, in the same order.
+# One entry for each part of PaperQA's index name, in the same order. Each help text ends by saying
+# whether the setting affects indexing only or also affects questions.
 REINDEX_SETTINGS = (
     Setting(
         key="paper_directory",
         label="PDF folder",
-        help="The folder your PDFs are read from.",
+        help="The folder your PDFs are read from. It is set with `PAPER_DIR` in `.env`. Affects indexing only.",
         needs_reindex=True,
         read=lambda settings: settings.agent.index.paper_directory,
     ),
     Setting(
         key="use_absolute_paper_directory",
         label="Full folder path kept in the index",
-        help="Whether the index records each PDF by its full path instead of its path inside the PDF folder.",
+        help=(
+            "Whether the index records each PDF by its full path instead of its path inside the PDF folder. "
+            "The app relies on this being off, so it cannot be changed here. Affects indexing only."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.agent.index.use_absolute_paper_directory,
     ),
     Setting(
         key="embedding",
         label="Embedding model",
-        help="The model that turns text into numbers so passages can be found by meaning.",
+        help=(
+            "The OpenAI model that turns text into numbers so passages can be found by meaning. The large "
+            "model can find passages the small one misses, but indexing with it costs about six times as "
+            "much. Also affects questions: each question is turned into numbers by the same model."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.embedding,
+        write=lambda settings, value: setattr(settings, "embedding", value),
+        check=OneOf(tuple((model, model) for model in ("text-embedding-3-small", "text-embedding-3-large"))),
     ),
     Setting(
         key="parse_pdf",
         label="PDF reader",
-        help="The code that pulls the text out of each PDF.",
+        help=(
+            "The code that pulls the text out of each PDF. It is part of the app, so it cannot be changed "
+            "here. Affects indexing only."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.parsing.parse_pdf,
     ),
     Setting(
         key="chunk_chars",
         label="Chunk size (characters)",
-        help="How long each stored passage of a PDF is.",
+        help=(
+            "How long each stored passage of a PDF is. Smaller chunks make each passage more focused; larger "
+            "ones keep more of the surrounding text together. Also affects questions: the model reads whole "
+            "passages, so larger chunks make each question cost more."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.parsing.reader_config["chunk_chars"],
+        write=lambda settings, value: settings.parsing.reader_config.update(chunk_chars=value),
+        # PaperQA's default is 5000 and its presets go up to 9000. The lowest chunk stays above the
+        # highest overlap, because PaperQA's chunking never finishes when the two are equal.
+        check=WholeNumber(2000, 20000, step=500),
     ),
     Setting(
         key="overlap",
         label="Chunk overlap (characters)",
-        help="How much text neighbouring passages share, so a sentence is not cut off between them.",
+        help=(
+            "How much text neighbouring passages share, so a sentence is not cut off between them. "
+            "More overlap means more passages to store for the same PDF. Affects indexing only."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.parsing.reader_config["overlap"],
+        write=lambda settings, value: settings.parsing.reader_config.update(overlap=value),
+        # PaperQA's default is 250 and its presets go up to 1750.
+        check=WholeNumber(0, 1750, step=50),
     ),
     Setting(
         key="full_page",
-        label="Whole-page reading",
-        help="Whether each PDF page is read as one piece instead of being cut into passages.",
+        label="Whole-page pictures",
+        help=(
+            "When images and tables are on, whether each page is kept as one picture of the whole page "
+            "instead of a separate picture of each figure and table. It does nothing while images and "
+            "tables are off. Also affects questions: whole-page pictures are larger, so passages that "
+            "carry them cost more to read."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.parsing.reader_config.get("full_page", False),
+        write=lambda settings, value: settings.parsing.reader_config.update(full_page=value),
+        check=OnOrOff(),
     ),
     Setting(
         key="multimodal",
         label="Images and tables",
-        help="Whether images and tables are taken from the PDFs as well as text.",
+        help=(
+            "Whether images and tables are taken from the PDFs as well as text. Enrichment means a model "
+            "writes a description of each image and table while indexing, so a search can find them; that "
+            "is an extra paid model call for every one. Without enrichment they are stored but only found "
+            "through the text around them. Also affects questions: the pictures are sent to the model "
+            "with their passages, which costs more."
+        ),
         needs_reindex=True,
         read=lambda settings: settings.parsing.multimodal,
+        write=write_media_choice,
+        check=OneOf(MEDIA_CHOICES),
+        choice=read_media_choice,
     ),
 )
 
@@ -216,6 +305,11 @@ def needs_reindex(key: str) -> bool:
 def read_values(settings: object, group: Iterable[Setting]) -> dict[str, object]:
     """Return the current value of each setting in the group, by key."""
     return {setting.key: setting.read(settings) for setting in group}
+
+
+def current_choice(setting: Setting, settings: object) -> object:
+    """Return the setting's value in use, in the form its `check` accepts and its control offers."""
+    return (setting.choice or setting.read)(settings)
 
 
 def describe_value(value: object) -> str:

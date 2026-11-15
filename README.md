@@ -103,9 +103,23 @@ Two numbers control how much evidence goes into an answer. They are PaperQA's `a
 
 A longer answer costs a little more and takes a little longer, because the model writes more, but the same passages are read either way.
 
-A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to PaperQA defaults` removes every saved choice. Exhaustive search ignores all three, because it checks every passage in scope and writes no combined answer.
+**Speed limits** sets how fast PaperQA may send requests to the model: the `rate_limit` (tokens a minute) and `request_limit` (requests a minute) in each model config, and `answer.max_concurrent_requests` (requests sent at once). Pick the profile that fits your OpenAI account's limits, which you can see at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits):
 
-To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The same three controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
+| Profile | Tokens a minute | Requests a minute | At once (question) | At once (exhaustive) |
+|---|---|---|---|---|
+| Low limits | 30,000 | 500 | 4 | 4 |
+| Standard | 200,000 | 500 | 5 | 10 |
+| High limits (default) | 1,500,000 | 4,000 | 10 | 40 |
+
+- **Low limits** suits a new or low-tier account. Ordinary questions are fine, but exhaustive search can take hours.
+- **Standard** uses PaperQA's own figures for `gpt-4o-mini` on OpenAI's first paid tier.
+- **High limits** suits an account allowed about 2,000,000 tokens and 5,000 requests a minute, with some room to spare.
+
+A profile above your account's limits makes OpenAI turn requests away, and PaperQA waits and retries, which is slower. A profile below them makes long runs slower than they need to be. The profile does not change the cost of a question. With a local model there are no account limits, so only the number of requests sent at once matters.
+
+A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source and length settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
+
+To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source and length controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
 
 The sidebar also shows:
 
@@ -119,7 +133,7 @@ Each assistant response also includes:
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
 - an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, its relevance score, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
 - a relevance score under each source passage, out of 10. This is PaperQA's `Context.score`: the rating the summary model gave the passage for your question while summarising it, not a search similarity. Scores tend to bunch at 0 or 8 to 9, so use them as a rough guide to which chunk to open. Answers given before scores were kept, and passages PaperQA did not score, show none.
-- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, and the answer length. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
+- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 
@@ -172,7 +186,7 @@ A failed request or rate limit is never reported as "no relevant evidence".
 > **Important**
 > Exhaustive search is more thorough than a normal query, but it can still misjudge relevance. A model scores each chunk, so it can reject something relevant or accept something that is not. Scanned pages and figures are not searched. Quotes are marked verified or not verified, and a quote marked not verified may still be genuine, so check it against the PDF. Treat the report as a list to review, not a conclusion.
 
-Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed settings are in `src/pdf_research_assistant/exhaustive.py`: `MAX_CONCURRENT_REQUESTS` and `TOKENS_PER_MINUTE`. Lower them if your OpenAI account has a lower rate limit. You can see your limits at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits).
+Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed comes from the **Speed limits** profile in the sidebar; pick a lower profile if your OpenAI account has lower limits.
 
 ### Local LLM
 

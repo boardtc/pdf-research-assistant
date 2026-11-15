@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from pdf_research_assistant import settings_groups
+from pdf_research_assistant import rate_profiles, settings_groups
 
 
 def _other_pdf_reader(*_args, **_kwargs):
@@ -35,6 +35,7 @@ CHANGES = {
     "evidence_k": lambda s: setattr(s.answer, "evidence_k", 3),
     "answer_max_sources": lambda s: setattr(s.answer, "answer_max_sources", 2),
     "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
+    "rate_profile": lambda s: settings_groups.get_setting("rate_profile").write(s, "Low limits"),
     "paper_directory": lambda s: setattr(s.agent.index, "paper_directory", Path(s.agent.index.paper_directory) / "other"),
     "use_absolute_paper_directory": lambda s: setattr(s.agent.index, "use_absolute_paper_directory", True),
     "embedding": lambda s: setattr(s, "embedding", "text-embedding-3-large"),
@@ -50,7 +51,7 @@ def test_every_setting_is_in_exactly_one_group():
     instant = [setting.key for setting in settings_groups.INSTANT_SETTINGS]
     reindex = [setting.key for setting in settings_groups.REINDEX_SETTINGS]
 
-    assert instant == ["answer_model", "evidence_k", "answer_max_sources", "answer_length"]
+    assert instant == ["answer_model", "evidence_k", "answer_max_sources", "answer_length", "rate_profile"]
     assert reindex == [
         "paper_directory",
         "use_absolute_paper_directory",
@@ -140,6 +141,8 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
         "evidence_k": 10,
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
+        # A bare PaperQA Settings object has none of the profiles' limits.
+        "rate_profile": rate_profiles.NO_PROFILE,
     }
 
 
@@ -215,10 +218,10 @@ def test_describe_recorded_setting_says_where_a_value_came_from_when_known():
 # Settings the user can change from the sidebar.
 
 
-def test_only_the_source_and_answer_length_settings_can_be_saved_from_the_sidebar_so_far():
+def test_only_the_source_answer_length_and_rate_profile_settings_can_be_saved_from_the_sidebar_so_far():
     saved = [setting.key for setting in settings_groups.SETTINGS if setting.write is not None]
 
-    assert saved == ["evidence_k", "answer_max_sources", "answer_length"]
+    assert saved == ["evidence_k", "answer_max_sources", "answer_length", "rate_profile"]
     assert all(setting.check is not None for setting in settings_groups.SETTINGS if setting.write is not None)
 
 
@@ -363,6 +366,7 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
         "evidence_k": settings_groups.ONE_OFF_SOURCE,
         "answer_max_sources": None,
         "answer_length": None,
+        "rate_profile": None,
     }
     assert record["values"][1]["value"] == "3"
     assert settings_groups.ONE_OFF_SOURCE == "This question only"

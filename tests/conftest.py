@@ -20,3 +20,13 @@ def no_saved_local_llm_settings(tmp_path_factory):
         patcher.setattr(local_llm, "CONFIG_PATH", tmp_path_factory.mktemp("local-llm") / "local_llm.json")
         yield
 
+
+@pytest.fixture(scope="session", autouse=True)
+def no_saved_sidebar_settings(tmp_path_factory):
+    """Keep a developer's own saved_settings.json out of the tests, which assume the default settings."""
+    from pdf_research_assistant import saved_settings
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(saved_settings, "SETTINGS_PATH", tmp_path_factory.mktemp("saved") / "saved_settings.json")
+        yield
+

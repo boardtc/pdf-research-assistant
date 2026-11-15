@@ -15,9 +15,9 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from paperqa import Settings
-from paperqa.settings import AgentSettings, IndexSettings, ParsingSettings
+from paperqa.settings import AgentSettings, AnswerSettings, IndexSettings, ParsingSettings
 
-from pdf_research_assistant import local_llm, saved_settings
+from pdf_research_assistant import local_llm, rate_profiles, saved_settings
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -175,11 +175,14 @@ def get_failed_files(index_dir: Path = INDEX_DIR) -> list[str]:
 
 
 def get_model_settings() -> tuple[str, dict]:
-    """Return the model name and config for answers: a saved local LLM, or else the hosted model."""
+    """Return the model name and config for answers: a saved local LLM, or else the hosted model.
+
+    The rate limits are added later by build_settings, from the chosen rate profile.
+    """
     saved_local_llm = local_llm.load_config()
     if saved_local_llm:
         return local_llm.litellm_model(saved_local_llm)
-    return MODEL_NAME, {"rate_limit": {MODEL_NAME: "30000 per 1 minute"}}
+    return MODEL_NAME, {}
 
 
 def build_settings() -> Settings:
@@ -190,6 +193,7 @@ def build_settings() -> Settings:
         summary_llm=model_name,
         llm_config=deepcopy(model_config),
         summary_llm_config=deepcopy(model_config),
+        answer=AnswerSettings(),
         parsing=ParsingSettings(multimodal=False, use_doc_details=False, parse_pdf=parse_pdf_with_fallback),
         agent=AgentSettings(
             agent_llm=model_name,
@@ -205,6 +209,8 @@ def build_settings() -> Settings:
             ),
         ),
     )
+    # A rate profile saved in the sidebar replaces this one when saved_settings.apply runs.
+    rate_profiles.apply_profile(settings, rate_profiles.DEFAULT_PROFILE)
     saved_settings.apply(settings)
     return settings
 

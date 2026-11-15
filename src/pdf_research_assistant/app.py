@@ -75,9 +75,43 @@ LOCAL_LLM_GUIDE = (
     "2. Download a model that supports tool calling, for example `ollama pull llama3.2`.\n"
     "3. Fill in the details below and click **Check connection**.\n"
     "4. When the check says it is ready, click **Use this local model**.\n\n"
-    "Finding passages in your papers still uses OpenAI embeddings, so the OpenAI key is still needed "
-    "and your index is not rebuilt."
+    "**How this differs from OpenAI**\n\n"
+    "- The local model takes over every model step in PaperQA: it reads each passage, writes the answer "
+    "and plans the searches.\n"
+    "- Finding passages in your papers still uses OpenAI embeddings, so the OpenAI key is still needed "
+    "and your index is not rebuilt.\n"
+    "- The answer model has no cost, so the **Next question** estimate gives no cost figure for it.\n"
+    "- Local models are usually slower than OpenAI, and small ones may give weaker answers or lose track "
+    "of PaperQA's instructions.\n"
+    "- **Speed limits** then only sets how many requests are sent at once; OpenAI's account limits "
+    "no longer apply."
 )
+LOCAL_LLM_PROVIDER_HELP = (
+    "The program that runs the model on your computer. Pick **Ollama** if you use Ollama. Pick "
+    "**OpenAI-compatible server** for LM Studio, llama.cpp or any other server that offers the OpenAI API. "
+    "PaperQA talks to the two kinds differently, so this must match your server."
+)
+LOCAL_LLM_ADDRESS_HELP = (
+    "Where your local server is listening. The box starts with the usual address for the server type: "
+    "Ollama uses http://localhost:11434 and LM Studio uses http://localhost:1234/v1. Change it only if "
+    "you changed the port or the server runs on another computer. An OpenAI-compatible address usually "
+    "ends in /v1."
+)
+LOCAL_LLM_MODEL_HELP = (
+    "The model's name exactly as your server lists it, for example `llama3.2`. With Ollama, run "
+    "`ollama list` to see your models. The model must already be downloaded and should support tool "
+    "calling, because PaperQA uses tools to search your papers. Bigger models give better answers but "
+    "run more slowly."
+)
+LOCAL_LLM_CHECK_HELP = (
+    "Asks the server which models it has and says whether these details will work. Nothing is saved "
+    "and no question is sent."
+)
+LOCAL_LLM_SAVE_HELP = (
+    "Checks the connection again and, if it works, saves these details. The app, the command line and "
+    "exhaustive search then use this model for answers. Your index is not rebuilt."
+)
+LOCAL_LLM_CLEAR_HELP = "Forgets the local model details, so answers come from OpenAI again."
 
 
 def flatten_exception_messages(exc, depth=0):
@@ -662,6 +696,7 @@ def render_local_llm_setup() -> None:
             index=providers.index(saved["provider"]) if saved else 0,
             format_func=lambda key: local_llm.PROVIDERS[key]["label"],
             key="local_llm_provider",
+            help=LOCAL_LLM_PROVIDER_HELP,
         )
         # Each server type keeps its own address box, so picking another type shows that type's usual address.
         saved_address = saved["address"] if saved and saved["provider"] == provider else None
@@ -669,14 +704,17 @@ def render_local_llm_setup() -> None:
             "Server address",
             value=saved_address or local_llm.PROVIDERS[provider]["default_address"],
             key=f"local_llm_address_{provider}",
+            help=LOCAL_LLM_ADDRESS_HELP,
         )
-        model = st.text_input("Model name", value=saved["model"] if saved else "", key="local_llm_model")
+        model = st.text_input(
+            "Model name", value=saved["model"] if saved else "", key="local_llm_model", help=LOCAL_LLM_MODEL_HELP
+        )
         candidate = local_llm.clean_config(provider, address, model)
 
-        if st.button("Check connection", key="local_llm_check"):
+        if st.button("Check connection", key="local_llm_check", help=LOCAL_LLM_CHECK_HELP):
             ready, message = local_llm.check_connection(candidate)
             (st.success if ready else st.error)(message)
-        if st.button("Use this local model", key="local_llm_save"):
+        if st.button("Use this local model", key="local_llm_save", help=LOCAL_LLM_SAVE_HELP):
             ready, message = local_llm.check_connection(candidate)
             if ready:
                 local_llm.save_config(candidate)
@@ -684,7 +722,7 @@ def render_local_llm_setup() -> None:
                 st.rerun()
             else:
                 st.error(f"{message} Nothing was changed.")
-        if saved and st.button("Switch back to OpenAI", key="local_llm_clear"):
+        if saved and st.button("Switch back to OpenAI", key="local_llm_clear", help=LOCAL_LLM_CLEAR_HELP):
             local_llm.clear_config()
             st.session_state.local_llm_notice = "Answers will now use OpenAI again."
             st.rerun()

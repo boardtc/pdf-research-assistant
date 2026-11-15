@@ -209,6 +209,8 @@ By default, answers are written by OpenAI's `gpt-4o-mini`. To use a model runnin
 
 **Switch back to OpenAI** in the same panel removes the saved settings.
 
+Each box and button in the panel has a **?** icon that explains it in plain words, and the panel lists how a local model differs from OpenAI.
+
 The settings are saved in `local_llm.json` in the project folder, which Git ignores, and apply to the app, the CLI and exhaustive search.
 
 > **Note**

@@ -2161,7 +2161,9 @@ def test_local_llm_panel_shows_the_saved_settings_and_offers_to_switch_back(pdf_
     assert module.st.selectbox.call_args.kwargs["index"] == 1
     assert module.st.text_input.call_args_list[0].kwargs["value"] == "http://localhost:8080/v1"
     assert module.st.text_input.call_args_list[1].kwargs["value"] == "qwen2.5"
-    assert module.st.button.call_args_list[-1] == mock.call("Switch back to OpenAI", key="local_llm_clear")
+    assert module.st.button.call_args_list[-1] == mock.call(
+        "Switch back to OpenAI", key="local_llm_clear", help=module.LOCAL_LLM_CLEAR_HELP
+    )
 
 
 def test_local_llm_panel_offers_the_usual_address_when_another_server_type_is_picked(pdf_research_assistant_module):
@@ -2246,6 +2248,50 @@ def test_local_llm_guide_tells_the_user_what_stays_on_openai(pdf_research_assist
     assert "Check connection" in guide
     assert "embeddings" in guide
     assert "OpenAI key" in guide
+
+
+def test_local_llm_guide_says_how_a_local_model_differs_from_openai(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    guide = module.LOCAL_LLM_GUIDE
+
+    assert "How this differs from OpenAI" in guide
+    assert "no cost" in guide
+    assert "slower" in guide
+    assert "Speed limits" in guide
+    assert "plans the searches" in guide
+
+
+def test_local_llm_panel_explains_each_input(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module)
+
+    assert module.st.selectbox.call_args.kwargs["help"] == module.LOCAL_LLM_PROVIDER_HELP
+    address_call, model_call = module.st.text_input.call_args_list
+    assert address_call.kwargs["help"] == module.LOCAL_LLM_ADDRESS_HELP
+    assert model_call.kwargs["help"] == module.LOCAL_LLM_MODEL_HELP
+
+
+def test_local_llm_panel_explains_each_button(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_local_llm_panel(module, saved=SAVED_LOCAL_LLM)
+
+    helps = {call.kwargs["key"]: call.kwargs["help"] for call in module.st.button.call_args_list}
+    assert helps == {
+        "local_llm_check": module.LOCAL_LLM_CHECK_HELP,
+        "local_llm_save": module.LOCAL_LLM_SAVE_HELP,
+        "local_llm_clear": module.LOCAL_LLM_CLEAR_HELP,
+    }
+
+
+def test_local_llm_help_names_both_usual_addresses_and_what_the_model_needs(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    for provider in module.local_llm.PROVIDERS.values():
+        assert provider["default_address"] in module.LOCAL_LLM_ADDRESS_HELP
+    assert "tool calling" in module.LOCAL_LLM_MODEL_HELP
+    assert "ollama list" in module.LOCAL_LLM_MODEL_HELP
 
 
 def test_page_draws_the_local_llm_panel():

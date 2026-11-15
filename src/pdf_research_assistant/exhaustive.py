@@ -26,12 +26,17 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import limits
-import litellm
 from paperqa import Docs, Settings
 from paperqa.core import llm_parse_json, map_fxn_summary
 
 from pdf_research_assistant import bootstrap, rate_profiles
+from pdf_research_assistant.estimate import (
+    CHARACTERS_PER_TOKEN,
+    LIMITER_TOKEN_FACTOR,
+    SECONDS_PER_CALL,
+    get_prices,
+    get_tokens_per_minute,
+)
 from pdf_research_assistant.bootstrap import FAILED_DOCUMENT_ADD_ID
 
 STATUS_LOADABLE = "loadable"
@@ -120,11 +125,6 @@ QUOTE_END_PUNCTUATION = string.punctuation + "‘’“”…"
 
 # Output length is unknown before a run, so the estimate is a range. Typical is measured.
 OUTPUT_TOKENS_PER_CHUNK = {"low": 30, "typical": 160, "high": 300}
-# Median measured for gpt-4o-mini with 200-word summaries.
-SECONDS_PER_CALL = 5.5
-CHARACTERS_PER_TOKEN = 4
-# The rate limiter counts characters / 4, which runs about 10% above real input tokens.
-LIMITER_TOKEN_FACTOR = 1.1
 
 TokenCounter = Callable[[str], int]
 
@@ -250,16 +250,6 @@ def make_token_counter(model: str) -> TokenCounter:
     return lambda text: len(encoding.encode(text, disallowed_special=()))
 
 
-def get_tokens_per_minute(settings: Settings) -> float | None:
-    """Return the summary model's configured token rate limit, if it has one."""
-    rate_limits = (settings.summary_llm_config or {}).get("rate_limit", {})
-    rate_limit = rate_limits.get(settings.summary_llm)
-    if rate_limit is None:
-        return None
-    parsed = limits.parse(rate_limit)
-    return parsed.amount * 60 / parsed.get_expiry()
-
-
 def estimate_run(
     scope: list[PaperScope], question: str, settings: Settings, count_tokens: TokenCounter
 ) -> dict:
@@ -273,7 +263,7 @@ def estimate_run(
     tokens_per_call = count_tokens(system_prompt) + count_tokens(user_prompt)
     input_tokens = sum(paper.chunk_tokens + paper.citation_tokens for paper in papers) + chunk_count * tokens_per_call
 
-    prices = litellm.model_cost.get(settings.summary_llm)
+    prices = get_prices(settings.summary_llm)
     cost_usd = None
     if prices:
         cost_usd = {

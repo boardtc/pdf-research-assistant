@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "paper-qa==2026.3.18",
+    "paper-qa-pypdf[media]==2026.3.18",
     "pdfplumber",
     "python-dotenv==1.2.2",
     "streamlit==1.56.0",

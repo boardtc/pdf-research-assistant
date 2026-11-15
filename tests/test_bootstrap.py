@@ -10,6 +10,9 @@ from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
+# The real PaperQA classes, kept before the fixtures below swap the paperqa modules for stand-ins.
+from paperqa.settings import ParsingSettings as RealParsingSettings
+from paperqa.settings import Settings as RealSettings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -522,6 +525,25 @@ def test_build_settings_uses_custom_pdf_parser_with_fallback(bootstrap_module):
     settings = bootstrap_module.build_settings()
 
     assert settings.parsing.parse_pdf is bootstrap_module.parse_pdf_with_fallback
+
+
+def test_build_settings_draws_pictures_sharper_than_paperqa_does(bootstrap_module):
+    settings = bootstrap_module.build_settings()
+
+    assert bootstrap_module.PICTURE_DPI == 150
+    assert settings.parsing.reader_config == {"chunk_chars": 5000, "overlap": 250, "dpi": 150}
+
+
+def test_the_chunk_size_and_overlap_built_with_are_paperqas_own():
+    assert RealParsingSettings().reader_config == {"chunk_chars": 5000, "overlap": 250}
+
+
+def test_picture_sharpness_leaves_the_index_name_alone():
+    """Existing indexes stay in use: PaperQA does not name an index after the picture sharpness."""
+    plain = RealSettings()
+    sharper = RealSettings(parsing=RealParsingSettings(reader_config={"chunk_chars": 5000, "overlap": 250, "dpi": 150}))
+
+    assert sharper.get_index_name() == plain.get_index_name()
 
 
 def test_build_settings_uses_manifest_path_when_manifest_exists(bootstrap_module, workspace_tmp_path):

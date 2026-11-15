@@ -1632,6 +1632,26 @@ def test_render_reindex_settings_says_what_each_changed_setting_was(pdf_research
     assert len([caption for caption in captions if caption.startswith("Changed.")]) == 2
 
 
+def test_render_reindex_settings_explains_when_images_and_tables_are_worth_turning_on(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    changes = {"index": "pqa_index_old", "settings": [{"key": "multimodal", "label": "Images and tables", "was": "On"}]}
+
+    draw_index_settings(module, changes=changes)
+
+    captions = [call.args[0] for call in module.st.caption.call_args_list]
+    assert captions.count(module.MEDIA_GUIDE) == 1
+    # Below the setting's own changed note, so that note stays next to its control.
+    changed_note = "Changed. The index `pqa_index_old` was built with `On`."
+    assert captions.index(changed_note) + 1 == captions.index(module.MEDIA_GUIDE)
+
+
+def test_the_images_and_tables_guide_says_which_picture_mode_catches_what(pdf_research_assistant_module):
+    guide = pdf_research_assistant_module.MEDIA_GUIDE
+
+    for phrase in ("charts", "tables", "Whole-page pictures", "ruled lines", "Leave it off"):
+        assert phrase in guide
+
+
 def test_render_reindex_settings_marks_nothing_as_changed_without_changes(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 

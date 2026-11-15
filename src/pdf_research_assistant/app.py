@@ -72,6 +72,14 @@ MEDIA_PACKAGE_NOTE = (
     "Images and tables cannot be read yet, because the `pypdfium2` package is not installed. Install it with "
     "`pip install paper-qa-pypdf[media]`, restart the app and save again. Nothing was changed."
 )
+MEDIA_GUIDE = (
+    "**When to turn images and tables on:** for PDFs where the answers are in charts, diagrams, tables or "
+    "slides rather than in the text. Leave it off for papers and books that are mostly text: it makes "
+    "indexing slower and every question that finds a picture cost more. Without whole-page pictures, each "
+    "picture stored in the PDF (photos, scanned pages, pasted-in charts) and each table with ruled lines is "
+    "cut out on its own. Charts and diagrams drawn with lines and shapes, and tables without lines, are "
+    "missed. Whole-page pictures catch everything on a page, at the cost of a larger picture for every page."
+)
 SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
@@ -909,6 +917,8 @@ def render_reindex_settings(settings, index_changes: dict | None = None, busy: b
                     if setting.write is not None:
                         chosen[setting.key] = draw_index_setting(setting, settings)
                         render_changed_note(setting, changed, index_changes)
+                        if setting.key == "multimodal":
+                            st.caption(MEDIA_GUIDE)
                 submitted = st.form_submit_button(INDEX_SETTINGS_SAVE_LABEL, disabled=rebuilding)
             if rebuilding:
                 st.caption(REBUILD_LOCKED_NOTE)

@@ -5,16 +5,32 @@ from unittest import mock
 import litellm
 import pytest
 from paperqa import Settings
-from paperqa.settings import AgentSettings
+from paperqa.settings import AgentSettings, MultimodalOptions
 
 from pdf_research_assistant import estimate, rate_profiles
 
 MODEL = "gpt-4o-mini"
+# A real question on a one-PDF index with images and tables on, at the app's picture resolution.
+MEASURED_MEDIA_COST_USD = 0.0547
+MEASURED_MEDIA_SECONDS = 90
+# bootstrap.PICTURE_DPI; bootstrap is not imported here, since it needs PAPER_DIR.
+PICTURE_DPI = 150
 
 
-def _paperqa_settings(model: str = MODEL, profile: str | None = rate_profiles.DEFAULT_PROFILE, **answer) -> Settings:
+def _paperqa_settings(
+    model: str = MODEL,
+    profile: str | None = rate_profiles.DEFAULT_PROFILE,
+    media: bool | MultimodalOptions = False,
+    whole_page: bool = False,
+    dpi: int | None = PICTURE_DPI,
+    **answer,
+) -> Settings:
     """Real PaperQA settings, built the way bootstrap.build_settings builds them, with answer changes."""
     settings = Settings(llm=model, summary_llm=model, agent=AgentSettings(agent_llm=model))
+    settings.parsing.multimodal = media
+    settings.parsing.reader_config = {"chunk_chars": 5000, "overlap": 250, "full_page": whole_page}
+    if dpi is not None:
+        settings.parsing.reader_config["dpi"] = dpi
     if profile:
         rate_profiles.apply_profile(settings, profile)
     for name, value in answer.items():
@@ -170,6 +186,151 @@ def test_the_token_rate_limit_can_set_the_time():
     assert result.seconds == pytest.approx(limited, rel=0.001)
 
 
+# Pictures, sent with each passage when images and tables are on.
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "tiles"),
+    [
+        # Small enough to send as it is.
+        (504, 396, 1),
+        # A short side under 768 pixels is not enlarged: 3 tiles across, 2 down.
+        (1040, 616, 6),
+        # A whole A4 page at 150 dpi shrinks to 768 x 1083: 2 across, 3 down.
+        (1245, 1755, 6),
+        # Too wide: first fitted within 2048 pixels, to 2048 x 683.
+        (3000, 1000, 8),
+    ],
+)
+def test_count_tiles_follows_openai_resizing(width, height, tiles):
+    assert estimate.count_tiles(width, height) == tiles
+
+
+@pytest.mark.parametrize("model", ["gpt-4o-mini", "gpt-4o-mini-2024-07-18", "openai/gpt-4o-mini"])
+def test_get_picture_tokens_knows_gpt_4o_mini_bills_pictures_higher(model):
+    assert estimate.get_picture_tokens(model) == estimate.PICTURE_TOKENS["gpt-4o-mini"]
+
+
+def test_get_picture_tokens_uses_the_usual_figures_for_other_models():
+    assert estimate.get_picture_tokens("gpt-4o") == estimate.DEFAULT_PICTURE_TOKENS
+
+
+def test_count_picture_tokens_adds_a_base_and_each_tile():
+    base, tile = estimate.PICTURE_TOKENS["gpt-4o-mini"]
+
+    assert estimate.count_picture_tokens("gpt-4o-mini", 1040, 616) == base + 6 * tile
+
+
+def test_count_pages_includes_the_page_a_passage_runs_into():
+    assert estimate.count_pages(_paperqa_settings()) == 5000 / estimate.CHARACTERS_PER_PAGE + 1
+
+
+def test_count_pictures_is_zero_with_images_and_tables_off():
+    assert estimate.count_pictures(_paperqa_settings(media=False)) == 0
+
+
+@pytest.mark.parametrize("media", [True, MultimodalOptions.ON_WITH_ENRICHMENT, MultimodalOptions.ON_WITHOUT_ENRICHMENT])
+def test_count_pictures_guesses_from_a_typical_page_when_on(media):
+    settings = _paperqa_settings(media=media)
+
+    assert estimate.count_pictures(settings) == estimate.PICTURES_PER_PAGE * estimate.count_pages(settings)
+
+
+def test_count_pictures_is_one_for_each_page_with_whole_page_pictures():
+    settings = _paperqa_settings(media=True, whole_page=True)
+
+    assert estimate.count_pictures(settings) == estimate.count_pages(settings)
+
+
+def test_picture_pixels_for_a_cut_out_picture_follow_the_dpi():
+    assert estimate.picture_pixels(_paperqa_settings(dpi=150)) == (1050, 825)
+
+
+def test_picture_pixels_for_a_whole_page_are_an_a4_page():
+    assert estimate.picture_pixels(_paperqa_settings(whole_page=True, dpi=150)) == (1245, 1755)
+
+
+def test_picture_pixels_use_paperqa_resolution_without_a_dpi():
+    assert estimate.picture_pixels(_paperqa_settings(dpi=None)) == (504, 396)
+
+
+def test_count_limiter_tokens_counts_a_picture_as_base64_text():
+    chars = 1000 * 500 * estimate.PNG_BYTES_PER_PIXEL * estimate.BASE64_CHARACTERS_PER_BYTE
+
+    assert estimate.count_limiter_tokens(1000, 500) == pytest.approx(chars / estimate.CHARACTERS_PER_TOKEN)
+
+
+def test_a_question_on_a_media_index_covers_the_measured_cost_and_time():
+    result = estimate.estimate_question(_paperqa_settings(media=True))
+
+    assert result.cost_usd >= MEASURED_MEDIA_COST_USD
+    assert result.seconds >= MEASURED_MEDIA_SECONDS
+    assert estimate.label_for(result) == estimate.HIGHER_COST
+
+
+def test_images_and_tables_off_sends_no_pictures():
+    result = estimate.estimate_question(_paperqa_settings(media=False))
+
+    assert result.pictures == 0
+    assert not result.whole_page
+
+
+def test_pictures_are_counted_for_the_whole_question():
+    settings = _paperqa_settings(media=True, whole_page=True)
+    result = estimate.estimate_question(settings)
+
+    assert result.pictures == round(10 * estimate.count_pictures(settings))
+    assert result.whole_page
+
+
+def test_whole_page_pictures_cost_more_than_cut_out_ones():
+    cut_out = estimate.estimate_question(_paperqa_settings(media=True))
+    whole_page = estimate.estimate_question(_paperqa_settings(media=True, whole_page=True))
+
+    assert whole_page.cost_usd > cut_out.cost_usd
+    assert whole_page.seconds > cut_out.seconds
+
+
+def test_sharper_pictures_cost_more():
+    sharp = estimate.estimate_question(_paperqa_settings(media=True, dpi=150))
+    plain = estimate.estimate_question(_paperqa_settings(media=True, dpi=None))
+
+    assert sharp.cost_usd > plain.cost_usd
+
+
+def test_pictures_are_billed_at_the_summary_model_rate():
+    mini = _paperqa_settings(media=True)
+    other = _paperqa_settings(media=True)
+    other.summary_llm = "gpt-4o"
+    pictures = 10 * estimate.count_pictures(mini)
+    width, height = estimate.picture_pixels(mini)
+    difference = pictures * (
+        estimate.count_picture_tokens("gpt-4o-mini", width, height)
+        - estimate.count_picture_tokens("gpt-4o", width, height)
+    )
+
+    assert estimate.estimate_question(mini).input_tokens - estimate.estimate_question(other).input_tokens == (
+        pytest.approx(difference, abs=1)
+    )
+
+
+def test_the_token_rate_limit_counts_pictures_as_text():
+    settings = _paperqa_settings(media=True, profile="Low limits")
+    pictures = 10 * estimate.count_pictures(settings)
+
+    limited = pictures * estimate.count_limiter_tokens(*estimate.picture_pixels(settings)) / 30000 * 60
+
+    assert estimate.estimate_question(settings).seconds > limited
+
+
+def test_pictures_slow_a_local_model_too():
+    text_only = estimate.estimate_question(_paperqa_settings(), local=True)
+    with_pictures = estimate.estimate_question(_paperqa_settings(media=True), local=True)
+
+    assert with_pictures.cost_usd is None
+    assert with_pictures.seconds > text_only.seconds
+
+
 def test_a_local_model_has_no_cost():
     result = estimate.estimate_question(_paperqa_settings(), local=True)
 
@@ -245,6 +406,25 @@ def test_describe_estimate_explains_what_is_counted():
         "Time: under half a minute.",
         estimate.ROUGH_NOTE,
     ]
+
+
+def test_describe_estimate_explains_cut_out_pictures():
+    lines = estimate.describe_estimate(_estimate(pictures=19))
+
+    assert lines[1] == (
+        "Images and tables are on, so passages are sent with their pictures: about 19 pictures in all, guessed "
+        f"from a typical page. {estimate.PICTURE_NOTE}"
+    )
+    assert lines[2] == "Cost: less than 1 cent."
+
+
+def test_describe_estimate_explains_whole_page_pictures():
+    lines = estimate.describe_estimate(_estimate(pictures=27, whole_page=True))
+
+    assert lines[1] == (
+        "Images and tables are on with whole-page pictures, so passages are sent with a picture of each of "
+        f"their pages: about 27 pictures in all. {estimate.PICTURE_NOTE}"
+    )
 
 
 def test_describe_estimate_says_one_passage():

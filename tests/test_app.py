@@ -2232,6 +2232,18 @@ def test_estimate_puts_one_off_values_on_top_of_the_usual_settings(pdf_research_
     assert module.estimate.badge(module.estimate.HIGHER_COST) in one_off
 
 
+def test_estimate_counts_pictures_when_images_and_tables_are_on(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    usual = draw_estimate(module)
+    with_pictures = draw_estimate(module, settings=_fake_settings(multimodal=True))
+
+    assert module.estimate.badge(module.estimate.HIGHER_COST) not in usual
+    assert module.estimate.badge(module.estimate.HIGHER_COST) in with_pictures
+    shown = [call.args[0] for call in module.st.caption.call_args_list]
+    assert shown[1].startswith("Images and tables are on")
+
+
 def test_estimate_says_a_local_model_has_no_cost(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 

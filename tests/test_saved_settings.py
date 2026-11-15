@@ -40,7 +40,8 @@ def test_load_keeps_only_values_that_can_still_be_used(tmp_path):
                 "evidence_k": 3,
                 "answer_max_sources": 99,
                 "answer_model": "some-model",
-                "chunk_chars": 1000,
+                "chunk_chars": 10,
+                "paper_directory": "papers",
                 "no_such_setting": 1,
             }
         ),
@@ -80,8 +81,8 @@ def test_save_value_rejects_a_value_outside_the_limits_and_saves_nothing(tmp_pat
 def test_save_value_rejects_a_setting_the_sidebar_cannot_change(tmp_path):
     path = tmp_path / "saved_settings.json"
 
-    with pytest.raises(ValueError, match="chunk_chars"):
-        saved_settings.save_value("chunk_chars", 1000, path)
+    with pytest.raises(ValueError, match="paper_directory"):
+        saved_settings.save_value("paper_directory", "papers", path)
 
     assert not path.exists()
 
@@ -183,3 +184,20 @@ def test_a_saved_value_reaches_the_settings_each_answer_records(real_bootstrap, 
     assert shown["evidence_k"] == "3"
     assert shown["answer_max_sources"] == "2"
     assert shown["answer_length"] == "50 to 100 words"
+
+
+def test_a_saved_index_setting_changes_the_index_paperqa_looks_for(real_bootstrap, tmp_path):
+    """Every entry point builds its settings this way, so they all move to the new index together."""
+    path = tmp_path / "saved_settings.json"
+    with mock.patch.object(saved_settings, "SETTINGS_PATH", path),             mock.patch.object(real_bootstrap.local_llm, "load_config", return_value=None):
+        before = real_bootstrap.build_settings()
+        saved_settings.save_value("chunk_chars", 3000, path)
+        saved_settings.save_value("multimodal", "on_without_enrichment", path)
+        after = real_bootstrap.build_settings()
+        saved_settings.forget(["chunk_chars", "multimodal"], path)
+        back = real_bootstrap.build_settings()
+
+    assert after.parsing.reader_config["chunk_chars"] == 3000
+    assert after.parsing.should_parse_and_enrich_media == (True, False)
+    assert after.get_index_name() != before.get_index_name()
+    assert back.get_index_name() == before.get_index_name()

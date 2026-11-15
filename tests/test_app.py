@@ -94,6 +94,7 @@ def imported_pdf_research_assistant(
     search_mode="Query",
     client_patches=None,
     active_index_dir=Path(r"C:\index\active-shard"),
+    index_changes=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -176,6 +177,12 @@ def imported_pdf_research_assistant(
                 mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")), \
                 mock.patch.multiple(
                     "pdf_research_assistant.exhaustive_client", RUNS_DIR=Path("unused"), **(client_patches or {})
+                ), \
+                mock.patch.multiple(
+                    # Never write a record of the index during tests; report the index changes asked for.
+                    "pdf_research_assistant.index_record",
+                    remember=mock.Mock(return_value=False),
+                    find_changes=mock.Mock(return_value=index_changes),
                 ):
             # Mock traceback formatting before import so assistant error rendering stays deterministic.
             with mock.patch(
@@ -1341,6 +1348,115 @@ def test_render_reindex_settings_marks_every_index_setting_as_needing_a_rebuild(
         st.caption.assert_any_call(setting.help)
 
 
+CHUNK_CHANGES = {
+    "index": "pqa_index_old",
+    "settings": [
+        {"key": "chunk_chars", "label": "Chunk size (characters)", "was": "5000", "now": "3000"},
+        {"key": "multimodal", "label": "Images and tables", "was": "Off", "now": "On"},
+    ],
+}
+
+
+def test_render_reindex_settings_says_what_each_changed_setting_was(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    module.render_reindex_settings(_fake_settings(), CHUNK_CHANGES)
+
+    captions = [call.args[0] for call in module.st.caption.call_args_list]
+    chunk_help = module.settings_groups.get_setting("chunk_chars").help
+    media_help = module.settings_groups.get_setting("multimodal").help
+    assert captions[captions.index(chunk_help) + 1] == "Changed. The index `pqa_index_old` was built with `5000`."
+    assert captions[captions.index(media_help) + 1] == "Changed. The index `pqa_index_old` was built with `Off`."
+    assert len([caption for caption in captions if caption.startswith("Changed.")]) == 2
+
+
+def test_render_reindex_settings_marks_nothing_as_changed_without_changes(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    module.render_reindex_settings(_fake_settings(), None)
+
+    captions = [call.args[0] for call in module.st.caption.call_args_list]
+    assert not [caption for caption in captions if caption.startswith("Changed.")]
+
+
+def test_describe_index_changes_lists_each_change_and_how_to_end_the_warning(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    text = module.describe_index_changes(CHUNK_CHANGES)
+
+    assert text == (
+        "**Your library and index settings no longer match the index.** They have changed since the index "
+        "`pqa_index_old` was built, so the app is now looking for an index built with the new settings, "
+        "and there is none yet.\n\n"
+        "- Chunk size (characters): was `5000`, now `3000`\n"
+        "- Images and tables: was `Off`, now `On`\n\n"
+        + module.INDEX_CHANGES_NOTE
+    )
+
+
+def test_describe_index_changes_leaves_out_the_list_when_no_change_is_known(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    text = module.describe_index_changes({"index": "pqa_index_old", "settings": []})
+
+    assert "- " not in text
+    assert text.endswith("there is none yet.\n\n" + module.INDEX_CHANGES_NOTE)
+
+
+def test_index_changes_note_says_how_to_end_the_warning(pdf_research_assistant_module):
+    note = pdf_research_assistant_module.INDEX_CHANGES_NOTE
+
+    assert "put these settings back" in note
+    assert "index every PDF again" in note
+
+
+def test_render_index_changes_warns_only_when_there_are_changes(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.warning.reset_mock()
+
+    module.render_index_changes(None)
+    module.st.warning.assert_not_called()
+
+    module.render_index_changes(CHUNK_CHANGES)
+    module.st.warning.assert_called_once_with(module.describe_index_changes(CHUNK_CHANGES))
+
+
+def test_page_records_the_active_index_when_it_holds_pdfs_and_shows_no_change_warning():
+    active_index_dir = Path(r"C:\index\active-shard")
+
+    with imported_pdf_research_assistant(indexed_count=2, active_index_dir=active_index_dir) as module:
+        settings = module.bootstrap.build_settings.return_value
+        module.index_record.remember.assert_called_once_with(settings, active_index_dir)
+        module.index_record.find_changes.assert_not_called()
+        module.st.warning.assert_not_called()
+
+
+def test_page_warns_about_changed_index_settings_before_the_missing_index_banner():
+    active_index_dir = Path(r"C:\index\active-shard")
+
+    with imported_pdf_research_assistant(
+        indexed_count=0, active_index_dir=active_index_dir, index_changes=CHUNK_CHANGES
+    ) as module:
+        settings = module.bootstrap.build_settings.return_value
+        module.index_record.remember.assert_not_called()
+        module.index_record.find_changes.assert_called_once_with(settings, active_index_dir)
+        assert module.st.warning.call_args_list == [
+            mock.call(module.describe_index_changes(CHUNK_CHANGES)),
+            mock.call("Index not found. The first question will build the PDF index, which may take a long time."),
+        ]
+        captions = [call.args[0] for call in module.st.caption.call_args_list]
+        assert "Changed. The index `pqa_index_old` was built with `5000`." in captions
+
+
+def test_page_shows_only_the_missing_index_banner_when_no_setting_changed():
+    with imported_pdf_research_assistant(indexed_count=0, index_changes=None) as module:
+        module.st.warning.assert_called_once_with(
+            "Index not found. The first question will build the PDF index, which may take a long time."
+        )
+
+
 def test_settings_notes_say_which_group_needs_a_rebuild(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
@@ -1364,10 +1480,14 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
         render_reindex_settings=steps.reindex,
         render_usage=steps.usage,
     ):
-        assert module.render_sidebar(app_state, settings) == ("Exhaustive", {"evidence_k": 3})
+        assert module.render_sidebar(app_state, settings, CHUNK_CHANGES) == ("Exhaustive", {"evidence_k": 3})
 
     module.st.header.assert_called_once_with("Settings")
-    assert steps.mock_calls == [mock.call.instant(settings), mock.call.reindex(settings), mock.call.usage(app_state)]
+    assert steps.mock_calls == [
+        mock.call.instant(settings),
+        mock.call.reindex(settings, CHUNK_CHANGES),
+        mock.call.usage(app_state),
+    ]
 
 
 def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant_group():

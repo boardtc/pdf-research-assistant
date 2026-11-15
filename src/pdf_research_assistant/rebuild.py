@@ -5,6 +5,7 @@ from pathlib import Path
 
 from paperqa.agents.search import get_directory_index
 
+from pdf_research_assistant import index_record
 from pdf_research_assistant.bootstrap import (
     ALLOWED_PATHS,
     FAILED_DOCUMENT_ADD_ID,
@@ -76,7 +77,11 @@ async def async_main():
         print("Rebuild completed with parser/indexing errors before any failed PDFs were recorded.")
         for message in summarize_exception_messages(rebuild_error):
             print(f"ERROR: {message}")
-    print(f"Indexed after run: {get_indexed_doc_count(index_dir=active_index_dir)}")
+    indexed_after = get_indexed_doc_count(index_dir=active_index_dir)
+    if indexed_after:
+        # The app compares later settings changes with this index.
+        index_record.remember(settings, active_index_dir)
+    print(f"Indexed after run: {indexed_after}")
     print(f"Failed PDFs: {len(failed_files)}")
     for file_location in failed_files:
         print(f"FAILED: {file_location}")

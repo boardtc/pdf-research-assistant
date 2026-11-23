@@ -11,6 +11,7 @@ from pathlib import Path
 import streamlit as st
 
 from pdf_research_assistant import (
+    answer_templates,
     bootstrap,
     estimate,
     exhaustive_client,
@@ -99,6 +100,7 @@ SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it 
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
 SETTINGS_RESET_LABEL = "Go back to the default settings"
 NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
+NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
 LOCAL_PROFILE_NOTE = (
     "Answers come from a local model, which has no account limits. Only the number of requests sent at once "
     "matters: a lower profile sends fewer, which a small local server may handle better."
@@ -781,6 +783,30 @@ def render_answer_length(settings) -> None:
         saved_settings.save_value(setting.key, chosen)
 
 
+def draw_answer_template(setting: settings_groups.Setting, current: str, key: str) -> str:
+    """Draw the answer template choices, starting at the template in use.
+
+    An answer prompt that matches no template is offered as it is, so drawing the control never changes it.
+    """
+    options = list(setting.check.values)
+    if current not in options:
+        options.append(current)
+    return st.selectbox(setting.label, options, index=options.index(current), help=setting.help, key=key)
+
+
+def render_answer_template(settings) -> None:
+    """Let the user choose how the answer is laid out, saving a new choice at once, and say what it does."""
+    setting = settings_groups.get_setting("answer_template")
+    current = setting.read(settings)
+    chosen = draw_answer_template(setting, current, setting_widget_key(setting.key))
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+    if chosen == answer_templates.NO_TEMPLATE:
+        st.caption(NO_TEMPLATE_NOTE)
+    else:
+        st.caption(answer_templates.get_template(chosen).description)
+
+
 def render_rate_profile(settings) -> None:
     """Let the user choose how fast PaperQA may send requests, saving a new choice at once.
 
@@ -840,7 +866,11 @@ def render_one_off_settings(settings) -> dict:
             return {}
         gathered_setting, sources_setting = (settings_groups.get_setting(key) for key in SOURCE_SETTING_KEYS)
         length_setting = settings_groups.get_setting("answer_length")
-        usual = {setting.key: setting.read(settings) for setting in (gathered_setting, sources_setting, length_setting)}
+        template_setting = settings_groups.get_setting("answer_template")
+        usual = {
+            setting.key: setting.read(settings)
+            for setting in (gathered_setting, sources_setting, length_setting, template_setting)
+        }
         gathered = draw_whole_number(
             gathered_setting,
             usual["evidence_k"],
@@ -857,7 +887,17 @@ def render_one_off_settings(settings) -> dict:
         length = draw_answer_length(
             length_setting, usual["answer_length"], one_off_widget_key("answer_length", usual["answer_length"])
         )
-    chosen = {"evidence_k": gathered, "answer_max_sources": sources, "answer_length": length}
+        template = draw_answer_template(
+            template_setting,
+            usual["answer_template"],
+            one_off_widget_key("answer_template", usual["answer_template"]),
+        )
+    chosen = {
+        "evidence_k": gathered,
+        "answer_max_sources": sources,
+        "answer_length": length,
+        "answer_template": template,
+    }
     return {key: value for key, value in chosen.items() if value != usual[key]}
 
 
@@ -874,6 +914,7 @@ def render_instant_settings(settings) -> tuple[str, dict]:
         )
         render_source_settings(settings)
         render_answer_length(settings)
+        render_answer_template(settings)
         render_rate_profile(settings)
         render_settings_reset()
         one_off = render_one_off_settings(settings)

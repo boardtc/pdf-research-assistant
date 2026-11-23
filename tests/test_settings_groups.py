@@ -35,6 +35,7 @@ CHANGES = {
     "evidence_k": lambda s: setattr(s.answer, "evidence_k", 3),
     "answer_max_sources": lambda s: setattr(s.answer, "answer_max_sources", 2),
     "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
+    "answer_template": lambda s: settings_groups.get_setting("answer_template").write(s, "Study notes"),
     "rate_profile": lambda s: settings_groups.get_setting("rate_profile").write(s, "Low limits"),
     "paper_directory": lambda s: setattr(s.agent.index, "paper_directory", Path(s.agent.index.paper_directory) / "other"),
     "use_absolute_paper_directory": lambda s: setattr(s.agent.index, "use_absolute_paper_directory", True),
@@ -51,7 +52,14 @@ def test_every_setting_is_in_exactly_one_group():
     instant = [setting.key for setting in settings_groups.INSTANT_SETTINGS]
     reindex = [setting.key for setting in settings_groups.REINDEX_SETTINGS]
 
-    assert instant == ["answer_model", "evidence_k", "answer_max_sources", "answer_length", "rate_profile"]
+    assert instant == [
+        "answer_model",
+        "evidence_k",
+        "answer_max_sources",
+        "answer_length",
+        "answer_template",
+        "rate_profile",
+    ]
     assert reindex == [
         "paper_directory",
         "use_absolute_paper_directory",
@@ -141,6 +149,7 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
         "evidence_k": 10,
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
+        "answer_template": "Direct answer",
         # A bare PaperQA Settings object has none of the profiles' limits.
         "rate_profile": rate_profiles.NO_PROFILE,
     }
@@ -225,6 +234,7 @@ def test_the_settings_that_can_be_saved_from_the_sidebar():
         "evidence_k",
         "answer_max_sources",
         "answer_length",
+        "answer_template",
         "rate_profile",
         "embedding",
         "chunk_chars",
@@ -323,6 +333,49 @@ def test_answer_length_help_mentions_cost_speed_and_exhaustive_search():
     assert "Exhaustive search ignores" in help_text
 
 
+# Answer templates.
+
+
+def test_answer_template_offers_each_template_by_name_starting_at_paperqa_s_own_prompt(tmp_path):
+    setting = settings_groups.get_setting("answer_template")
+
+    assert setting.check.values == ("Direct answer", "Study notes", "Compare sources", "Contradictions only")
+    assert setting.read(_real_settings(tmp_path)) == "Direct answer"
+
+
+def test_writing_an_answer_template_changes_paperqa_s_answer_prompt(tmp_path):
+    from pdf_research_assistant import answer_templates
+
+    settings = _real_settings(tmp_path)
+
+    settings_groups.get_setting("answer_template").write(settings, "Contradictions only")
+
+    assert settings.prompts.qa == answer_templates.template_prompt(answer_templates.get_template("Contradictions only"))
+    assert settings_groups.get_setting("answer_template").read(settings) == "Contradictions only"
+
+
+def test_record_answer_settings_shows_the_template_by_name(tmp_path):
+    settings = _real_settings(tmp_path)
+    settings_groups.get_setting("answer_template").write(settings, "Study notes")
+
+    record = settings_groups.record_answer_settings(settings, one_off=["answer_template"])
+
+    item = next(item for item in record["values"] if item["key"] == "answer_template")
+    assert item == {
+        "key": "answer_template",
+        "label": "Answer template",
+        "value": "Study notes",
+        "source": settings_groups.ONE_OFF_SOURCE,
+    }
+
+
+def test_answer_template_help_says_it_shapes_the_answer_and_exhaustive_search_ignores_it():
+    help_text = settings_groups.get_setting("answer_template").help
+
+    assert "same passages" in help_text
+    assert "Exhaustive search ignores" in help_text
+
+
 # Checking and applying values chosen in the app, saved or for one question only.
 
 
@@ -338,6 +391,7 @@ def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
         ("paper_directory", "papers"),
         ("evidence_k", 0),
         ("answer_length", "one paragraph"),
+        ("answer_template", "Poem"),
     ],
 )
 def test_usable_rejects_unknown_settings_settings_the_sidebar_cannot_change_and_values_not_allowed(key, value):
@@ -377,6 +431,7 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
         "evidence_k": settings_groups.ONE_OFF_SOURCE,
         "answer_max_sources": None,
         "answer_length": None,
+        "answer_template": None,
         "rate_profile": None,
     }
     assert record["values"][1]["value"] == "3"

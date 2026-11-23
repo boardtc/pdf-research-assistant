@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from pdf_research_assistant import rate_profiles
+from pdf_research_assistant import answer_templates, rate_profiles
 
 
 @dataclass(frozen=True)
@@ -166,6 +166,20 @@ INSTANT_SETTINGS = (
                 ("Long", "about 400 words, but can be longer"),
             )
         ),
+    ),
+    Setting(
+        key="answer_template",
+        label="Answer template",
+        help=(
+            "How the answer is laid out for your research task. Each template changes the request PaperQA "
+            "uses to write the answer from the passages it found; the same passages are found and read "
+            "whichever you pick, so the cost and time hardly change. Answer length still applies. "
+            "Exhaustive search ignores it, because it writes no combined answer."
+        ),
+        needs_reindex=False,
+        read=answer_templates.read_template_name,
+        write=answer_templates.apply_template,
+        check=OneOf(tuple((template.name, template.name) for template in answer_templates.TEMPLATES)),
     ),
     Setting(
         key="rate_profile",

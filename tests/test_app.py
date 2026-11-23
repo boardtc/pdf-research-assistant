@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from pdf_research_assistant import rate_profiles
+from pdf_research_assistant import answer_templates, rate_profiles
 
 
 class _ContextManagerStub:
@@ -31,6 +31,12 @@ class _SessionState(dict):
         self[name] = value
 
 
+def _template_prompt(name):
+    from pdf_research_assistant import answer_templates
+
+    return answer_templates.template_prompt(answer_templates.get_template(name))
+
+
 def _fake_settings(**changes):
     """Stand in for PaperQA settings with the values the sidebar reads."""
     values = {
@@ -46,6 +52,7 @@ def _fake_settings(**changes):
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
         "rate_profile": None,
+        "answer_template": None,
     } | changes
     settings = SimpleNamespace(
         llm=values["llm"],
@@ -60,7 +67,12 @@ def _fake_settings(**changes):
             evidence_summary_length="about 100 words",
             max_concurrent_requests=4,
         ),
-        prompts=SimpleNamespace(summary_json_system="system", summary_json="summary", qa="answer", system="system"),
+        prompts=SimpleNamespace(
+            summary_json_system="system",
+            summary_json="summary",
+            qa=_template_prompt(values["answer_template"]) if values["answer_template"] else "answer",
+            system="system",
+        ),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"],
             reader_config=values["reader_config"],
@@ -173,7 +185,9 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     # Like the real build_settings, which always applies a rate profile.
-    bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(rate_profile=rate_profiles.DEFAULT_PROFILE))
+    bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(
+        rate_profile=rate_profiles.DEFAULT_PROFILE, answer_template=answer_templates.DEFAULT_TEMPLATE
+    ))
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
     bootstrap_module.MANIFEST_PATH = Path(r"D:\papers-list\manifest.csv")
     bootstrap_module.PAPER_DIR = Path(r"D:\papers")
@@ -1469,6 +1483,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         render_local_llm_setup=steps.local_llm,
         render_source_settings=steps.sources,
         render_answer_length=steps.length,
+        render_answer_template=steps.template,
         render_rate_profile=steps.profile,
         render_settings_reset=steps.reset,
         render_one_off_settings=steps.one_off,
@@ -1480,6 +1495,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     assert steps.mock_calls == [
         mock.call.sources(settings),
         mock.call.length(settings),
+        mock.call.template(settings),
         mock.call.profile(settings),
         mock.call.reset(),
         mock.call.one_off(settings),
@@ -2392,7 +2408,13 @@ def test_the_defaults_button_is_hidden_until_a_sidebar_setting_is_saved(pdf_rese
 
 
 @pytest.mark.parametrize(
-    "saved", [{"evidence_k": 3}, {"answer_length": "50 to 100 words"}, {"rate_profile": "Low limits"}]
+    "saved",
+    [
+        {"evidence_k": 3},
+        {"answer_length": "50 to 100 words"},
+        {"answer_template": "Study notes"},
+        {"rate_profile": "Low limits"},
+    ],
 )
 def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_research_assistant_module):
     module = pdf_research_assistant_module
@@ -2400,7 +2422,9 @@ def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_rese
     patched = draw_settings_reset(module, saved=saved, clicked={"answer_settings_reset"})
 
     module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
-    patched["forget"].assert_called_once_with(["evidence_k", "answer_max_sources", "answer_length", "rate_profile"])
+    patched["forget"].assert_called_once_with(
+        ["evidence_k", "answer_max_sources", "answer_length", "answer_template", "rate_profile"]
+    )
     # The browser keeps a control's old value, so the controls get new keys and start again from the defaults.
     assert module.st.session_state.answer_settings_round == 1
     module.st.rerun.assert_called_once_with()
@@ -2418,6 +2442,8 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_length_1"
     draw_rate_profile(module)
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_rate_profile_1"
+    draw_answer_template(module)
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_template_1"
 
 
 def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
@@ -2499,6 +2525,72 @@ def test_page_draws_the_source_settings_from_the_settings_it_built():
         # The index settings further down the sidebar have number boxes too.
         assert labels[:2] == ["Passages gathered", "Most sources in the answer"]
         assert module.st.number_input.call_args_list[0].kwargs["value"] == 10
+
+
+# Sidebar control for the answer template.
+
+TEMPLATE_NAMES = ["Direct answer", "Study notes", "Compare sources", "Contradictions only"]
+
+
+def draw_answer_template(module, *, settings=None, picked=None):
+    """Draw the answer template control, with the user picking a template or leaving it as it is."""
+    st = module.st
+    st.caption.reset_mock()
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with mock.patch.object(module.saved_settings, "save_value") as save_value:
+        module.render_answer_template(settings or _fake_settings(answer_template="Direct answer"))
+        return save_value
+
+
+def test_answer_template_offers_the_templates_starting_at_the_one_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_template(module, settings=_fake_settings(answer_template="Compare sources"))
+
+    call = module.st.selectbox.call_args
+    assert call.args == ("Answer template", TEMPLATE_NAMES)
+    assert call.kwargs["index"] == 2
+    assert call.kwargs["help"] == module.settings_groups.get_setting("answer_template").help
+    assert call.kwargs["key"] == "setting_answer_template_0"
+    save_value.assert_not_called()
+
+
+def test_answer_template_explains_the_template_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_answer_template(module, settings=_fake_settings(answer_template="Study notes"))
+
+    module.st.caption.assert_called_once_with(answer_templates.get_template("Study notes").description)
+
+
+def test_picking_another_answer_template_saves_it_and_explains_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_template(
+        module, settings=_fake_settings(answer_template="Direct answer"), picked="Contradictions only"
+    )
+
+    save_value.assert_called_once_with("answer_template", "Contradictions only")
+    module.st.caption.assert_called_once_with(answer_templates.get_template("Contradictions only").description)
+
+
+def test_an_answer_prompt_that_matches_no_template_is_kept_until_a_template_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_answer_template(module, settings=_fake_settings())
+
+    call = module.st.selectbox.call_args
+    assert call.args[1] == TEMPLATE_NAMES + [answer_templates.NO_TEMPLATE]
+    assert call.kwargs["index"] == 4
+    module.st.caption.assert_called_once_with(module.NO_TEMPLATE_NOTE)
+    save_value.assert_not_called()
+
+
+def test_page_draws_the_answer_template_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Answer template")
+
+        assert call.args[1][call.kwargs["index"]] == answer_templates.DEFAULT_TEMPLATE
 
 
 # Sidebar control for the rate-limit profile.
@@ -2588,9 +2680,11 @@ def draw_one_off_settings(module, *, settings=None, switched_on=True, typed=None
     typed = typed or {}
     st.toggle = mock.Mock(return_value=switched_on)
     st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: typed.get(label, value))
-    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    # A bare phrase is an answer length; a dict picks by control label.
+    picked = picked if isinstance(picked, dict) else ({"Answer length": picked} if picked else {})
+    st.selectbox = mock.Mock(side_effect=lambda label, options, index=0, **_kwargs: picked.get(label, options[index]))
     with mock.patch.object(module.saved_settings, "save_value") as save_value:
-        chosen = module.render_one_off_settings(settings or _fake_settings())
+        chosen = module.render_one_off_settings(settings or _fake_settings(answer_template="Direct answer"))
     # Nothing chosen here is ever saved as a usual setting.
     save_value.assert_not_called()
     return chosen
@@ -2620,7 +2714,9 @@ def test_one_off_note_says_the_values_are_used_once_and_ignored_by_exhaustive_se
 def test_switched_on_one_off_settings_start_at_the_usual_values_and_change_nothing(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
-    chosen = draw_one_off_settings(module, settings=_fake_settings(evidence_k=12, answer_max_sources=4))
+    chosen = draw_one_off_settings(
+        module, settings=_fake_settings(evidence_k=12, answer_max_sources=4, answer_template="Study notes")
+    )
 
     assert chosen == {}
     gathered = _number_box(module, "Passages gathered")
@@ -2630,11 +2726,15 @@ def test_switched_on_one_off_settings_start_at_the_usual_values_and_change_nothi
     # The usual value is part of each key, so a change to the usual settings starts the box again from it.
     assert gathered.kwargs["key"] == "one_off_evidence_k_0_12"
     assert sources.kwargs["key"] == "one_off_answer_max_sources_0_4"
-    length = module.st.selectbox.call_args
+    length = _control(module.st.selectbox, "Answer length")
     assert length.args == ("Answer length", [SHORT, STANDARD, LONG])
     assert length.kwargs["index"] == 1
     assert length.kwargs["key"] == f"one_off_answer_length_0_{STANDARD}"
     assert length.kwargs["format_func"](SHORT) == "Short (50 to 100 words)"
+    template = _control(module.st.selectbox, "Answer template")
+    assert template.args == ("Answer template", TEMPLATE_NAMES)
+    assert template.kwargs["index"] == 1
+    assert template.kwargs["key"] == "one_off_answer_template_0_Study notes"
 
 
 def test_one_off_settings_return_only_the_values_that_differ_from_the_usual_ones(pdf_research_assistant_module):
@@ -2660,9 +2760,28 @@ def test_one_off_answer_length_offers_a_usual_length_that_is_not_one_of_the_choi
 
     chosen = draw_one_off_settings(module, settings=_fake_settings(answer_length="one paragraph"))
 
-    length = module.st.selectbox.call_args
+    length = _control(module.st.selectbox, "Answer length")
     assert length.args[1] == [SHORT, STANDARD, LONG, "one paragraph"]
     assert length.kwargs["index"] == 3
+    assert chosen == {}
+
+
+def test_one_off_answer_template_can_be_picked_for_the_next_question_only(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, picked={"Answer template": "Compare sources"})
+
+    assert chosen == {"answer_template": "Compare sources"}
+
+
+def test_one_off_answer_template_offers_a_usual_prompt_that_matches_no_template(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, settings=_fake_settings())
+
+    template = _control(module.st.selectbox, "Answer template")
+    assert template.args[1] == TEMPLATE_NAMES + [answer_templates.NO_TEMPLATE]
+    assert template.kwargs["index"] == 4
     assert chosen == {}
 
 

@@ -4,7 +4,9 @@ Exhaustive search plans one summary call per passage in scope (exhaustive.estima
 question is smaller and its size is known from the settings alone, so it can be estimated on every
 page load without reading the index:
 
-- PaperQA's agent makes a few calls to choose its tools (search, gather evidence, answer).
+- PaperQA's agent makes a few calls to choose its tools (search, gather evidence, answer). With fixed
+  search steps (`agent.agent_type` "fake") the answer model is instead asked once for a few searches and
+  once more to finish, after the steps have run.
 - Gathering evidence sends `answer.evidence_k` passages to the summary model, at most
   `answer.max_concurrent_requests` at a time, and asks for `answer.evidence_summary_length` each.
 - With a before-answer prompt (`prompts.pre`), the answer model is first sent that prompt with the
@@ -42,6 +44,12 @@ FALLBACK_WORDS = 200
 AGENT_CALLS = 4
 AGENT_INPUT_TOKENS = 2000
 AGENT_OUTPUT_TOKENS = 50
+# With fixed search steps, the answer model is asked for a few searches (a short prompt and reply), then
+# sent the conversation once more to finish, like one of the agent's own calls.
+FIXED_STEPS_AGENT_TYPE = "fake"
+FIXED_STEPS_CALLS = 2
+SEARCH_REQUEST_INPUT_TOKENS = 200
+FIXED_STEPS_INPUT_TOKENS = SEARCH_REQUEST_INPUT_TOKENS + AGENT_INPUT_TOKENS
 # PaperQA sets no length for the reply to a before-answer prompt; a short list or explanation is assumed.
 PRE_OUTPUT_TOKENS = 200
 # Each passage is sent with its citation, such as "Smith 2020 pages 3-4: Smith, J. (2020) ...".
@@ -119,6 +127,8 @@ class Estimate:
     whole_page: bool = False
     # Whether a before-answer prompt adds a call.
     pre_prompt: bool = False
+    # Whether PaperQA runs its search steps in a fixed order instead of having the model plan them.
+    fixed_steps: bool = False
 
 
 def get_tokens_per_minute(settings: object) -> float | None:
@@ -237,11 +247,18 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     width, height = picture_pixels(settings)
     picture_tokens = pictures * count_picture_tokens(settings.summary_llm, width, height)
 
+    fixed_steps = settings.agent.agent_type == FIXED_STEPS_AGENT_TYPE
+    if fixed_steps:
+        agent_calls, agent_model, agent_input = FIXED_STEPS_CALLS, settings.llm, FIXED_STEPS_INPUT_TOKENS
+    else:
+        agent_calls, agent_model = AGENT_CALLS, settings.agent.agent_llm
+        agent_input = AGENT_CALLS * AGENT_INPUT_TOKENS
+
     calls = (
         (settings.summary_llm, passages * summary_input + picture_tokens, passages * summary_output),
         (settings.llm, answer_input, answer_output),
         (settings.llm, pre_input if pre_prompt else 0, pre_output),
-        (settings.agent.agent_llm, AGENT_CALLS * AGENT_INPUT_TOKENS, AGENT_CALLS * AGENT_OUTPUT_TOKENS),
+        (agent_model, agent_input, agent_calls * AGENT_OUTPUT_TOKENS),
     )
     input_tokens = sum(call[1] for call in calls)
     output_tokens = sum(call[2] for call in calls)
@@ -254,7 +271,7 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
         batches * (call_seconds(summary_output) + pictures_per_passage * SECONDS_PER_PICTURE)
         + call_seconds(answer_output)
         + (call_seconds(pre_output) if pre_prompt else 0)
-        + AGENT_CALLS * call_seconds(AGENT_OUTPUT_TOKENS)
+        + agent_calls * call_seconds(AGENT_OUTPUT_TOKENS)
     )
     # Unless the token rate limit holds the question back for longer. It counts pictures by their size as
     # base64 text, not by the tokens they are billed at.
@@ -278,6 +295,7 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
         pictures=round(pictures),
         whole_page=bool(pictures) and settings.parsing.reader_config.get("full_page", False),
         pre_prompt=pre_prompt,
+        fixed_steps=fixed_steps,
     )
 
 
@@ -324,10 +342,11 @@ def summarize(estimate: Estimate) -> str:
 
 def describe_estimate(estimate: Estimate) -> list[str]:
     """Explain what the estimate is based on, in plain words."""
+    planning = "two short calls to suggest searches and finish" if estimate.fixed_steps else "a few short calls to plan the search"
     lines = [
         f"PaperQA reads {estimate.passages} passage{'' if estimate.passages == 1 else 's'} with the model, "
         f"then writes an answer of up to about {estimate.answer_words} words from at most {estimate.sources} "
-        f"of them, plus a few short calls to plan the search.",
+        f"of them, plus {planning}.",
     ]
     if estimate.pre_prompt:
         lines.append(PRE_PROMPT_NOTE)

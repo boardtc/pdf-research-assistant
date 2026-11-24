@@ -639,3 +639,15 @@ def test_build_settings_applies_the_choices_saved_in_the_sidebar(bootstrap_modul
         settings = bootstrap_module.build_settings()
 
     apply_saved.assert_called_once_with(settings)
+
+
+def test_build_settings_applies_a_saved_preset_with_a_number_changed_afterwards_on_top(bootstrap_module):
+    bootstrap_module.saved_settings.save_value("evidence_k", 7)
+    bootstrap_module.saved_settings.save_value("quality_preset", "Fast")
+
+    settings = bootstrap_module.build_settings()
+
+    # Saved before the preset in the file, but still applied after it.
+    assert settings.answer.evidence_k == 7
+    assert settings.answer.answer_max_sources == 3
+    assert settings.agent.agent_type == "fake"

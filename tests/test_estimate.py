@@ -467,3 +467,64 @@ def test_describe_estimate_explains_a_local_model():
 @pytest.mark.parametrize("label", [estimate.FAST, estimate.BALANCED, estimate.SLOWER, estimate.HIGHER_COST])
 def test_badge_colours_every_label(label):
     assert estimate.badge(label) == f":{estimate.BADGE_COLOURS[label]}-badge[{label}]"
+
+
+def test_fixed_search_steps_make_two_short_calls_instead_of_the_agent_s_planning_calls():
+    usual = estimate.estimate_question(_paperqa_settings())
+    settings = _paperqa_settings()
+    settings.agent.agent_type = "fake"
+
+    result = estimate.estimate_question(settings)
+
+    assert not usual.fixed_steps
+    assert result.fixed_steps
+    assert result.cost_usd < usual.cost_usd
+    saved_calls = estimate.AGENT_CALLS - estimate.FIXED_STEPS_CALLS
+    assert result.seconds == pytest.approx(usual.seconds - saved_calls * estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS))
+    assert result.input_tokens == usual.input_tokens - (
+        estimate.AGENT_CALLS * estimate.AGENT_INPUT_TOKENS - estimate.FIXED_STEPS_INPUT_TOKENS
+    )
+
+
+def test_fixed_search_steps_are_billed_at_the_answer_model_rate():
+    settings = _paperqa_settings()
+    settings.agent.agent_type = "fake"
+    settings.agent.agent_llm = "some-model-without-prices"
+
+    # PaperQA asks the answer model for the searches, so an agent model without prices does not matter.
+    assert estimate.estimate_question(settings).cost_usd is not None
+
+
+def test_describe_estimate_explains_fixed_search_steps():
+    lines = estimate.describe_estimate(_estimate(fixed_steps=True))
+
+    assert lines[0].endswith("plus two short calls to suggest searches and finish.")
+
+
+@pytest.mark.parametrize(
+    ("preset", "label"),
+    [
+        ("Fast", estimate.FAST),
+        ("Balanced", estimate.BALANCED),
+        ("Debug", estimate.FAST),
+    ],
+)
+def test_quality_presets_come_out_with_the_label_their_name_suggests(preset, label):
+    from pdf_research_assistant import quality_presets
+
+    settings = _paperqa_settings()
+    quality_presets.apply_preset(settings, preset)
+
+    assert estimate.label_for(estimate.estimate_question(settings)) == label
+
+
+def test_the_high_quality_preset_costs_more_and_takes_longer_than_balanced():
+    from pdf_research_assistant import quality_presets
+
+    balanced, high = _paperqa_settings(), _paperqa_settings()
+    quality_presets.apply_preset(high, "High quality")
+
+    usual, result = estimate.estimate_question(balanced), estimate.estimate_question(high)
+    assert result.cost_usd > usual.cost_usd
+    assert result.seconds > usual.seconds
+    assert estimate.label_for(result) != estimate.FAST

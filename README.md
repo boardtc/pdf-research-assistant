@@ -87,7 +87,7 @@ Under the title, the page names the active index and the paper list in use. Pape
 
 The Streamlit sidebar puts settings in two groups:
 
-- **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, the answer template, the grounding mode, the before-answer prompt, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
+- **Applies to your next question**: the search mode, the quality preset, how many sources an answer uses, how long the answer is, the answer template, the grounding mode, the before-answer prompt, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
 - **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page pictures, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again.
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
@@ -115,6 +115,21 @@ Pictures are drawn at 150 dots per inch (`parsing.reader_config["dpi"]`, set in 
 Reading images and tables needs the `pypdfium2` package, which is installed with this project (`paper-qa-pypdf[media]`). An older install may lack it; the app will not save the setting until it is installed.
 
 When you save a change to one of the rebuild settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings, which **Rebuild the index** does from the page (see [Rebuild Index](#rebuild-index)). Changing a setting in the other group never raises it.
+
+**Quality preset** is a quick way to set how thoroughly PaperQA searches and answers. Each preset follows one of PaperQA's own bundled presets (in `paperqa/configs`) or its defaults, and sets five PaperQA settings: `answer.evidence_k`, `answer.answer_max_sources`, `answer.answer_length`, `answer.evidence_summary_length` (how long each passage's summary is) and `agent.agent_type` (whether the model plans each search or PaperQA runs fixed steps):
+
+| Preset | Passages | Sources | Answer | Passage summary | Search steps | Follows |
+|---|---|---|---|---|---|---|
+| **Fast** | 5 | 3 | 50 to 100 words | 25 to 50 words | Fixed steps | `fast.json` |
+| **Balanced** (PaperQA default) | 10 | 5 | about 200 words | about 100 words | Planned by the model | PaperQA's defaults |
+| **High quality** | 20 | 5 | about 200 words | about 100 words | Planned by the model | `high_quality.json` |
+| **Debug** | 2 | 2 | 50 to 100 words | 25 to 50 words | Planned by the model | `debug.json` |
+
+With fixed steps PaperQA asks the answer model for a few searches, then searches, gathers evidence and answers in that order and makes one call to finish, instead of having the model choose each step; that saves a couple of model calls. High quality reads twice as many passages as Balanced, so it costs and takes roughly twice as long. Debug is the smallest real run, for checking that the app and your PDFs work. The `Next question:` estimate follows the preset you pick.
+
+The bundled presets also change settings that live elsewhere: how many requests are sent at once belongs to **Speed limits**, the chunk size and document details in `high_quality.json` would need an index rebuild, and `debug.json`'s Anthropic model would replace the answer model. Those are left out, and so are the answer template, grounding and before-answer prompt, so a preset combines with any of them.
+
+Picking a preset replaces any passages, sources or answer length you set before. You can still change those afterwards: your change is used on top of the preset, and the preset then shows as **Custom**.
 
 Two numbers control how much evidence goes into an answer. They are PaperQA's `answer.evidence_k` and `answer.answer_max_sources` settings:
 
@@ -170,7 +185,7 @@ PaperQA also has an after-answer prompt, `prompts.post`, which the app does not 
 
 A profile above your account's limits makes OpenAI turn requests away, and PaperQA waits and retries, which is slower. A profile below them makes long runs slower than they need to be. The profile does not change the cost of a question. With a local model there are no account limits, so only the number of requests sent at once matters.
 
-A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source, length, template, grounding and before-answer prompt settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
+A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the quality preset and the passage, source, length, template, grounding and before-answer prompt settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
 
 To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source, length, template and grounding controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
 
@@ -197,7 +212,7 @@ Each assistant response also includes:
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
 - an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, its relevance score, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
 - a relevance score under each source passage, out of 10. This is PaperQA's `Context.score`: the rating the summary model gave the passage for your question while summarising it, not a search similarity. Scores tend to bunch at 0 or 8 to 9, so use them as a rough guide to which chunk to open. Answers given before scores were kept, and passages PaperQA did not score, show none.
-- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, the answer template, the grounding mode, the before-answer prompt (or `Off`), and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
+- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, the quality preset (or `Custom`), how many passages were gathered, the most sources the answer may cite, the answer length, the passage summary length, the search steps, the answer template, the grounding mode, the before-answer prompt (or `Off`), and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 

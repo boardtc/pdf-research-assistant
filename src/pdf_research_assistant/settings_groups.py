@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from pdf_research_assistant import answer_templates, grounding_modes, prompt_hooks, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, prompt_hooks, quality_presets, rate_profiles
 
 
 @dataclass(frozen=True)
@@ -121,6 +121,24 @@ INSTANT_SETTINGS = (
         needs_reindex=False,
         read=lambda settings: settings.llm,
     ),
+    # Before the settings it covers, so a number or length changed after picking a preset is applied last.
+    Setting(
+        key="quality_preset",
+        label="Quality preset",
+        help=(
+            "A starting point for how thoroughly PaperQA searches and answers, following PaperQA's own presets. "
+            "Each one sets the passages gathered, the most sources in the answer, the answer length, how long "
+            "each passage's summary is, and whether the model plans its searches. More passages find more "
+            "evidence but cost more and take longer. You can change the numbers and answer length afterwards; "
+            "the preset then shows as Custom. It leaves the answer template, grounding, before-answer prompt "
+            "and speed limits alone. "
+            "Exhaustive search ignores it, because it checks every passage in scope."
+        ),
+        needs_reindex=False,
+        read=quality_presets.read_preset_name,
+        write=quality_presets.apply_preset,
+        check=OneOf(tuple((preset.name, preset.name) for preset in quality_presets.PRESETS)),
+    ),
     Setting(
         key="evidence_k",
         label="Passages gathered",
@@ -166,6 +184,27 @@ INSTANT_SETTINGS = (
                 ("Long", "about 400 words, but can be longer"),
             )
         ),
+    ),
+    Setting(
+        key="evidence_summary_length",
+        label="Passage summary length",
+        help=(
+            "How long the summary of each passage is. The answer is written from these summaries. "
+            "Set by the quality preset."
+        ),
+        needs_reindex=False,
+        read=lambda settings: settings.answer.evidence_summary_length,
+    ),
+    Setting(
+        key="agent_type",
+        label="Search steps",
+        help=(
+            "How PaperQA decides its searches. Planned by the model: the model chooses each search and when to "
+            "answer, which takes a few calls. Fixed steps: PaperQA runs a few suggested searches, gathers evidence "
+            "and answers, in that order, which takes two calls. Set by the quality preset."
+        ),
+        needs_reindex=False,
+        read=lambda settings: quality_presets.describe_agent_type(settings.agent.agent_type),
     ),
     Setting(
         key="answer_template",
@@ -408,12 +447,16 @@ def usable(key: str, value: object) -> bool:
 
 
 def apply_usable(settings: object, values: dict) -> list[str]:
-    """Put each usable value onto a PaperQA Settings object, skip the rest, and return the keys applied."""
+    """Put each usable value onto a PaperQA Settings object, skip the rest, and return the keys applied.
+
+    Values go on in the order of SETTINGS, not the order given, so a preset is always applied before the
+    settings it covers and a value chosen for one of those afterwards wins.
+    """
     applied = []
-    for key, value in values.items():
-        if usable(key, value):
-            get_setting(key).write(settings, value)
-            applied.append(key)
+    for setting in SETTINGS:
+        if setting.key in values and usable(setting.key, values[setting.key]):
+            setting.write(settings, values[setting.key])
+            applied.append(setting.key)
     return applied
 
 

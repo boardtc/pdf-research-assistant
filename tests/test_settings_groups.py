@@ -32,6 +32,9 @@ def _set_multimodal(settings):
 # One change per setting, made the way PaperQA stores it.
 CHANGES = {
     "answer_model": lambda s: setattr(s, "llm", "some-other-model"),
+    "quality_preset": lambda s: settings_groups.get_setting("quality_preset").write(s, "Fast"),
+    "evidence_summary_length": lambda s: setattr(s.answer, "evidence_summary_length", "25 to 50 words"),
+    "agent_type": lambda s: setattr(s.agent, "agent_type", "fake"),
     "evidence_k": lambda s: setattr(s.answer, "evidence_k", 3),
     "answer_max_sources": lambda s: setattr(s.answer, "answer_max_sources", 2),
     "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
@@ -56,9 +59,12 @@ def test_every_setting_is_in_exactly_one_group():
 
     assert instant == [
         "answer_model",
+        "quality_preset",
         "evidence_k",
         "answer_max_sources",
         "answer_length",
+        "evidence_summary_length",
+        "agent_type",
         "answer_template",
         "grounding",
         "pre_prompt",
@@ -150,9 +156,12 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
     assert values["full_page"] is False
     assert settings_groups.read_values(settings, settings_groups.INSTANT_SETTINGS) == {
         "answer_model": settings.llm,
+        "quality_preset": "Balanced",
         "evidence_k": 10,
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
+        "evidence_summary_length": "about 100 words",
+        "agent_type": "Planned by the model",
         "answer_template": "Direct answer",
         "grounding": "Balanced",
         # PaperQA's own value: None means no before-answer prompt.
@@ -216,7 +225,7 @@ def test_record_answer_settings_keeps_the_index_and_every_instant_setting_as_tex
         {"key": setting.key, "label": setting.label, "value": settings_groups.describe_value(setting.read(settings)), "source": None}
         for setting in settings_groups.INSTANT_SETTINGS
     ]
-    assert record["values"][1]["value"] == "10"
+    assert {item["key"]: item["value"] for item in record["values"]}["evidence_k"] == "10"
     assert json.loads(json.dumps(record)) == record
 
 
@@ -239,6 +248,7 @@ def test_the_settings_that_can_be_saved_from_the_sidebar():
     saved = [setting.key for setting in settings_groups.SETTINGS if setting.write is not None]
 
     assert saved == [
+        "quality_preset",
         "evidence_k",
         "answer_max_sources",
         "answer_length",
@@ -496,6 +506,8 @@ def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
         ("answer_template", "Poem"),
         ("grounding", "Loose"),
         ("pre_prompt", "Summarise {answer}"),
+        ("quality_preset", "Custom"),
+        ("agent_type", "fake"),
     ],
 )
 def test_usable_rejects_unknown_settings_settings_the_sidebar_cannot_change_and_values_not_allowed(key, value):
@@ -532,15 +544,18 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
     sources = {item["key"]: item["source"] for item in record["values"]}
     assert sources == {
         "answer_model": None,
+        "quality_preset": None,
         "evidence_k": settings_groups.ONE_OFF_SOURCE,
         "answer_max_sources": None,
         "answer_length": None,
+        "evidence_summary_length": None,
+        "agent_type": None,
         "answer_template": None,
         "grounding": None,
         "pre_prompt": None,
         "rate_profile": None,
     }
-    assert record["values"][1]["value"] == "3"
+    assert {item["key"]: item["value"] for item in record["values"]}["evidence_k"] == "3"
     assert settings_groups.ONE_OFF_SOURCE == "This question only"
 
 
@@ -647,3 +662,62 @@ def test_index_settings_that_cost_money_say_so():
     assert "cost" in settings_groups.get_setting("embedding").help
     assert "cost" in settings_groups.get_setting("multimodal").help
     assert "cost" in settings_groups.get_setting("chunk_chars").help
+
+
+# Quality presets.
+
+
+def test_quality_preset_offers_each_preset_by_name_starting_at_paperqa_s_own_settings(tmp_path):
+    from pdf_research_assistant import quality_presets
+
+    setting = settings_groups.get_setting("quality_preset")
+
+    assert setting.check.values == tuple(preset.name for preset in quality_presets.PRESETS)
+    assert setting.read(_real_settings(tmp_path)) == quality_presets.DEFAULT_PRESET
+
+
+def test_writing_a_quality_preset_changes_the_paperqa_values_it_covers(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    settings_groups.get_setting("quality_preset").write(settings, "High quality")
+
+    assert settings.answer.evidence_k == 20
+    assert settings_groups.get_setting("quality_preset").read(settings) == "High quality"
+
+
+def test_apply_usable_puts_a_preset_on_first_so_a_number_changed_afterwards_wins(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    applied = settings_groups.apply_usable(settings, {"evidence_k": 7, "quality_preset": "Fast"})
+
+    assert applied == ["quality_preset", "evidence_k"]
+    assert settings.answer.evidence_k == 7
+    assert settings.answer.answer_max_sources == 3
+    assert settings.agent.agent_type == "fake"
+    assert settings_groups.get_setting("quality_preset").read(settings) == "Custom"
+
+
+def test_record_answer_settings_shows_the_preset_summary_length_and_search_steps(tmp_path):
+    settings = _real_settings(tmp_path)
+    settings_groups.get_setting("quality_preset").write(settings, "Fast")
+
+    values = {item["key"]: item["value"] for item in settings_groups.record_answer_settings(settings)["values"]}
+
+    assert values["quality_preset"] == "Fast"
+    assert values["evidence_summary_length"] == "25 to 50 words"
+    assert values["agent_type"] == "Fixed steps"
+
+
+def test_quality_preset_help_says_what_it_sets_what_it_leaves_alone_and_exhaustive_search_ignores_it():
+    help_text = settings_groups.get_setting("quality_preset").help
+
+    for words in ("passages", "sources", "answer length", "Custom", "template", "grounding", "speed limits"):
+        assert words in help_text
+    assert "Exhaustive search ignores it" in help_text
+
+
+def test_search_steps_help_explains_both_ways_of_searching():
+    help_text = settings_groups.get_setting("agent_type").help
+
+    assert "Planned by the model" in help_text
+    assert "Fixed steps" in help_text

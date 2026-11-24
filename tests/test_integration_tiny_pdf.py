@@ -177,3 +177,35 @@ def test_pictures_are_drawn_at_the_apps_sharpness_when_paperqa_reads_a_pdf(tiny_
     assert dpi == 150
     for picture in pictures:
         assert picture["bitmap_width"] == pytest.approx(picture["page_width"] * dpi / 72, abs=1)
+
+
+def test_fast_preset_answers_from_the_pdf_with_fixed_search_steps(tiny_index, monkeypatch):
+    """The Fast preset's fixed steps run through PaperQA's real agent, with every model call canned."""
+    from aviary.core import ToolCall, ToolRequestMessage
+    from lmi import LiteLLMModel
+    from paperqa import Docs
+    from paperqa.agents.main import run_agent
+
+    from pdf_research_assistant import quality_presets
+
+    async def finish(self, *, messages, tools, tool_choice, **_kwargs):
+        """The last fixed step asks the model to call PaperQA's complete tool; answer it directly."""
+        return ToolRequestMessage(tool_calls=[ToolCall.from_tool(tool_choice, has_successful_answer=True)])
+
+    monkeypatch.setattr(LiteLLMModel, "select_tool", finish)
+    settings = tiny_index.settings.model_copy(deep=True)
+    # Ordinary question settings, not exhaustive search's.
+    settings.answer.evidence_retrieval = True
+    quality_presets.apply_preset(settings, "Fast")
+    reply = {"summary": QUOTE, "relevance_score": 9}
+    model_config = canned_model(reply).config
+    settings.llm = settings.summary_llm = settings.agent.agent_llm = "gpt-4o-mini"
+    settings.llm_config = settings.summary_llm_config = settings.agent.agent_llm_config = model_config
+    docs = Docs()
+
+    response = asyncio.run(run_agent(docs, QUESTION, settings, agent_type=settings.agent.agent_type))
+
+    assert settings.agent.agent_type == quality_presets.FIXED_STEPS
+    assert response.status.value == "success"
+    assert response.session.answer == json.dumps(reply)
+    assert [text.doc.docname for text in docs.texts]

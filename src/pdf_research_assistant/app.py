@@ -20,6 +20,7 @@ from pdf_research_assistant import (
     index_record,
     local_llm,
     prompt_hooks,
+    quality_presets,
     rate_profiles,
     rebuild_client,
     saved_settings,
@@ -101,6 +102,13 @@ SOURCE_SETTING_KEYS = ["evidence_k", "answer_max_sources"]
 SOURCE_SETTINGS_NOTE = "Exhaustive search ignores these two numbers, because it checks every passage in scope."
 SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTINGS if setting.write is not None]
 SETTINGS_RESET_LABEL = "Go back to the default settings"
+NO_PRESET_NOTE = (
+    "Your own mix of settings, not one of the presets. Pick a preset to use its settings instead of the "
+    "numbers and answer length below."
+)
+CHANGED_PRESET_NOTE = (
+    "{name}, with the numbers or answer length below changed by you. Pick a preset to go back to its settings."
+)
 NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
 NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
 NO_MODE_NOTE = "The system prompt and relevance cutoff in use match no grounding mode. Pick one to use it."
@@ -737,12 +745,44 @@ def draw_whole_number(setting: settings_groups.Setting, current: int, high: int,
     )
 
 
+def save_preset_value(key: str, value: object) -> None:
+    """Save a value the quality preset covers, then draw the page again.
+
+    The preset control above was drawn from the settings before this change, so it would show the old
+    preset name until the next click.
+    """
+    saved_settings.save_value(key, value)
+    st.rerun()
+
+
 def pick_whole_number(setting: settings_groups.Setting, current: int, high: int) -> int:
     """Draw a number box for a setting, and save the chosen number when it differs from the one in use."""
     chosen = draw_whole_number(setting, current, high, setting_widget_key(setting.key))
     if chosen != current:
-        saved_settings.save_value(setting.key, chosen)
+        save_preset_value(setting.key, chosen)
     return chosen
+
+
+def render_quality_preset(settings) -> None:
+    """Let the user pick a quality preset, and say what it does or that the settings are their own mix.
+
+    Picking one saves it and forgets any saved number or answer length it covers, so the preset's own
+    values are used. Those controls were drawn from the old values, so they get new keys and the page is
+    drawn again.
+    """
+    setting = settings_groups.get_setting("quality_preset")
+    current = setting.read(settings)
+    chosen = draw_named_choice(setting, current, setting_widget_key(setting.key))
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+        saved_settings.forget(quality_presets.KEYS_WITH_CONTROLS)
+        st.session_state.answer_settings_round = st.session_state.get("answer_settings_round", 0) + 1
+        st.rerun()
+    if chosen != quality_presets.NO_PRESET:
+        st.caption(quality_presets.get_preset(chosen).description)
+        return
+    started_from = saved_settings.load().get(setting.key)
+    st.caption(CHANGED_PRESET_NOTE.format(name=started_from) if started_from else NO_PRESET_NOTE)
 
 
 def render_source_settings(settings) -> None:
@@ -789,7 +829,7 @@ def render_answer_length(settings) -> None:
     current = setting.read(settings)
     chosen = draw_answer_length(setting, current, setting_widget_key(setting.key))
     if chosen != current:
-        saved_settings.save_value(setting.key, chosen)
+        save_preset_value(setting.key, chosen)
 
 
 def draw_named_choice(setting: settings_groups.Setting, current: str, key: str) -> str:
@@ -965,6 +1005,7 @@ def render_instant_settings(settings) -> tuple[str, dict]:
             index=0,
             help="Exhaustive checks every paper in scope. It takes minutes, costs more, and asks you to confirm first.",
         )
+        render_quality_preset(settings)
         render_source_settings(settings)
         render_answer_length(settings)
         render_answer_template(settings)

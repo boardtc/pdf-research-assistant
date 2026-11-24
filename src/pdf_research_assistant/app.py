@@ -156,6 +156,33 @@ RESEARCH_PRESET_MODEL_HELP = (
 )
 RESEARCH_PRESET_SAVE_LABEL = "Save preset"
 RESEARCH_PRESET_FAILED_NOTE = "The preset could not be saved:"
+RESEARCH_PRESET_FILES_PANEL = "Import or export research presets"
+RESEARCH_PRESET_FILES_NOTE = (
+    "Export presets to a file to back them up or use them on another computer, and import that file to "
+    "add them here. The file holds only the setting choices: no API keys and no folder paths."
+)
+RESEARCH_PRESET_EXPORT_TITLE = "**Export**"
+RESEARCH_PRESET_EXPORT_PICK_LABEL = "Presets to export"
+RESEARCH_PRESET_EXPORT_MODEL_LABEL = "Include local model addresses"
+RESEARCH_PRESET_EXPORT_MODEL_HELP = (
+    "Some of these presets switch answers to a local model. Its server address, such as "
+    "http://localhost:11434, usually only works on this computer. Leave this off and those presets keep "
+    "whatever answer model is in use where they are imported."
+)
+RESEARCH_PRESET_EXPORT_LABEL = "Export presets"
+RESEARCH_PRESET_EXPORT_FILE_NAME = "research-presets.json"
+RESEARCH_PRESET_EXPORT_NONE_NOTE = "Pick at least one preset to export."
+RESEARCH_PRESET_IMPORT_TITLE = "**Import**"
+RESEARCH_PRESET_IMPORT_FILE_LABEL = "Presets file"
+RESEARCH_PRESET_IMPORT_FILE_HELP = "A file made with Export presets. Nothing is saved until you click Import presets."
+RESEARCH_PRESET_IMPORT_REFUSED_NOTE = "This file cannot be imported, so nothing was saved:"
+RESEARCH_PRESET_IMPORT_REPLACE_LABEL = "Replace saved presets with the same name"
+RESEARCH_PRESET_IMPORT_MODEL_NOTE = (
+    "Using {count} of these presets switches answers to a local model at the address it holds. Check that "
+    "address works on this computer."
+)
+RESEARCH_PRESET_IMPORT_LABEL = "Import presets"
+RESEARCH_PRESET_IMPORT_FAILED_NOTE = "The presets could not be saved:"
 NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
 NO_MODE_NOTE = "The system prompt and relevance cutoff in use match no grounding mode. Pick one to use it."
 PRE_PROMPT_OFF_NOTE = "Off. Type a prompt to have PaperQA prepare the answer with an extra call to the answer model."
@@ -1219,11 +1246,12 @@ def research_preset_widget_key(name: str) -> str:
     return f"research_preset_{name}_{st.session_state.get('research_preset_round', 0)}"
 
 
-def redraw_research_presets(selected: str | None, notice: str) -> None:
-    """Show a notice and draw the page again, with the preset list starting at the selected preset."""
+def redraw_research_presets(selected: str | None, notice: str | None = None) -> None:
+    """Show a notice if given and draw the page again, with the preset list starting at the selected preset."""
     st.session_state.research_preset_selected = selected
     st.session_state.research_preset_round = st.session_state.get("research_preset_round", 0) + 1
-    st.session_state.research_preset_notice = notice
+    if notice:
+        st.session_state.research_preset_notice = notice
     st.rerun()
 
 
@@ -1338,8 +1366,116 @@ def render_research_preset_form(saved: dict, model: dict | None) -> None:
         save_research_preset(typed, include_index, include_model, saved, model)
 
 
+def render_research_preset_export(presets: dict) -> None:
+    """Let the user download some or all saved presets as a presets file."""
+    st.markdown(RESEARCH_PRESET_EXPORT_TITLE)
+    names = st.multiselect(
+        RESEARCH_PRESET_EXPORT_PICK_LABEL,
+        list(presets),
+        default=list(presets),
+        key=research_preset_widget_key("export_pick"),
+    )
+    if not names:
+        st.caption(RESEARCH_PRESET_EXPORT_NONE_NOTE)
+        return
+    include_model_details = False
+    if research_presets.has_model_details(presets, names):
+        include_model_details = st.checkbox(
+            RESEARCH_PRESET_EXPORT_MODEL_LABEL,
+            value=False,
+            help=RESEARCH_PRESET_EXPORT_MODEL_HELP,
+            key="research_preset_export_model",
+        )
+    st.download_button(
+        RESEARCH_PRESET_EXPORT_LABEL,
+        research_presets.export_text(presets, names, include_model_details),
+        file_name=RESEARCH_PRESET_EXPORT_FILE_NAME,
+        mime="application/json",
+        # Downloading changes nothing here, so the page is not drawn again.
+        on_click="ignore",
+        key="research_preset_export",
+    )
+
+
+def describe_import(added: list[str], replaced: list[str], skipped: list[str]) -> str:
+    """Return a notice saying which presets an import added, replaced and skipped."""
+
+    def names(group: list[str]) -> str:
+        return ", ".join(f"“{escape_markdown(name)}”" for name in group)
+
+    parts = []
+    if added:
+        parts.append(f"Imported {names(added)}.")
+    if replaced:
+        parts.append(f"Replaced {names(replaced)}.")
+    if skipped:
+        parts.append(f"Skipped {names(skipped)}, because a saved preset has the same name.")
+    return " ".join(parts)
+
+
+def import_research_presets(imported: dict, replace: bool) -> None:
+    """Save the checked presets from a file, then draw the page again with the first one picked."""
+    try:
+        added, replaced, skipped = research_presets.import_presets(imported, replace)
+    except OSError as exc:
+        st.error(f"{RESEARCH_PRESET_IMPORT_FAILED_NOTE} {escape_markdown(str(exc))}")
+        return
+    st.session_state.research_preset_file_notice = describe_import(added, replaced, skipped)
+    picked = (added + replaced)[:1]
+    redraw_research_presets(picked[0] if picked else st.session_state.get("research_preset_selected"))
+
+
+def render_research_preset_import(presets: dict) -> None:
+    """Let the user pick a presets file, see what it holds, and import it once it has been checked."""
+    st.markdown(RESEARCH_PRESET_IMPORT_TITLE)
+    uploaded = st.file_uploader(
+        RESEARCH_PRESET_IMPORT_FILE_LABEL,
+        type=["json"],
+        help=RESEARCH_PRESET_IMPORT_FILE_HELP,
+        max_upload_size=1,
+        # A new key after each import clears the file picked.
+        key=research_preset_widget_key("import_file"),
+    )
+    if uploaded is None:
+        return
+    imported, problems = research_presets.check_import(uploaded.getvalue())
+    if problems:
+        st.error("\n".join([RESEARCH_PRESET_IMPORT_REFUSED_NOTE, ""] + [f"- {escape_markdown(p)}" for p in problems]))
+        return
+    shown = ", ".join(escape_markdown(name) for name in imported)
+    count = len(imported)
+    st.markdown(f"The file holds {count} preset{'' if count == 1 else 's'}: {shown}")
+    with_model = sum(1 for preset in imported.values() if preset.get(research_presets.MODEL) is not None)
+    if with_model:
+        st.caption(RESEARCH_PRESET_IMPORT_MODEL_NOTE.format(count=with_model))
+    replace = False
+    clashes = research_presets.find_clashes(presets, imported)
+    if clashes:
+        replace = st.checkbox(
+            RESEARCH_PRESET_IMPORT_REPLACE_LABEL,
+            value=False,
+            help="Saved presets with these names: " + ", ".join(escape_markdown(name) for name in clashes)
+            + ". Leave this off to keep them and skip those in the file.",
+            key="research_preset_import_replace",
+        )
+    if st.button(RESEARCH_PRESET_IMPORT_LABEL, key="research_preset_import"):
+        import_research_presets(imported, replace)
+
+
+def render_research_preset_files(presets: dict) -> None:
+    """Let the user export saved presets to a file and import presets from one."""
+    with st.expander(RESEARCH_PRESET_FILES_PANEL):
+        notice = st.session_state.pop("research_preset_file_notice", None)
+        if notice:
+            st.success(notice)
+        st.caption(RESEARCH_PRESET_FILES_NOTE)
+        if presets:
+            render_research_preset_export(presets)
+        render_research_preset_import(presets)
+
+
 def render_research_presets(slot) -> None:
-    """Show which saved research preset is in use, and let the user save, use, rename and delete presets.
+    """Show which saved research preset is in use; let the user save, use, rename, delete, import and export presets.
 
     The presets are read against the saved choices, so a setting changed in the sidebar after using a
     preset shows that the preset is no longer in use. Some controls save without drawing the page again,
@@ -1360,6 +1496,7 @@ def render_research_presets(slot) -> None:
             if presets:
                 render_saved_research_preset(presets, active, saved, rebuild_client.get_run() is not None)
             render_research_preset_form(saved, model)
+        render_research_preset_files(presets)
 
 
 def render_sidebar(

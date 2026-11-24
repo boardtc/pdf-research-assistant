@@ -37,6 +37,7 @@ CHANGES = {
     "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
     "answer_template": lambda s: settings_groups.get_setting("answer_template").write(s, "Study notes"),
     "grounding": lambda s: settings_groups.get_setting("grounding").write(s, "Strictly grounded"),
+    "pre_prompt": lambda s: settings_groups.get_setting("pre_prompt").write(s, "List the terms in: {question}"),
     "rate_profile": lambda s: settings_groups.get_setting("rate_profile").write(s, "Low limits"),
     "paper_directory": lambda s: setattr(s.agent.index, "paper_directory", Path(s.agent.index.paper_directory) / "other"),
     "use_absolute_paper_directory": lambda s: setattr(s.agent.index, "use_absolute_paper_directory", True),
@@ -60,6 +61,7 @@ def test_every_setting_is_in_exactly_one_group():
         "answer_length",
         "answer_template",
         "grounding",
+        "pre_prompt",
         "rate_profile",
     ]
     assert reindex == [
@@ -153,6 +155,8 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
         "answer_length": "about 200 words, but can be longer",
         "answer_template": "Direct answer",
         "grounding": "Balanced",
+        # PaperQA's own value: None means no before-answer prompt.
+        "pre_prompt": None,
         # A bare PaperQA Settings object has none of the profiles' limits.
         "rate_profile": rate_profiles.NO_PROFILE,
     }
@@ -171,6 +175,7 @@ class _Colour(Enum):
         (_other_pdf_reader, "_other_pdf_reader"),
         (Path("papers") / "mine", str(Path("papers") / "mine")),
         (5000, "5000"),
+        (None, "Off"),
         ("text-embedding-3-small", "text-embedding-3-small"),
     ],
 )
@@ -239,6 +244,7 @@ def test_the_settings_that_can_be_saved_from_the_sidebar():
         "answer_length",
         "answer_template",
         "grounding",
+        "pre_prompt",
         "rate_profile",
         "embedding",
         "chunk_chars",
@@ -428,6 +434,50 @@ def test_grounding_help_says_what_it_changes_and_exhaustive_search_ignores_it():
     assert "Exhaustive search ignores" in help_text
 
 
+# Before-answer prompt.
+
+
+def test_pre_prompt_starts_off_and_writes_paperqa_s_pre_prompt(tmp_path):
+    settings = _real_settings(tmp_path)
+    setting = settings_groups.get_setting("pre_prompt")
+
+    assert setting.read(settings) is None
+    assert settings_groups.current_choice(setting, settings) == ""
+    setting.write(settings, "List the terms in: {question}")
+
+    assert settings.prompts.pre == "List the terms in: {question}"
+    assert setting.read(settings) == "List the terms in: {question}"
+
+
+def test_record_answer_settings_shows_the_pre_prompt_or_off(tmp_path):
+    settings = _real_settings(tmp_path)
+    setting = settings_groups.get_setting("pre_prompt")
+
+    def recorded():
+        record = settings_groups.record_answer_settings(settings)
+        return next(item["value"] for item in record["values"] if item["key"] == "pre_prompt")
+
+    assert recorded() == "Off"
+    setting.write(settings, "List the terms in: {question}")
+    assert recorded() == "List the terms in: {question}"
+
+
+def test_pre_prompt_help_says_it_costs_a_call_differs_from_the_template_and_follows_the_grounding():
+    help_text = settings_groups.get_setting("pre_prompt").help
+
+    assert "{question}" in help_text
+    assert "extra call" in help_text
+    assert "answer template" in help_text
+    assert "grounding" in help_text
+    assert "Exhaustive search ignores" in help_text
+
+
+def test_describe_line_keeps_a_long_prompt_on_one_line_and_its_backticks_readable():
+    line = settings_groups.describe_line("Before-answer prompt", "First line\n\nUse `code` here")
+
+    assert line == "**Before-answer prompt:** `` First line Use `code` here ``"
+
+
 # Checking and applying values chosen in the app, saved or for one question only.
 
 
@@ -445,6 +495,7 @@ def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
         ("answer_length", "one paragraph"),
         ("answer_template", "Poem"),
         ("grounding", "Loose"),
+        ("pre_prompt", "Summarise {answer}"),
     ],
 )
 def test_usable_rejects_unknown_settings_settings_the_sidebar_cannot_change_and_values_not_allowed(key, value):
@@ -486,6 +537,7 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
         "answer_length": None,
         "answer_template": None,
         "grounding": None,
+        "pre_prompt": None,
         "rate_profile": None,
     }
     assert record["values"][1]["value"] == "3"

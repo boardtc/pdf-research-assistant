@@ -19,6 +19,7 @@ from pdf_research_assistant import (
     index_names,
     index_record,
     local_llm,
+    prompt_hooks,
     rate_profiles,
     rebuild_client,
     saved_settings,
@@ -103,6 +104,12 @@ SETTINGS_RESET_LABEL = "Go back to the default settings"
 NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
 NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
 NO_MODE_NOTE = "The system prompt and relevance cutoff in use match no grounding mode. Pick one to use it."
+PRE_PROMPT_OFF_NOTE = "Off. Type a prompt to have PaperQA prepare the answer with an extra call to the answer model."
+PRE_PROMPT_ON_NOTE = (
+    "On: each question makes one more call to the answer model before the answer is written. "
+    "Empty the box to turn it off."
+)
+PRE_PROMPT_REFUSED_NOTE = "This before-answer prompt was not saved, so the one in use is unchanged."
 LOCAL_PROFILE_NOTE = (
     "Answers come from a local model, which has no account limits. Only the number of requests sent at once "
     "matters: a lower profile sends fewer, which a small local server may handle better."
@@ -822,6 +829,32 @@ def render_grounding(settings) -> None:
         st.caption(grounding_modes.get_mode(chosen).description)
 
 
+def render_pre_prompt(settings) -> None:
+    """Let the user type a before-answer prompt, saving changed text at once, and say whether one is on.
+
+    Text that cannot be used is not saved; the reason is shown and the prompt in use stays as it was.
+    """
+    setting = settings_groups.get_setting("pre_prompt")
+    current = settings_groups.current_choice(setting, settings)
+    typed = st.text_area(
+        setting.label,
+        value=current,
+        max_chars=prompt_hooks.PRE_PROMPT_CHECK.limit,
+        placeholder=prompt_hooks.PRE_PROMPT_EXAMPLE,
+        help=setting.help,
+        key=setting_widget_key(setting.key),
+    )
+    # Space around the text is dropped when it is saved, so it is no change.
+    if typed.strip() != current:
+        try:
+            saved_settings.save_value(setting.key, typed)
+            current = typed.strip()
+        except ValueError as exc:
+            st.error(f"{PRE_PROMPT_REFUSED_NOTE} {exc}")
+    st.caption(PRE_PROMPT_ON_NOTE if current else PRE_PROMPT_OFF_NOTE)
+    st.caption(prompt_hooks.POST_PROMPT_NOTE)
+
+
 def render_rate_profile(settings) -> None:
     """Let the user choose how fast PaperQA may send requests, saving a new choice at once.
 
@@ -936,6 +969,7 @@ def render_instant_settings(settings) -> tuple[str, dict]:
         render_answer_length(settings)
         render_answer_template(settings)
         render_grounding(settings)
+        render_pre_prompt(settings)
         render_rate_profile(settings)
         render_settings_reset()
         one_off = render_one_off_settings(settings)

@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from pdf_research_assistant import answer_templates, grounding_modes, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, prompt_hooks, rate_profiles
 
 
 @dataclass(frozen=True)
@@ -199,6 +199,25 @@ INSTANT_SETTINGS = (
         check=OneOf(tuple((mode.name, mode.name) for mode in grounding_modes.MODES)),
     ),
     Setting(
+        key="pre_prompt",
+        label="Before-answer prompt",
+        help=(
+            "Optional. Before writing the answer, PaperQA sends this prompt to the answer model, with "
+            "{question} replaced by your question, and adds the reply after the passages as extra background "
+            "for the answer. Use it to prepare the answer, for example by asking for the terms in the question "
+            "to be explained. It is an extra call to the answer model, so each question costs a little more and "
+            "takes a few seconds longer. It is sent with the same system prompt as the answer, so a strict "
+            "grounding mode applies to it too. Unlike the answer template, which changes how the answer itself "
+            "is written, it adds a request of its own. Leave it empty to turn it off. "
+            "Exhaustive search ignores it, because it writes no combined answer."
+        ),
+        needs_reindex=False,
+        read=lambda settings: settings.prompts.pre,
+        write=prompt_hooks.write_pre_prompt,
+        check=prompt_hooks.PRE_PROMPT_CHECK,
+        choice=prompt_hooks.read_pre_prompt,
+    ),
+    Setting(
         key="rate_profile",
         label="Speed limits",
         help=(
@@ -344,7 +363,9 @@ def current_choice(setting: Setting, settings: object) -> object:
 
 
 def describe_value(value: object) -> str:
-    """Return a setting's value as short text a person can read."""
+    """Return a setting's value as short text a person can read. None means the setting is off."""
+    if value is None:
+        return "Off"
     if isinstance(value, bool):
         return "On" if value else "Off"
     if isinstance(value, Enum):
@@ -355,7 +376,14 @@ def describe_value(value: object) -> str:
 
 
 def describe_line(label: str, value: str) -> str:
-    """Return one Markdown line with a label and a value."""
+    """Return one Markdown line with a label and a value.
+
+    A value over several lines, such as a prompt, is joined into one. A value with backticks in it is
+    fenced with two, so it still shows as code.
+    """
+    value = " ".join(value.split())
+    if "`" in value:
+        return f"**{label}:** `` {value} ``"
     return f"**{label}:** `{value}`"
 
 

@@ -427,6 +427,28 @@ def test_describe_estimate_explains_whole_page_pictures():
     )
 
 
+def test_a_before_answer_prompt_adds_one_answer_model_call():
+    usual = estimate.estimate_question(_paperqa_settings())
+    settings = _paperqa_settings()
+    settings.prompts.pre = "List the scientific terms in this question: {question}"
+
+    result = estimate.estimate_question(settings)
+
+    assert not usual.pre_prompt
+    assert result.pre_prompt
+    assert result.cost_usd > usual.cost_usd
+    # The extra call runs before the answer, so it adds its own time.
+    assert result.seconds == pytest.approx(usual.seconds + estimate.call_seconds(estimate.PRE_OUTPUT_TOKENS))
+    assert result.output_tokens == usual.output_tokens + estimate.PRE_OUTPUT_TOKENS
+
+
+def test_describe_estimate_explains_a_before_answer_prompt():
+    lines = estimate.describe_estimate(_estimate(pre_prompt=True))
+
+    assert lines[1] == estimate.PRE_PROMPT_NOTE
+    assert lines[2] == "Cost: less than 1 cent."
+
+
 def test_describe_estimate_says_one_passage():
     assert estimate.describe_estimate(_estimate(passages=1, sources=1))[0].startswith("PaperQA reads 1 passage with")
 

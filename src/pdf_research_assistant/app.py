@@ -23,6 +23,7 @@ from pdf_research_assistant import (
     quality_presets,
     rate_profiles,
     rebuild_client,
+    research_presets,
     saved_settings,
     settings_groups,
 )
@@ -110,6 +111,51 @@ CHANGED_PRESET_NOTE = (
     "{name}, with the numbers or answer length below changed by you. Pick a preset to go back to its settings."
 )
 NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
+RESEARCH_PRESETS_TITLE = "Research presets"
+RESEARCH_PRESETS_PANEL = "Save, use or change research presets"
+RESEARCH_PRESETS_NOTE = (
+    "A research preset keeps the settings below under a name, so you can switch between workflows: the "
+    "quality preset, sources, answer length, answer template, grounding and before-answer prompt, and if you "
+    "choose, the library and index settings and the answer model (OpenAI or a local model). Speed limits are "
+    "left out, because they follow your OpenAI account. Settings you have not changed are kept as PaperQA's "
+    "defaults, so using the preset puts them back to the defaults too."
+)
+NO_RESEARCH_PRESETS_NOTE = "**Research preset:** none saved yet."
+NO_ACTIVE_RESEARCH_PRESET_NOTE = "**Research preset:** none. The settings in use match no saved preset."
+RESEARCH_PRESET_PICK_LABEL = "Saved preset"
+RESEARCH_PRESET_USE_LABEL = "Use this preset"
+RESEARCH_PRESET_USE_HELP = "Puts every setting this preset holds in place of the one in use."
+RESEARCH_PRESET_IN_USE_NOTE = "This preset is in use."
+RESEARCH_PRESET_REBUILD_NOTE = (
+    "Using this preset changes the library and index settings, so the PDFs must be indexed again before "
+    "questions use them."
+)
+RESEARCH_PRESET_LOCKED_NOTE = (
+    "This preset changes the library and index settings, so it cannot be used while the index is being rebuilt."
+)
+RESEARCH_PRESET_RENAME_LABEL = "New name"
+RESEARCH_PRESET_RENAME_BUTTON = "Rename"
+RESEARCH_PRESET_DELETE_LABEL = "Delete this preset"
+RESEARCH_PRESET_DELETE_CONFIRM = "Delete for good"
+RESEARCH_PRESET_DELETE_CANCEL = "Keep it"
+RESEARCH_PRESET_SAVE_TITLE = "**Save the settings in use as a preset**"
+RESEARCH_PRESET_NAME_LABEL = "Preset name"
+RESEARCH_PRESET_NAME_HELP = (
+    f"Up to {research_presets.MAX_NAME_LENGTH} characters. Saving with the name of a saved preset replaces "
+    "that preset with the settings in use."
+)
+RESEARCH_PRESET_INDEX_LABEL = "Include the library and index settings"
+RESEARCH_PRESET_INDEX_HELP = (
+    "Using the preset then also puts back the chunk size, overlap, embedding model and images and tables "
+    "settings. If they differ from the ones in use, the PDFs must be indexed again."
+)
+RESEARCH_PRESET_MODEL_LABEL = "Include the answer model"
+RESEARCH_PRESET_MODEL_HELP = (
+    "Using the preset then also switches answers to the model in use now: OpenAI, or the local model set up "
+    "under Local LLM setup."
+)
+RESEARCH_PRESET_SAVE_LABEL = "Save preset"
+RESEARCH_PRESET_FAILED_NOTE = "The preset could not be saved:"
 NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
 NO_MODE_NOTE = "The system prompt and relevance cutoff in use match no grounding mode. Pick one to use it."
 PRE_PROMPT_OFF_NOTE = "Off. Type a prompt to have PaperQA prepare the answer with an extra call to the answer model."
@@ -1159,15 +1205,175 @@ def render_usage(app_state: dict) -> None:
             st.rerun()
 
 
+def describe_active_research_preset(presets: dict, active: list[str]) -> str:
+    """Return Markdown saying which saved research presets match the settings in use."""
+    if not presets:
+        return NO_RESEARCH_PRESETS_NOTE
+    if not active:
+        return NO_ACTIVE_RESEARCH_PRESET_NOTE
+    return "**Research preset:** " + ", ".join(escape_markdown(name) for name in active)
+
+
+def research_preset_widget_key(name: str) -> str:
+    """Return a preset control's key, which changes after each save, rename or delete so it starts afresh."""
+    return f"research_preset_{name}_{st.session_state.get('research_preset_round', 0)}"
+
+
+def redraw_research_presets(selected: str | None, notice: str) -> None:
+    """Show a notice and draw the page again, with the preset list starting at the selected preset."""
+    st.session_state.research_preset_selected = selected
+    st.session_state.research_preset_round = st.session_state.get("research_preset_round", 0) + 1
+    st.session_state.research_preset_notice = notice
+    st.rerun()
+
+
+def use_research_preset(name: str, preset: dict) -> None:
+    """Put the preset's settings in place of the ones in use, then draw the page again with them.
+
+    A preset that turns images and tables on is refused when the package for reading them is missing,
+    as the index settings form refuses it.
+    """
+    media = preset.get(research_presets.INDEX, {}).get("multimodal", settings_groups.MEDIA_OFF)
+    if media != settings_groups.MEDIA_OFF and not media_reading_available():
+        st.error(MEDIA_PACKAGE_NOTE)
+        return
+    research_presets.pick_preset(preset)
+    # The browser keeps the old values in controls it has already drawn, so draw new ones.
+    st.session_state.answer_settings_round = st.session_state.get("answer_settings_round", 0) + 1
+    st.session_state.index_settings_round = st.session_state.get("index_settings_round", 0) + 1
+    redraw_research_presets(name, f"Now using the preset “{escape_markdown(name)}”.")
+
+
+def rename_research_preset(old: str, new: str) -> None:
+    """Give a preset a new name, or say why it cannot have it."""
+    try:
+        renamed = research_presets.rename_preset(old, new)
+    except (ValueError, OSError) as exc:
+        st.error(escape_markdown(str(exc)))
+        return
+    if renamed != old:
+        redraw_research_presets(renamed, f"Renamed the preset to “{escape_markdown(renamed)}”.")
+
+
+def render_research_preset_delete(name: str) -> None:
+    """Offer to delete the preset, asking once more before it goes."""
+    if st.session_state.get("research_preset_to_delete") != name:
+        if st.button(RESEARCH_PRESET_DELETE_LABEL, key="research_preset_delete"):
+            st.session_state.research_preset_to_delete = name
+            st.rerun()
+        return
+    st.warning(f"Delete the preset “{escape_markdown(name)}”? This cannot be undone.")
+    if st.button(RESEARCH_PRESET_DELETE_CONFIRM, key="research_preset_delete_confirm"):
+        st.session_state.research_preset_to_delete = None
+        research_presets.delete_preset(name)
+        redraw_research_presets(None, f"Deleted the preset “{escape_markdown(name)}”.")
+    if st.button(RESEARCH_PRESET_DELETE_CANCEL, key="research_preset_delete_cancel"):
+        st.session_state.research_preset_to_delete = None
+        st.rerun()
+
+
+def render_saved_research_preset(presets: dict, active: list[str], saved: dict, rebuilding: bool) -> None:
+    """Let the user pick a saved preset, see what it holds, and use, rename or delete it."""
+    names = list(presets)
+    selected = st.session_state.get("research_preset_selected")
+    start = selected if selected in presets else (active[0] if active else names[0])
+    name = st.selectbox(
+        RESEARCH_PRESET_PICK_LABEL, names, index=names.index(start), key=research_preset_widget_key("pick")
+    )
+    preset = presets[name]
+    for line in research_presets.describe_preset(preset):
+        st.markdown(line)
+    changes_index = research_presets.changes_index(preset, saved)
+    if name in active:
+        st.caption(RESEARCH_PRESET_IN_USE_NOTE)
+    elif rebuilding and changes_index:
+        st.caption(RESEARCH_PRESET_LOCKED_NOTE)
+    else:
+        if changes_index:
+            st.caption(RESEARCH_PRESET_REBUILD_NOTE)
+        if st.button(RESEARCH_PRESET_USE_LABEL, key="research_preset_use", help=RESEARCH_PRESET_USE_HELP):
+            use_research_preset(name, preset)
+    new_name = st.text_input(
+        RESEARCH_PRESET_RENAME_LABEL,
+        value=name,
+        max_chars=research_presets.MAX_NAME_LENGTH,
+        key=research_preset_widget_key(f"new_name_{name}"),
+    )
+    if st.button(RESEARCH_PRESET_RENAME_BUTTON, key="research_preset_rename"):
+        rename_research_preset(name, new_name)
+    render_research_preset_delete(name)
+
+
+def save_research_preset(typed: str, include_index: bool, include_model: bool, saved: dict, model: dict | None) -> None:
+    """Save the settings in use as a preset under the typed name, or say why it cannot be saved."""
+    try:
+        preset = research_presets.make_preset(saved, model, include_index, include_model)
+        name, replaced = research_presets.save_preset(typed, preset)
+    except (ValueError, OSError) as exc:
+        st.error(f"{RESEARCH_PRESET_FAILED_NOTE} {escape_markdown(str(exc))}")
+        return
+    shown = escape_markdown(name)
+    notice = f"The preset “{shown}” now holds the settings in use." if replaced else f"Saved the preset “{shown}”."
+    redraw_research_presets(name, notice)
+
+
+def render_research_preset_form(saved: dict, model: dict | None) -> None:
+    """Let the user save the settings in use as a named preset, choosing which parts it includes."""
+    with st.form("research_preset_form"):
+        st.markdown(RESEARCH_PRESET_SAVE_TITLE)
+        typed = st.text_input(
+            RESEARCH_PRESET_NAME_LABEL,
+            max_chars=research_presets.MAX_NAME_LENGTH,
+            help=RESEARCH_PRESET_NAME_HELP,
+            key=research_preset_widget_key("name"),
+        )
+        include_index = st.checkbox(
+            RESEARCH_PRESET_INDEX_LABEL, value=True, help=RESEARCH_PRESET_INDEX_HELP, key="research_preset_index"
+        )
+        include_model = st.checkbox(
+            RESEARCH_PRESET_MODEL_LABEL, value=True, help=RESEARCH_PRESET_MODEL_HELP, key="research_preset_model"
+        )
+        submitted = st.form_submit_button(RESEARCH_PRESET_SAVE_LABEL)
+    if submitted:
+        save_research_preset(typed, include_index, include_model, saved, model)
+
+
+def render_research_presets(slot) -> None:
+    """Show which saved research preset is in use, and let the user save, use, rename and delete presets.
+
+    The presets are read against the saved choices, so a setting changed in the sidebar after using a
+    preset shows that the preset is no longer in use. Some controls save without drawing the page again,
+    so this is drawn after them, into a slot kept for it at the top of the sidebar.
+    """
+    presets = research_presets.load()
+    saved = saved_settings.load()
+    model = local_llm.load_config()
+    active = research_presets.find_active(presets, saved, model)
+    with slot:
+        st.subheader(RESEARCH_PRESETS_TITLE)
+        st.markdown(describe_active_research_preset(presets, active))
+        with st.expander(RESEARCH_PRESETS_PANEL):
+            notice = st.session_state.pop("research_preset_notice", None)
+            if notice:
+                st.success(notice)
+            st.caption(RESEARCH_PRESETS_NOTE)
+            if presets:
+                render_saved_research_preset(presets, active, saved, rebuild_client.get_run() is not None)
+            render_research_preset_form(saved, model)
+
+
 def render_sidebar(
     app_state: dict, settings, index_changes: dict | None = None, busy: bool = False
 ) -> tuple[str, dict]:
-    """Show the sidebar, with settings in two groups; return the search mode and any one-off changes."""
+    """Show the sidebar: research presets, then settings in two groups; return the search mode and one-off changes."""
     with st.sidebar:
         st.header("Settings")
+        presets_slot = st.container()
     search_mode, one_off = render_instant_settings(settings)
     render_reindex_settings(settings, index_changes, busy)
     render_usage(app_state)
+    # Last, so it reads the choices every control above has saved during this run.
+    render_research_presets(presets_slot)
     return search_mode, one_off
 
 

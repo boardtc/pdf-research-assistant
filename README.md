@@ -92,6 +92,14 @@ The Streamlit sidebar puts settings in two groups:
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
 
+Above them, **Research presets** keeps the settings you use for a recurring piece of work under a name, so you can switch between workflows without setting everything again. The line under the heading names the preset that matches the settings in use, or says none does. Open **Save, use or change research presets** to:
+
+- **Save** the settings in use: type a name and click **Save preset**. A preset always holds the answer settings (quality preset, passages, sources, answer length, answer template, grounding and before-answer prompt). Tick **Include the library and index settings** to keep the embedding model, chunk size and overlap, whole-page pictures and images and tables too, and **Include the answer model** to keep whether answers come from OpenAI or the local model set up under **Local LLM setup**. Saving with the name of a saved preset replaces it.
+- **Use** a saved preset: pick it under **Saved preset**, check the list of what it holds, and click **Use this preset**. Every setting it holds is put back. A setting you had not changed when you saved it goes back to PaperQA's default. The parts it does not include, and the speed limits, which follow your OpenAI account rather than the work, stay as they are.
+- **Rename** a preset with **New name** and **Rename**, or **Delete** it, which asks once more first.
+
+Presets are kept in `research_presets.json` in the project folder, which Git ignores. Each one holds your choices as they are saved in `saved_settings.json` and `local_llm.json`, so using a preset writes those files back, and the next question, the CLI and `pdf-research-rebuild` all follow it. A preset whose index settings differ from the ones in use means the PDFs have to be indexed again, so the panel says so before you use it, and the page then shows the changed-settings warning (below) until you rebuild or switch back. Such a preset cannot be used while a rebuild is running. Change any setting afterwards and the preset no longer shows as in use.
+
 Open **Library and index settings** in the rebuild group to change how your PDFs are indexed:
 
 | Setting | What it changes in PaperQA | Affects |

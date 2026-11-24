@@ -2,6 +2,7 @@
 manifest.csv
 local_llm.json
 saved_settings.json
+research_presets.json
 index/
 index_*/
 exhaustive_runs/

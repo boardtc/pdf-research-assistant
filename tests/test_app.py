@@ -147,8 +147,8 @@ def imported_pdf_research_assistant(
         # And the one that does the same for the library and index settings.
         if str(key or "").startswith("index_settings_"):
             return False
-        # The rebuild buttons are clicked by key, through clicked_keys.
-        if str(key or "").startswith("rebuild_"):
+        # The rebuild and research preset buttons are clicked by key, through clicked_keys.
+        if str(key or "").startswith(("rebuild_", "research_preset_")):
             return key in clicked_keys
         return queued_button_values.pop(0)
 
@@ -163,6 +163,7 @@ def imported_pdf_research_assistant(
     streamlit_module.form_submit_button = mock.Mock(return_value=False)
     streamlit_module.success = mock.Mock()
     streamlit_module.expander = mock.Mock(return_value=_ContextManagerStub())
+    streamlit_module.container = mock.Mock(return_value=_ContextManagerStub())
     streamlit_module.subheader = mock.Mock()
     streamlit_module.write = mock.Mock()
     streamlit_module.caption = mock.Mock()
@@ -216,7 +217,7 @@ def imported_pdf_research_assistant(
         # Mock subprocess.run before import so question-submission scenarios never hit the real helper process.
         # Point the saved sidebar choices at a file that does not exist, so a real saved file never leaks in.
         with mock.patch("subprocess.run", return_value=subprocess_result), mock.patch("time.sleep"), \
-                mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")), \
+                mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")),                 mock.patch("pdf_research_assistant.research_presets.PRESETS_PATH", Path("tests/.tmp/no-presets.json")), \
                 mock.patch.multiple(
                     "pdf_research_assistant.exhaustive_client", RUNS_DIR=Path("unused"), **(client_patches or {})
                 ), \
@@ -1103,9 +1104,10 @@ def test_import_renders_history_and_assistant_history_actions():
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
         # The active index details (index and PDF folders, no paper list here) and the sidebar's guide and
-        # fixed index settings are Markdown too; they are drawn before the chat.
+        # fixed index settings are Markdown too, as are the research preset line and the save form's title;
+        # they are drawn before the chat.
         fixed_index_settings = [s for s in module.settings_groups.REINDEX_SETTINGS if s.write is None]
-        lines_before_chat = 2 + 1 + len(fixed_index_settings)
+        lines_before_chat = 2 + 2 + 1 + len(fixed_index_settings)
         chat_markdown = module.st.markdown.call_args_list[lines_before_chat:]
         assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
@@ -1930,7 +1932,9 @@ def test_settings_notes_say_which_group_needs_a_rebuild(pdf_research_assistant_m
     assert "rebuild" in module.REBUILD_BADGE.lower()
 
 
-def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(pdf_research_assistant_module):
+def test_render_sidebar_draws_instant_then_reindex_settings_then_usage_then_research_presets_at_the_top(
+    pdf_research_assistant_module,
+):
     module = pdf_research_assistant_module
     module.st.header.reset_mock()
     settings = _fake_settings()
@@ -1940,6 +1944,7 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
 
     with mock.patch.multiple(
         module,
+        render_research_presets=steps.presets,
         render_instant_settings=steps.instant,
         render_reindex_settings=steps.reindex,
         render_usage=steps.usage,
@@ -1947,10 +1952,13 @@ def test_render_sidebar_draws_instant_settings_then_reindex_settings_then_usage(
         assert module.render_sidebar(app_state, settings, CHUNK_CHANGES, True) == ("Exhaustive", {"evidence_k": 3})
 
     module.st.header.assert_called_once_with("Settings")
+    # The presets go in a slot kept under the heading, but are drawn last, after every control has saved.
+    slot = module.st.container.return_value
     assert steps.mock_calls == [
         mock.call.instant(settings),
         mock.call.reindex(settings, CHUNK_CHANGES, True),
         mock.call.usage(app_state),
+        mock.call.presets(slot),
     ]
 
 
@@ -1960,12 +1968,14 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
         titles = [call.args[0] for call in st.subheader.call_args_list]
         panels = [call.args[0] for call in st.expander.call_args_list]
 
-        assert titles == [module.INSTANT_SETTINGS_TITLE, module.REINDEX_SETTINGS_TITLE]
+        # The research presets are drawn last, into a slot at the top of the sidebar.
+        assert titles == [module.INSTANT_SETTINGS_TITLE, module.REINDEX_SETTINGS_TITLE, module.RESEARCH_PRESETS_TITLE]
         assert panels == [
             "Active index details",
             module.ONE_OFF_TITLE,
             "Local LLM setup",
             "Library and index settings",
+            module.RESEARCH_PRESETS_PANEL,
             # Drawn under the chat, after the sidebar.
             module.ESTIMATE_DETAILS_TITLE,
         ]
@@ -3616,3 +3626,443 @@ def test_index_settings_cannot_be_saved_while_a_rebuild_runs(pdf_research_assist
     patched["save_value"].assert_not_called()
     module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
     assert _button_keys(module) == []
+
+
+# Named research presets in the sidebar.
+
+OLLAMA_MODEL = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3"}
+QUICK = {"answer": {"quality_preset": "Fast"}}
+DEEP = {"answer": {"quality_preset": "High quality"}, "index": {"chunk_chars": 3000}}
+
+
+def draw_research_presets(
+    module,
+    *,
+    presets=None,
+    saved=None,
+    model=None,
+    clicked=(),
+    submitted=False,
+    typed="",
+    checks=(True, True),
+    picked=None,
+    new_name=None,
+    rebuilding=False,
+    media_available=True,
+    save_result=("Typed", False),
+    rename_result=None,
+    rename_error=None,
+):
+    """Draw the research presets panel, with the user clicking buttons by key and typing into the boxes."""
+    st = module.st
+    for name in ("rerun", "success", "error", "caption", "markdown", "warning", "subheader"):
+        setattr(st, name, mock.Mock())
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    st.form_submit_button = mock.Mock(return_value=submitted)
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    ticks = iter(checks)
+    st.checkbox = mock.Mock(side_effect=lambda *_args, **_kwargs: next(ticks))
+
+    def type_into(label, value="", **_kwargs):
+        if label == module.RESEARCH_PRESET_NAME_LABEL:
+            return typed
+        return value if new_name is None else new_name
+
+    st.text_input = mock.Mock(side_effect=type_into)
+    rename = mock.Mock(return_value=rename_result, side_effect=rename_error)
+    with (
+        mock.patch.object(module.research_presets, "load", return_value=dict(presets or {})),
+        mock.patch.object(module.saved_settings, "load", return_value=dict(saved or {})),
+        mock.patch.object(module.local_llm, "load_config", return_value=model),
+        mock.patch.object(module.research_presets, "pick_preset") as pick,
+        mock.patch.object(module.research_presets, "save_preset", return_value=save_result) as save,
+        mock.patch.object(module.research_presets, "rename_preset", rename),
+        mock.patch.object(module.research_presets, "delete_preset") as delete,
+        mock.patch.object(module.rebuild_client, "get_run", return_value={"pid": 1} if rebuilding else None),
+        mock.patch.object(module, "media_reading_available", return_value=media_available),
+    ):
+        module.render_research_presets(module.st.sidebar)
+        return {"pick": pick, "save": save, "rename": rename, "delete": delete}
+
+
+def _markdown_lines(module):
+    return [call.args[0] for call in module.st.markdown.call_args_list]
+
+
+def test_research_presets_say_when_none_is_saved_and_offer_only_the_save_form(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module)
+
+    module.st.subheader.assert_called_once_with(module.RESEARCH_PRESETS_TITLE)
+    assert _markdown_lines(module) == [module.NO_RESEARCH_PRESETS_NOTE, module.RESEARCH_PRESET_SAVE_TITLE]
+    module.st.expander.assert_any_call(module.RESEARCH_PRESETS_PANEL)
+    module.st.caption.assert_called_once_with(module.RESEARCH_PRESETS_NOTE)
+    module.st.selectbox.assert_not_called()
+    module.st.form.assert_any_call("research_preset_form")
+    assert _button_keys(module) == []
+
+
+def test_the_preset_in_use_is_named_and_the_list_starts_at_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK}, saved={"quality_preset": "Fast"})
+
+    assert _markdown_lines(module)[0] == "**Research preset:** Quick"
+    call = module.st.selectbox.call_args
+    assert call.args == (module.RESEARCH_PRESET_PICK_LABEL, ["Deep", "Quick"])
+    assert call.kwargs["index"] == 1
+    assert call.kwargs["key"] == "research_preset_pick_0"
+    module.st.caption.assert_any_call(module.RESEARCH_PRESET_IN_USE_NOTE)
+    # It is already in use, so there is nothing to use.
+    assert _button_keys(module) == ["research_preset_rename", "research_preset_delete"]
+
+
+def test_every_matching_preset_is_named(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"A*": QUICK, "B": QUICK}, saved={"quality_preset": "Fast"})
+
+    assert _markdown_lines(module)[0] == r"**Research preset:** A\*, B"
+
+
+def test_settings_that_match_no_preset_say_so_and_the_list_starts_at_the_first(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK}, saved={"evidence_k": 3})
+
+    assert _markdown_lines(module)[0] == module.NO_ACTIVE_RESEARCH_PRESET_NOTE
+    assert module.st.selectbox.call_args.kwargs["index"] == 0
+    assert "research_preset_use" in _button_keys(module)
+
+
+def test_the_list_starts_at_the_preset_just_saved_renamed_or_used(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_selected = "Quick"
+    module.st.session_state.research_preset_round = 2
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK})
+
+    call = module.st.selectbox.call_args
+    assert call.kwargs["index"] == 1
+    assert call.kwargs["key"] == "research_preset_pick_2"
+
+
+def test_the_picked_preset_shows_what_it_holds(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP}, model=OLLAMA_MODEL)
+
+    assert _markdown_lines(module)[1:-1] == module.research_presets.describe_preset(DEEP)
+
+
+def test_using_a_preset_puts_its_settings_in_place_and_redraws_every_control(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module, presets={"Deep": DEEP, "Quick": QUICK}, picked="Quick", clicked={"research_preset_use"}
+    )
+
+    patched["pick"].assert_called_once_with(QUICK)
+    state = module.st.session_state
+    assert state.answer_settings_round == 1
+    assert state.index_settings_round == 1
+    assert state.research_preset_round == 1
+    assert state.research_preset_selected == "Quick"
+    assert state.research_preset_notice == "Now using the preset “Quick”."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_a_preset_that_changes_the_index_settings_says_the_pdfs_must_be_indexed_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP})
+
+    module.st.caption.assert_any_call(module.RESEARCH_PRESET_REBUILD_NOTE)
+    assert "research_preset_use" in _button_keys(module)
+
+
+def test_a_preset_whose_index_settings_are_in_use_says_nothing_about_indexing(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP}, saved={"chunk_chars": 3000})
+
+    assert mock.call(module.RESEARCH_PRESET_REBUILD_NOTE) not in module.st.caption.call_args_list
+
+
+def test_a_preset_that_changes_the_index_cannot_be_used_while_a_rebuild_runs(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(module, presets={"Deep": DEEP}, rebuilding=True, clicked={"research_preset_use"})
+
+    module.st.caption.assert_any_call(module.RESEARCH_PRESET_LOCKED_NOTE)
+    assert "research_preset_use" not in _button_keys(module)
+    patched["pick"].assert_not_called()
+
+
+def test_a_preset_that_leaves_the_index_alone_can_be_used_while_a_rebuild_runs(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(module, presets={"Quick": QUICK}, rebuilding=True, clicked={"research_preset_use"})
+
+    patched["pick"].assert_called_once_with(QUICK)
+
+
+def test_a_preset_with_images_and_tables_is_refused_without_the_package_to_read_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    media = {"answer": {}, "index": {"multimodal": "on_without_enrichment"}}
+
+    patched = draw_research_presets(
+        module, presets={"Media": media}, media_available=False, clicked={"research_preset_use"}
+    )
+
+    module.st.error.assert_called_once_with(module.MEDIA_PACKAGE_NOTE)
+    patched["pick"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_a_preset_with_images_and_tables_off_needs_no_package(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    plain = {"answer": {}, "index": {"multimodal": "off"}}
+
+    patched = draw_research_presets(
+        module, presets={"Plain": plain}, media_available=False, clicked={"research_preset_use"}
+    )
+
+    patched["pick"].assert_called_once_with(plain)
+
+
+def test_renaming_a_preset_saves_the_new_name_and_selects_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module, presets={"Quick": QUICK}, new_name="Fast look", rename_result="Fast look", clicked={"research_preset_rename"}
+    )
+
+    patched["rename"].assert_called_once_with("Quick", "Fast look")
+    text_call = next(
+        c for c in module.st.text_input.call_args_list if c.args[0] == module.RESEARCH_PRESET_RENAME_LABEL
+    )
+    assert text_call.kwargs["value"] == "Quick"
+    assert text_call.kwargs["key"] == "research_preset_new_name_Quick_0"
+    assert module.st.session_state.research_preset_selected == "Fast look"
+    assert module.st.session_state.research_preset_notice == "Renamed the preset to “Fast look”."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_renaming_a_preset_to_its_own_name_changes_nothing(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Quick": QUICK}, rename_result="Quick", clicked={"research_preset_rename"})
+
+    module.st.rerun.assert_not_called()
+    assert "research_preset_notice" not in module.st.session_state
+
+
+def test_a_refused_rename_says_why(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(
+        module,
+        presets={"Quick": QUICK},
+        new_name="Deep",
+        rename_error=ValueError("There is already a preset called “Deep_1”."),
+        clicked={"research_preset_rename"},
+    )
+
+    module.st.error.assert_called_once_with(r"There is already a preset called “Deep\_1”\.")
+    module.st.rerun.assert_not_called()
+
+
+def test_deleting_a_preset_asks_once_more_first(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(module, presets={"Quick": QUICK}, clicked={"research_preset_delete"})
+
+    assert module.st.session_state.research_preset_to_delete == "Quick"
+    patched["delete"].assert_not_called()
+    module.st.rerun.assert_called_once_with()
+
+
+def test_a_preset_waiting_to_be_deleted_offers_to_delete_or_keep_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_to_delete = "Quick"
+
+    patched = draw_research_presets(module, presets={"Quick": QUICK})
+
+    module.st.warning.assert_called_once_with("Delete the preset “Quick”? This cannot be undone.")
+    assert _button_keys(module)[-2:] == ["research_preset_delete_confirm", "research_preset_delete_cancel"]
+    patched["delete"].assert_not_called()
+
+
+def test_confirming_the_delete_removes_the_preset(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_to_delete = "Quick"
+
+    patched = draw_research_presets(module, presets={"Quick": QUICK}, clicked={"research_preset_delete_confirm"})
+
+    patched["delete"].assert_called_once_with("Quick")
+    state = module.st.session_state
+    assert state.research_preset_to_delete is None
+    assert state.research_preset_selected is None
+    assert state.research_preset_notice == "Deleted the preset “Quick”."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_keeping_the_preset_cancels_the_delete(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_to_delete = "Quick"
+
+    patched = draw_research_presets(module, presets={"Quick": QUICK}, clicked={"research_preset_delete_cancel"})
+
+    patched["delete"].assert_not_called()
+    assert module.st.session_state.research_preset_to_delete is None
+    module.st.rerun.assert_called_once_with()
+
+
+def test_a_delete_waiting_for_another_preset_is_not_shown(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_to_delete = "Deep"
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK}, picked="Quick")
+
+    module.st.warning.assert_not_called()
+    assert _button_keys(module)[-1] == "research_preset_delete"
+
+
+def test_the_save_form_offers_a_name_and_which_parts_to_include(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module)
+
+    name_call = module.st.text_input.call_args
+    assert name_call.args == (module.RESEARCH_PRESET_NAME_LABEL,)
+    assert name_call.kwargs["max_chars"] == 60
+    assert name_call.kwargs["key"] == "research_preset_name_0"
+    labels = [(c.args[0], c.kwargs["value"]) for c in module.st.checkbox.call_args_list]
+    assert labels == [(module.RESEARCH_PRESET_INDEX_LABEL, True), (module.RESEARCH_PRESET_MODEL_LABEL, True)]
+    module.st.form_submit_button.assert_called_once_with(module.RESEARCH_PRESET_SAVE_LABEL)
+
+
+def test_saving_a_preset_keeps_the_settings_in_use_under_the_typed_name(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    saved = {"quality_preset": "Fast", "chunk_chars": 3000, "rate_profile": "Low limits"}
+
+    patched = draw_research_presets(
+        module, saved=saved, model=OLLAMA_MODEL, submitted=True, typed="Quick", save_result=("Quick", False)
+    )
+
+    patched["save"].assert_called_once_with(
+        "Quick", {"answer": {"quality_preset": "Fast"}, "index": {"chunk_chars": 3000}, "model": OLLAMA_MODEL}
+    )
+    state = module.st.session_state
+    assert state.research_preset_selected == "Quick"
+    assert state.research_preset_round == 1
+    assert state.research_preset_notice == "Saved the preset “Quick”."
+    module.st.rerun.assert_called_once_with()
+
+
+def test_saving_a_preset_can_leave_out_the_index_and_model(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module, saved={"quality_preset": "Fast", "chunk_chars": 3000}, checks=(False, False), submitted=True, typed="Q"
+    )
+
+    patched["save"].assert_called_once_with("Q", {"answer": {"quality_preset": "Fast"}})
+
+
+def test_saving_under_a_saved_name_says_the_preset_was_replaced(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Quick": QUICK}, submitted=True, typed="quick", save_result=("quick", True))
+
+    assert module.st.session_state.research_preset_notice == "The preset “quick” now holds the settings in use."
+
+
+def test_a_preset_that_cannot_be_saved_says_why(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.research_presets, "save_preset", side_effect=ValueError("Type a name for the preset.")):
+        module.st.rerun = mock.Mock()
+        module.st.error = mock.Mock()
+        module.st.form_submit_button = mock.Mock(return_value=True)
+        module.save_research_preset("", True, True, {}, None)
+
+    module.st.error.assert_called_once_with(f"{module.RESEARCH_PRESET_FAILED_NOTE} Type a name for the preset\\.")
+    module.st.rerun.assert_not_called()
+
+
+def test_the_research_preset_notice_shows_once(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_notice = "Saved the preset “Quick”."
+
+    draw_research_presets(module, presets={"Quick": QUICK})
+
+    module.st.success.assert_called_once_with("Saved the preset “Quick”.")
+    assert "research_preset_notice" not in module.st.session_state
+
+
+def test_a_template_change_shows_in_the_research_preset_line_in_the_same_run(pdf_research_assistant_module, tmp_path):
+    """The template control saves without drawing the page again, so the presets must be read after it."""
+    module = pdf_research_assistant_module
+    st = module.st
+    presets_path = tmp_path / "research_presets.json"
+    presets_path.write_text(json.dumps({"Notes": {"answer": {"answer_template": "Study notes"}}}), encoding="utf-8")
+    st.markdown = mock.Mock()
+    st.selectbox = mock.Mock(
+        side_effect=lambda label, options, index=0, **_kwargs: "Study notes" if label == "Answer template" else options[index]
+    )
+    st.session_state.update(_empty_state())
+    with (
+        mock.patch.object(module.research_presets, "PRESETS_PATH", presets_path),
+        mock.patch.object(module.saved_settings, "SETTINGS_PATH", tmp_path / "saved_settings.json"),
+    ):
+        module.render_sidebar({}, _fake_settings())
+
+    assert module.saved_settings.load(tmp_path / "saved_settings.json") == {"answer_template": "Study notes"}
+    assert "**Research preset:** Notes" in [call.args[0] for call in st.markdown.call_args_list]
+
+
+def test_a_preset_saved_from_the_app_is_restored_when_it_is_used(pdf_research_assistant_module, tmp_path):
+    """Save the settings in use as a preset, change them, then use the preset: every setting comes back."""
+    module = pdf_research_assistant_module
+    settings_path = tmp_path / "saved_settings.json"
+    model_path = tmp_path / "local_llm.json"
+    st = module.st
+    st.rerun = mock.Mock()
+    with (
+        mock.patch.object(module.saved_settings, "SETTINGS_PATH", settings_path),
+        mock.patch.object(module.local_llm, "CONFIG_PATH", model_path),
+        mock.patch.object(module.research_presets, "PRESETS_PATH", tmp_path / "research_presets.json"),
+    ):
+        for key, value in {"quality_preset": "Fast", "grounding": "Strictly grounded", "overlap": 500}.items():
+            module.saved_settings.save_value(key, value)
+        module.local_llm.save_config(OLLAMA_MODEL)
+        module.save_research_preset("Quick", True, True, module.saved_settings.load(), module.local_llm.load_config())
+        kept = module.saved_settings.load()
+
+        module.saved_settings.replace_all({"evidence_k": 20, "chunk_chars": 3000})
+        module.local_llm.clear_config()
+        module.use_research_preset("Quick", module.research_presets.load()["Quick"])
+
+        assert module.saved_settings.load() == kept
+        assert module.local_llm.load_config() == OLLAMA_MODEL
+        assert module.research_presets.find_active(
+            module.research_presets.load(), module.saved_settings.load(), module.local_llm.load_config()
+        ) == ["Quick"]
+
+
+def test_the_research_preset_panel_keeps_its_own_values_apart_from_its_controls(pdf_research_assistant_module):
+    """Streamlit owns the value under a control's key, so a value the panel keeps must never share one."""
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_to_delete = "Quick"
+    module.st.session_state.research_preset_notice = "Saved."
+
+    draw_research_presets(module, presets={"Quick": QUICK, "Deep": DEEP}, clicked={"research_preset_delete_confirm"})
+
+    controls = [module.st.button, module.st.selectbox, module.st.text_input, module.st.checkbox]
+    widget_keys = {call.kwargs.get("key") for control in controls for call in control.call_args_list}
+    kept = {key for key in module.st.session_state if key.startswith("research_preset_")}
+    assert {"research_preset_to_delete", "research_preset_selected", "research_preset_round"} <= kept
+    assert not kept & widget_keys

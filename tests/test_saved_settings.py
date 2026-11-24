@@ -201,3 +201,21 @@ def test_a_saved_index_setting_changes_the_index_paperqa_looks_for(real_bootstra
     assert after.parsing.should_parse_and_enrich_media == (True, False)
     assert after.get_index_name() != before.get_index_name()
     assert back.get_index_name() == before.get_index_name()
+
+
+def test_replace_all_saves_these_values_in_place_of_every_saved_one(tmp_path):
+    path = tmp_path / "saved_settings.json"
+    saved_settings.save_value("evidence_k", 3, path)
+    saved_settings.save_value("answer_max_sources", 2, path)
+
+    saved_settings.replace_all({"answer_max_sources": 4, "chunk_chars": 3000}, path)
+
+    assert saved_settings.load(path) == {"answer_max_sources": 4, "chunk_chars": 3000}
+
+
+def test_replace_all_skips_values_that_cannot_be_used(tmp_path):
+    path = tmp_path / "saved_settings.json"
+
+    saved_settings.replace_all({"evidence_k": 999, "answer_model": "gpt-4o", "unknown": 1, "overlap": 100}, path)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"overlap": 100}

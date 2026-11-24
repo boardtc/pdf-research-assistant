@@ -48,6 +48,11 @@ def save_value(key: str, value: object, path: Path | None = None) -> None:
     _write_file(values, settings_path)
 
 
+def replace_all(values: dict, path: Path | None = None) -> None:
+    """Save these values in place of every saved one, skipping any that cannot be used."""
+    _write_file({key: value for key, value in values.items() if settings_groups.usable(key, value)}, path or SETTINGS_PATH)
+
+
 def forget(keys: Iterable[str], path: Path | None = None) -> bool:
     """Remove the saved values for these settings, so PaperQA's defaults apply; return whether any were saved."""
     settings_path = path or SETTINGS_PATH

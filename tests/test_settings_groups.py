@@ -36,6 +36,7 @@ CHANGES = {
     "answer_max_sources": lambda s: setattr(s.answer, "answer_max_sources", 2),
     "answer_length": lambda s: setattr(s.answer, "answer_length", "about 50 words"),
     "answer_template": lambda s: settings_groups.get_setting("answer_template").write(s, "Study notes"),
+    "grounding": lambda s: settings_groups.get_setting("grounding").write(s, "Strictly grounded"),
     "rate_profile": lambda s: settings_groups.get_setting("rate_profile").write(s, "Low limits"),
     "paper_directory": lambda s: setattr(s.agent.index, "paper_directory", Path(s.agent.index.paper_directory) / "other"),
     "use_absolute_paper_directory": lambda s: setattr(s.agent.index, "use_absolute_paper_directory", True),
@@ -58,6 +59,7 @@ def test_every_setting_is_in_exactly_one_group():
         "answer_max_sources",
         "answer_length",
         "answer_template",
+        "grounding",
         "rate_profile",
     ]
     assert reindex == [
@@ -150,6 +152,7 @@ def test_read_values_returns_the_current_value_of_each_setting_in_a_group(tmp_pa
         "answer_max_sources": 5,
         "answer_length": "about 200 words, but can be longer",
         "answer_template": "Direct answer",
+        "grounding": "Balanced",
         # A bare PaperQA Settings object has none of the profiles' limits.
         "rate_profile": rate_profiles.NO_PROFILE,
     }
@@ -235,6 +238,7 @@ def test_the_settings_that_can_be_saved_from_the_sidebar():
         "answer_max_sources",
         "answer_length",
         "answer_template",
+        "grounding",
         "rate_profile",
         "embedding",
         "chunk_chars",
@@ -376,6 +380,54 @@ def test_answer_template_help_says_it_shapes_the_answer_and_exhaustive_search_ig
     assert "Exhaustive search ignores" in help_text
 
 
+# Grounding modes.
+
+
+def test_grounding_offers_each_mode_by_name_starting_at_paperqa_s_own_settings(tmp_path):
+    setting = settings_groups.get_setting("grounding")
+
+    assert setting.check.values == ("Strictly grounded", "Balanced", "Exploratory")
+    assert setting.read(_real_settings(tmp_path)) == "Balanced"
+
+
+def test_writing_a_grounding_mode_changes_paperqa_s_system_prompt_and_cutoff_but_not_the_template(tmp_path):
+    from pdf_research_assistant import grounding_modes
+
+    settings = _real_settings(tmp_path)
+    settings_groups.get_setting("answer_template").write(settings, "Study notes")
+
+    settings_groups.get_setting("grounding").write(settings, "Strictly grounded")
+
+    mode = grounding_modes.get_mode("Strictly grounded")
+    assert settings.prompts.system == grounding_modes.mode_system_prompt(mode)
+    assert settings.answer.evidence_relevance_score_cutoff == mode.relevance_cutoff
+    assert settings_groups.get_setting("grounding").read(settings) == "Strictly grounded"
+    assert settings_groups.get_setting("answer_template").read(settings) == "Study notes"
+
+
+def test_record_answer_settings_shows_the_grounding_mode_by_name(tmp_path):
+    settings = _real_settings(tmp_path)
+    settings_groups.get_setting("grounding").write(settings, "Exploratory")
+
+    record = settings_groups.record_answer_settings(settings, one_off=["grounding"])
+
+    item = next(item for item in record["values"] if item["key"] == "grounding")
+    assert item == {
+        "key": "grounding",
+        "label": "Grounding",
+        "value": "Exploratory",
+        "source": settings_groups.ONE_OFF_SOURCE,
+    }
+
+
+def test_grounding_help_says_what_it_changes_and_exhaustive_search_ignores_it():
+    help_text = settings_groups.get_setting("grounding").help
+
+    assert "own knowledge" in help_text
+    assert "relevance score" in help_text
+    assert "Exhaustive search ignores" in help_text
+
+
 # Checking and applying values chosen in the app, saved or for one question only.
 
 
@@ -392,6 +444,7 @@ def test_usable_accepts_an_allowed_value_for_a_setting_the_sidebar_can_change():
         ("evidence_k", 0),
         ("answer_length", "one paragraph"),
         ("answer_template", "Poem"),
+        ("grounding", "Loose"),
     ],
 )
 def test_usable_rejects_unknown_settings_settings_the_sidebar_cannot_change_and_values_not_allowed(key, value):
@@ -432,6 +485,7 @@ def test_record_answer_settings_marks_values_changed_for_this_question_only(tmp_
         "answer_max_sources": None,
         "answer_length": None,
         "answer_template": None,
+        "grounding": None,
         "rate_profile": None,
     }
     assert record["values"][1]["value"] == "3"

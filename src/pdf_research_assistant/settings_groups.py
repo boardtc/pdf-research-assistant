@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from pdf_research_assistant import answer_templates, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, rate_profiles
 
 
 @dataclass(frozen=True)
@@ -180,6 +180,23 @@ INSTANT_SETTINGS = (
         read=answer_templates.read_template_name,
         write=answer_templates.apply_template,
         check=OneOf(tuple((template.name, template.name) for template in answer_templates.TEMPLATES)),
+    ),
+    Setting(
+        key="grounding",
+        label="Grounding",
+        help=(
+            "How closely the answer must keep to the passages found in your PDFs. Strictly grounded tells "
+            "the model to use only what the passages say, and leaves out passages whose relevance score is "
+            f"below {grounding_modes.STRICT_CUTOFF} out of 10, so it declines more often. Exploratory lets it "
+            "add background from its own knowledge, marked as such and not cited. It changes PaperQA's system "
+            "prompt and relevance cutoff, not the answer template, so the two can be combined, and the cost "
+            "hardly changes. "
+            "Exhaustive search ignores it, because it writes no combined answer."
+        ),
+        needs_reindex=False,
+        read=grounding_modes.read_mode_name,
+        write=grounding_modes.apply_mode,
+        check=OneOf(tuple((mode.name, mode.name) for mode in grounding_modes.MODES)),
     ),
     Setting(
         key="rate_profile",

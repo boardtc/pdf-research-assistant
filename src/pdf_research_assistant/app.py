@@ -15,6 +15,7 @@ from pdf_research_assistant import (
     bootstrap,
     estimate,
     exhaustive_client,
+    grounding_modes,
     index_names,
     index_record,
     local_llm,
@@ -101,6 +102,7 @@ SAVED_SETTING_KEYS = [setting.key for setting in settings_groups.INSTANT_SETTING
 SETTINGS_RESET_LABEL = "Go back to the default settings"
 NO_PROFILE_NOTE = "The speed limits in use match none of the profiles. Pick one to use its limits."
 NO_TEMPLATE_NOTE = "The answer prompt in use matches none of the templates. Pick one to use it."
+NO_MODE_NOTE = "The system prompt and relevance cutoff in use match no grounding mode. Pick one to use it."
 LOCAL_PROFILE_NOTE = (
     "Answers come from a local model, which has no account limits. Only the number of requests sent at once "
     "matters: a lower profile sends fewer, which a small local server may handle better."
@@ -783,10 +785,10 @@ def render_answer_length(settings) -> None:
         saved_settings.save_value(setting.key, chosen)
 
 
-def draw_answer_template(setting: settings_groups.Setting, current: str, key: str) -> str:
-    """Draw the answer template choices, starting at the template in use.
+def draw_named_choice(setting: settings_groups.Setting, current: str, key: str) -> str:
+    """Draw a setting's named choices, such as the answer templates, starting at the one in use.
 
-    An answer prompt that matches no template is offered as it is, so drawing the control never changes it.
+    A value in use that matches no choice is offered as it is, so drawing the control never changes it.
     """
     options = list(setting.check.values)
     if current not in options:
@@ -798,13 +800,26 @@ def render_answer_template(settings) -> None:
     """Let the user choose how the answer is laid out, saving a new choice at once, and say what it does."""
     setting = settings_groups.get_setting("answer_template")
     current = setting.read(settings)
-    chosen = draw_answer_template(setting, current, setting_widget_key(setting.key))
+    chosen = draw_named_choice(setting, current, setting_widget_key(setting.key))
     if chosen != current:
         saved_settings.save_value(setting.key, chosen)
     if chosen == answer_templates.NO_TEMPLATE:
         st.caption(NO_TEMPLATE_NOTE)
     else:
         st.caption(answer_templates.get_template(chosen).description)
+
+
+def render_grounding(settings) -> None:
+    """Let the user choose how closely answers keep to the passages, saving a new choice at once."""
+    setting = settings_groups.get_setting("grounding")
+    current = setting.read(settings)
+    chosen = draw_named_choice(setting, current, setting_widget_key(setting.key))
+    if chosen != current:
+        saved_settings.save_value(setting.key, chosen)
+    if chosen == grounding_modes.NO_MODE:
+        st.caption(NO_MODE_NOTE)
+    else:
+        st.caption(grounding_modes.get_mode(chosen).description)
 
 
 def render_rate_profile(settings) -> None:
@@ -867,9 +882,10 @@ def render_one_off_settings(settings) -> dict:
         gathered_setting, sources_setting = (settings_groups.get_setting(key) for key in SOURCE_SETTING_KEYS)
         length_setting = settings_groups.get_setting("answer_length")
         template_setting = settings_groups.get_setting("answer_template")
+        grounding_setting = settings_groups.get_setting("grounding")
         usual = {
             setting.key: setting.read(settings)
-            for setting in (gathered_setting, sources_setting, length_setting, template_setting)
+            for setting in (gathered_setting, sources_setting, length_setting, template_setting, grounding_setting)
         }
         gathered = draw_whole_number(
             gathered_setting,
@@ -887,16 +903,20 @@ def render_one_off_settings(settings) -> dict:
         length = draw_answer_length(
             length_setting, usual["answer_length"], one_off_widget_key("answer_length", usual["answer_length"])
         )
-        template = draw_answer_template(
+        template = draw_named_choice(
             template_setting,
             usual["answer_template"],
             one_off_widget_key("answer_template", usual["answer_template"]),
+        )
+        grounding = draw_named_choice(
+            grounding_setting, usual["grounding"], one_off_widget_key("grounding", usual["grounding"])
         )
     chosen = {
         "evidence_k": gathered,
         "answer_max_sources": sources,
         "answer_length": length,
         "answer_template": template,
+        "grounding": grounding,
     }
     return {key: value for key, value in chosen.items() if value != usual[key]}
 
@@ -915,6 +935,7 @@ def render_instant_settings(settings) -> tuple[str, dict]:
         render_source_settings(settings)
         render_answer_length(settings)
         render_answer_template(settings)
+        render_grounding(settings)
         render_rate_profile(settings)
         render_settings_reset()
         one_off = render_one_off_settings(settings)

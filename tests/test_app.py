@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from pdf_research_assistant import answer_templates, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, rate_profiles
 
 
 class _ContextManagerStub:
@@ -53,6 +53,7 @@ def _fake_settings(**changes):
         "answer_length": "about 200 words, but can be longer",
         "rate_profile": None,
         "answer_template": None,
+        "grounding": None,
     } | changes
     settings = SimpleNamespace(
         llm=values["llm"],
@@ -66,6 +67,7 @@ def _fake_settings(**changes):
             answer_length=values["answer_length"],
             evidence_summary_length="about 100 words",
             max_concurrent_requests=4,
+            evidence_relevance_score_cutoff=1,
         ),
         prompts=SimpleNamespace(
             summary_json_system="system",
@@ -90,6 +92,8 @@ def _fake_settings(**changes):
     )
     if values["rate_profile"]:
         rate_profiles.apply_profile(settings, values["rate_profile"])
+    if values["grounding"]:
+        grounding_modes.apply_mode(settings, values["grounding"])
     return settings
 
 
@@ -186,7 +190,9 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     # Like the real build_settings, which always applies a rate profile.
     bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(
-        rate_profile=rate_profiles.DEFAULT_PROFILE, answer_template=answer_templates.DEFAULT_TEMPLATE
+        rate_profile=rate_profiles.DEFAULT_PROFILE,
+        answer_template=answer_templates.DEFAULT_TEMPLATE,
+        grounding=grounding_modes.DEFAULT_MODE,
     ))
     bootstrap_module.MODEL_NAME = "gpt-4o-mini"
     bootstrap_module.MANIFEST_PATH = Path(r"D:\papers-list\manifest.csv")
@@ -1484,6 +1490,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         render_source_settings=steps.sources,
         render_answer_length=steps.length,
         render_answer_template=steps.template,
+        render_grounding=steps.grounding,
         render_rate_profile=steps.profile,
         render_settings_reset=steps.reset,
         render_one_off_settings=steps.one_off,
@@ -1496,6 +1503,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         mock.call.sources(settings),
         mock.call.length(settings),
         mock.call.template(settings),
+        mock.call.grounding(settings),
         mock.call.profile(settings),
         mock.call.reset(),
         mock.call.one_off(settings),
@@ -2413,6 +2421,7 @@ def test_the_defaults_button_is_hidden_until_a_sidebar_setting_is_saved(pdf_rese
         {"evidence_k": 3},
         {"answer_length": "50 to 100 words"},
         {"answer_template": "Study notes"},
+        {"grounding": "Strictly grounded"},
         {"rate_profile": "Low limits"},
     ],
 )
@@ -2423,7 +2432,7 @@ def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_rese
 
     module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
     patched["forget"].assert_called_once_with(
-        ["evidence_k", "answer_max_sources", "answer_length", "answer_template", "rate_profile"]
+        ["evidence_k", "answer_max_sources", "answer_length", "answer_template", "grounding", "rate_profile"]
     )
     # The browser keeps a control's old value, so the controls get new keys and start again from the defaults.
     assert module.st.session_state.answer_settings_round == 1
@@ -2444,6 +2453,8 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_rate_profile_1"
     draw_answer_template(module)
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_template_1"
+    draw_grounding(module)
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_grounding_1"
 
 
 def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
@@ -2593,6 +2604,63 @@ def test_page_draws_the_answer_template_from_the_settings_it_built():
         assert call.args[1][call.kwargs["index"]] == answer_templates.DEFAULT_TEMPLATE
 
 
+# Sidebar control for the grounding mode.
+
+MODE_NAMES = ["Strictly grounded", "Balanced", "Exploratory"]
+
+
+def draw_grounding(module, *, settings=None, picked=None):
+    """Draw the grounding control, with the user picking a mode or leaving it as it is."""
+    st = module.st
+    st.caption.reset_mock()
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with mock.patch.object(module.saved_settings, "save_value") as save_value:
+        module.render_grounding(settings or _fake_settings(grounding="Balanced"))
+        return save_value
+
+
+def test_grounding_offers_the_modes_starting_at_the_one_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_grounding(module, settings=_fake_settings(grounding="Exploratory"))
+
+    call = module.st.selectbox.call_args
+    assert call.args == ("Grounding", MODE_NAMES)
+    assert call.kwargs["index"] == 2
+    assert call.kwargs["help"] == module.settings_groups.get_setting("grounding").help
+    assert call.kwargs["key"] == "setting_grounding_0"
+    module.st.caption.assert_called_once_with(grounding_modes.get_mode("Exploratory").description)
+    save_value.assert_not_called()
+
+
+def test_picking_another_grounding_mode_saves_it_and_explains_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_grounding(module, settings=_fake_settings(grounding="Balanced"), picked="Strictly grounded")
+
+    save_value.assert_called_once_with("grounding", "Strictly grounded")
+    module.st.caption.assert_called_once_with(grounding_modes.get_mode("Strictly grounded").description)
+
+
+def test_settings_that_match_no_grounding_mode_are_kept_until_a_mode_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_grounding(module, settings=_fake_settings())
+
+    call = module.st.selectbox.call_args
+    assert call.args[1] == MODE_NAMES + [grounding_modes.NO_MODE]
+    assert call.kwargs["index"] == 3
+    module.st.caption.assert_called_once_with(module.NO_MODE_NOTE)
+    save_value.assert_not_called()
+
+
+def test_page_draws_the_grounding_mode_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Grounding")
+
+        assert call.args[1][call.kwargs["index"]] == grounding_modes.DEFAULT_MODE
+
+
 # Sidebar control for the rate-limit profile.
 
 
@@ -2684,7 +2752,9 @@ def draw_one_off_settings(module, *, settings=None, switched_on=True, typed=None
     picked = picked if isinstance(picked, dict) else ({"Answer length": picked} if picked else {})
     st.selectbox = mock.Mock(side_effect=lambda label, options, index=0, **_kwargs: picked.get(label, options[index]))
     with mock.patch.object(module.saved_settings, "save_value") as save_value:
-        chosen = module.render_one_off_settings(settings or _fake_settings(answer_template="Direct answer"))
+        chosen = module.render_one_off_settings(
+            settings or _fake_settings(answer_template="Direct answer", grounding="Balanced")
+        )
     # Nothing chosen here is ever saved as a usual setting.
     save_value.assert_not_called()
     return chosen
@@ -2715,7 +2785,8 @@ def test_switched_on_one_off_settings_start_at_the_usual_values_and_change_nothi
     module = pdf_research_assistant_module
 
     chosen = draw_one_off_settings(
-        module, settings=_fake_settings(evidence_k=12, answer_max_sources=4, answer_template="Study notes")
+        module,
+        settings=_fake_settings(evidence_k=12, answer_max_sources=4, answer_template="Study notes", grounding="Balanced"),
     )
 
     assert chosen == {}
@@ -2735,6 +2806,10 @@ def test_switched_on_one_off_settings_start_at_the_usual_values_and_change_nothi
     assert template.args == ("Answer template", TEMPLATE_NAMES)
     assert template.kwargs["index"] == 1
     assert template.kwargs["key"] == "one_off_answer_template_0_Study notes"
+    grounding = _control(module.st.selectbox, "Grounding")
+    assert grounding.args == ("Grounding", MODE_NAMES)
+    assert grounding.kwargs["index"] == 1
+    assert grounding.kwargs["key"] == "one_off_grounding_0_Balanced"
 
 
 def test_one_off_settings_return_only_the_values_that_differ_from_the_usual_ones(pdf_research_assistant_module):
@@ -2782,6 +2857,25 @@ def test_one_off_answer_template_offers_a_usual_prompt_that_matches_no_template(
     template = _control(module.st.selectbox, "Answer template")
     assert template.args[1] == TEMPLATE_NAMES + [answer_templates.NO_TEMPLATE]
     assert template.kwargs["index"] == 4
+    assert chosen == {}
+
+
+def test_one_off_grounding_can_be_picked_for_the_next_question_only(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, picked={"Grounding": "Strictly grounded", "Answer template": "Study notes"})
+
+    assert chosen == {"answer_template": "Study notes", "grounding": "Strictly grounded"}
+
+
+def test_one_off_grounding_offers_usual_settings_that_match_no_mode(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    chosen = draw_one_off_settings(module, settings=_fake_settings(answer_template="Direct answer"))
+
+    grounding = _control(module.st.selectbox, "Grounding")
+    assert grounding.args[1] == MODE_NAMES + [grounding_modes.NO_MODE]
+    assert grounding.kwargs["index"] == 3
     assert chosen == {}
 
 

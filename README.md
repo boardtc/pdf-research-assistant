@@ -87,7 +87,7 @@ Under the title, the page names the active index and the paper list in use. Pape
 
 The Streamlit sidebar puts settings in two groups:
 
-- **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, the answer template, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
+- **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, the answer template, the grounding mode, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
 - **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page pictures, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again.
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
@@ -138,6 +138,14 @@ A longer answer costs a little more and takes a little longer, because the model
 
 The same passages are found and read whichever template you pick, so the cost and time hardly change. The answer is never rewritten after PaperQA writes it.
 
+**Grounding** sets how closely the answer must keep to the passages PaperQA found. Each mode sets two PaperQA settings: the system prompt, `prompts.system`, which PaperQA sends with the request that writes the answer, and `answer.evidence_relevance_score_cutoff`, the lowest relevance score (out of 10) a passage needs to be sent to that request at all. A mode adds one instruction after PaperQA's own system prompt ("Answer in a direct and concise tone..."):
+
+- **Strictly grounded**: the answer may use only what the passages say, with no facts or explanations from the model's own knowledge and every claim cited. If the passages do not directly answer the question, it replies "I cannot answer." Passages scored below 5 out of 10 are left out. Expect "I cannot answer" more often.
+- **Balanced** (PaperQA default): PaperQA's own system prompt and its cutoff of 1. The answer is written from the passages and cites them.
+- **Exploratory**: the answer may add widely accepted background knowledge to explain terms or connect the findings. Each sentence the passages do not support ends with `(Extra background information)` and has no citation. When the passages cover only part of the question, it answers that part and says what the sources do not cover. Same cutoff as Balanced.
+
+Grounding leaves the answer prompt, `prompts.qa`, to the answer template, so any mode works with any template. The same passages are found and read in every mode, so the cost and time hardly change; Strictly grounded may send fewer of them to the answer.
+
 **Speed limits** sets how fast PaperQA may send requests to the model: the `rate_limit` (tokens a minute) and `request_limit` (requests a minute) in each model config, and `answer.max_concurrent_requests` (requests sent at once). Pick the profile that fits your OpenAI account's limits, which you can see at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits):
 
 | Profile | Tokens a minute | Requests a minute | At once (question) | At once (exhaustive) |
@@ -152,9 +160,9 @@ The same passages are found and read whichever template you pick, so the cost an
 
 A profile above your account's limits makes OpenAI turn requests away, and PaperQA waits and retries, which is slower. A profile below them makes long runs slower than they need to be. The profile does not change the cost of a question. With a local model there are no account limits, so only the number of requests sent at once matters.
 
-A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source, length and template settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
+A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source, length, template and grounding settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
 
-To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source, length and template controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
+To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source, length, template and grounding controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
 
 Just above the question box, `Next question:` gives a rough sense of what your next question will cost and how long it will take: `Fast`, `Balanced`, `Slower` or `Higher cost`, followed by a rough cost and time such as "less than 1 cent, under half a minute". It is worked out from the settings the question will run with, including any values changed for the next question only, and changes as soon as you change a setting:
 
@@ -178,7 +186,7 @@ Each assistant response also includes:
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
 - an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, its relevance score, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
 - a relevance score under each source passage, out of 10. This is PaperQA's `Context.score`: the rating the summary model gave the passage for your question while summarising it, not a search similarity. Scores tend to bunch at 0 or 8 to 9, so use them as a rough guide to which chunk to open. Answers given before scores were kept, and passages PaperQA did not score, show none.
-- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, the answer template, and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
+- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, the answer template, the grounding mode, and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 

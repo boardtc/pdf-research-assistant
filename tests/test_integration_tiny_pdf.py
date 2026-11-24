@@ -179,12 +179,13 @@ def test_pictures_are_drawn_at_the_apps_sharpness_when_paperqa_reads_a_pdf(tiny_
         assert picture["bitmap_width"] == pytest.approx(picture["page_width"] * dpi / 72, abs=1)
 
 
-def test_fast_preset_answers_from_the_pdf_with_fixed_search_steps(tiny_index, monkeypatch):
-    """The Fast preset's fixed steps run through PaperQA's real agent, with every model call canned."""
+FAST_REPLY = {"summary": QUOTE, "relevance_score": 9}
+
+
+def fast_question_settings(tiny_index, monkeypatch):
+    """Return ordinary question settings with the Fast preset, every model call canned to FAST_REPLY."""
     from aviary.core import ToolCall, ToolRequestMessage
     from lmi import LiteLLMModel
-    from paperqa import Docs
-    from paperqa.agents.main import run_agent
 
     from pdf_research_assistant import quality_presets
 
@@ -197,10 +198,21 @@ def test_fast_preset_answers_from_the_pdf_with_fixed_search_steps(tiny_index, mo
     # Ordinary question settings, not exhaustive search's.
     settings.answer.evidence_retrieval = True
     quality_presets.apply_preset(settings, "Fast")
-    reply = {"summary": QUOTE, "relevance_score": 9}
-    model_config = canned_model(reply).config
+    model_config = canned_model(FAST_REPLY).config
     settings.llm = settings.summary_llm = settings.agent.agent_llm = "gpt-4o-mini"
     settings.llm_config = settings.summary_llm_config = settings.agent.agent_llm_config = model_config
+    return settings
+
+
+def test_fast_preset_answers_from_the_pdf_with_fixed_search_steps(tiny_index, monkeypatch):
+    """The Fast preset's fixed steps run through PaperQA's real agent, with every model call canned."""
+    from paperqa import Docs
+    from paperqa.agents.main import run_agent
+
+    from pdf_research_assistant import quality_presets
+
+    settings = fast_question_settings(tiny_index, monkeypatch)
+    reply = FAST_REPLY
     docs = Docs()
 
     response = asyncio.run(run_agent(docs, QUESTION, settings, agent_type=settings.agent.agent_type))
@@ -209,3 +221,23 @@ def test_fast_preset_answers_from_the_pdf_with_fixed_search_steps(tiny_index, mo
     assert response.status.value == "success"
     assert response.session.answer == json.dumps(reply)
     assert [text.doc.docname for text in docs.texts]
+
+
+def test_an_answered_question_is_kept_beside_the_index_and_found_again(tiny_index, monkeypatch):
+    """The query process keeps a real PaperQA answer, which a search then finds with its passages."""
+    from pdf_research_assistant import bootstrap, query_once, saved_answers
+
+    settings = fast_question_settings(tiny_index, monkeypatch)
+    monkeypatch.setattr(query_once, "build_settings", lambda: settings)
+
+    payload = query_once.run_query_payload(QUESTION)
+    found = saved_answers.search(settings.agent.index.index_directory, "enthusiasm")
+
+    assert payload["ok"] is True
+    assert "save_error" not in payload
+    assert [answer["question"] for answer in found["answers"]] == [QUESTION]
+    assert found["answers"][0]["contexts"] == payload["contexts"]
+    assert found["answers"][0]["settings"] == payload["settings"]
+    assert saved_answers.answers_folder(settings.agent.index.index_directory).parent == tiny_index.index_dir.parent
+    # The kept answers sit beside the PDF index and are not counted as PDFs.
+    assert bootstrap.get_indexed_doc_count(tiny_index.index_dir.parent) == 1

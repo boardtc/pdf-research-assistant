@@ -15,7 +15,7 @@ from paperqa import Docs
 from paperqa.agents.main import run_agent
 from paperqa.utils import run_or_ensure
 
-from pdf_research_assistant import settings_groups
+from pdf_research_assistant import saved_answers, settings_groups
 from pdf_research_assistant.bootstrap import build_settings
 
 
@@ -72,7 +72,7 @@ USAGE_ERROR = "Expected a question, optionally followed by one-off settings as a
 
 
 def run_query_payload(question: str, one_off: dict | None = None) -> dict:
-    """Run one PaperQA query and return a serializable success or error payload.
+    """Run one PaperQA query, keep its answer for searching later, and return a serializable payload.
 
     one_off holds settings changed for this question only, by setting key. They go on top of the saved
     settings for this run and are never saved; any that cannot be used are skipped.
@@ -90,17 +90,26 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
                 agent_type=settings.agent.agent_type,
             )
         )
-        return {
+        contexts = serialize_contexts(
+            getattr(response.session, "contexts", []),
+            cited_ids=getattr(response.session, "used_contexts", ()),
+            passages=docs.texts,
+        )
+        recorded = settings_groups.record_answer_settings(settings, one_off=applied)
+        payload = {
             "ok": True,
             "answer": response.session.formatted_answer,
             "cost": response.session.cost,
-            "contexts": serialize_contexts(
-                getattr(response.session, "contexts", []),
-                cited_ids=getattr(response.session, "used_contexts", ()),
-                passages=docs.texts,
-            ),
-            "settings": settings_groups.record_answer_settings(settings, one_off=applied),
+            "contexts": contexts,
+            "settings": recorded,
         }
+        # Kept where PaperQA's own `pqa ask` keeps its answers, so it can be searched later.
+        save_error = saved_answers.save_answer(
+            settings.agent.index.index_directory, response, saved_answers.build_record(contexts, recorded)
+        )
+        if save_error:
+            payload["save_error"] = save_error
+        return payload
     except Exception as exc:
         return {
             "ok": False,

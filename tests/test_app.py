@@ -147,8 +147,8 @@ def imported_pdf_research_assistant(
         # And the one that does the same for the library and index settings.
         if str(key or "").startswith("index_settings_"):
             return False
-        # The rebuild and research preset buttons are clicked by key, through clicked_keys.
-        if str(key or "").startswith(("rebuild_", "research_preset_")):
+        # The rebuild, research preset and answer search buttons are clicked by key, through clicked_keys.
+        if str(key or "").startswith(("rebuild_", "research_preset_", "answer_search_")):
             return key in clicked_keys
         return queued_button_values.pop(0)
 
@@ -871,9 +871,9 @@ def test_run_query_subprocess_returns_answer_cost_contexts_and_settings_for_succ
 
     # Mock subprocess.run so the test can supply the exact helper output contract.
     with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
-        answer, cost, contexts, settings = pdf_research_assistant_module.run_query_subprocess("What is new?")
+        answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
-    assert (answer, cost, contexts, settings) == ("Answer", 0.25, [{"name": "Source"}], recorded)
+    assert (answer, cost, contexts, settings, save_error) == ("Answer", 0.25, [{"name": "Source"}], recorded, None)
     assert run_mock.call_args.args[0][0] == pdf_research_assistant_module.sys.executable
     assert run_mock.call_args.args[0][-1] == "What is new?"
 
@@ -891,9 +891,19 @@ def test_run_query_subprocess_returns_no_settings_when_the_payload_has_none(pdf_
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
     with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
-        answer, cost, contexts, settings = pdf_research_assistant_module.run_query_subprocess("What is new?")
+        answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
-    assert (contexts, settings) == ([], None)
+    assert (contexts, settings, save_error) == ([], None, None)
+
+
+def test_run_query_subprocess_passes_on_why_the_answer_could_not_be_kept(pdf_research_assistant_module):
+    payload = {"ok": True, "answer": "Answer", "cost": 0.0, "save_error": "OSError: disk full"}
+    result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+        returned = pdf_research_assistant_module.run_query_subprocess("What is new?")
+
+    assert returned[-1] == "OSError: disk full"
 
 
 def test_run_query_subprocess_raises_subprocess_error_message_when_process_fails_without_stdout(
@@ -1979,7 +1989,9 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
             "Library and index settings",
             module.RESEARCH_PRESETS_PANEL,
             module.RESEARCH_PRESET_FILES_PANEL,
-            # Drawn under the chat, after the sidebar.
+            # Drawn above the chat, after the sidebar.
+            module.ANSWER_SEARCH_TITLE,
+            # Drawn under the chat.
             module.ESTIMATE_DETAILS_TITLE,
         ]
         # Once for the page, and once more for the estimate, after the sidebar may have saved a change.
@@ -2141,7 +2153,7 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
         shown.reset_mock()
     contexts = [{"name": "Source", "context": "Quoted text"}]
     recorded = {"index": "pqa_index_x", "values": []}
-    returned = ("Answer text", 1.5, contexts, recorded)
+    returned = ("Answer text", 1.5, contexts, recorded, "OSError: disk full")
 
     with mock.patch.object(module, "run_query_subprocess", return_value=returned) as run_query, mock.patch.object(
         module, "render_answer_settings"
@@ -2168,10 +2180,10 @@ def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_
     failure = RuntimeError("query failed")
 
     with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
-        answer, cost, contexts, settings = module.answer_question("Q")
+        answer, cost, contexts, settings, save_error = module.answer_question("Q")
 
     assert answer == module.describe_query_failure(failure)
-    assert (cost, contexts, settings) == (0.0, [], None)
+    assert (cost, contexts, settings, save_error) == (0.0, [], None, None)
     st.error.assert_called_once_with(answer)
     st.caption.assert_called_once_with("Cost: $0.0000")
     st.code.assert_called_once_with("trace line\n")
@@ -2188,7 +2200,7 @@ def test_submit_question_records_the_question_answer_and_cost(pdf_research_assis
 
     recorded = {"index": "pqa_index_x", "values": []}
     with mock.patch.object(
-        module, "answer_question", return_value=("Answer text", 0.5, [], recorded)
+        module, "answer_question", return_value=("Answer text", 0.5, [], recorded, None)
     ) as answer_question:
         module.submit_question("What is new?", saved, {"evidence_k": 3})
 
@@ -4384,3 +4396,291 @@ def _research_preset_widget_keys(module):
         module.st.download_button,
     ]
     return {call.kwargs.get("key") for control in controls for call in control.call_args_list}
+
+
+FOUND_ANSWER = {
+    "id": "a1",
+    "question": "Why is the sky blue?",
+    "content": "Rayleigh scattering.",
+    "cost": 0.0123,
+    "asked_at": "2026-11-24T14:05:00+00:00",
+    "contexts": [{"name": "Source", "context": "Quoted text"}],
+    "settings": {"index": "pqa_index_x", "values": []},
+}
+
+
+@pytest.mark.parametrize("asked_at", [None, "", "not a time", 5])
+def test_describe_asked_at_gives_none_when_the_time_is_not_known(pdf_research_assistant_module, asked_at):
+    assert pdf_research_assistant_module.describe_asked_at(asked_at) is None
+
+
+def test_describe_asked_at_gives_the_day_and_time(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.describe_asked_at("2026-11-24T14:05:09+00:00") == "24 Nov 2026, 14:05"
+
+
+def test_describe_found_answer_says_when_on_which_index_and_at_what_cost(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    line = module.describe_found_answer(FOUND_ANSWER, {"pqa_index_x": "Thesis"})
+
+    assert line == "Asked 24 Nov 2026, 14:05 · Index: **Thesis** (`pqa_index_x`) · Cost: $0.0123"
+
+
+def test_describe_found_answer_gives_only_the_cost_when_nothing_else_is_known(pdf_research_assistant_module):
+    answer = FOUND_ANSWER | {"asked_at": None, "settings": None, "cost": None}
+
+    assert pdf_research_assistant_module.describe_found_answer(answer, {}) == "Cost: $0.0000"
+
+
+def test_describe_search_result_says_when_nothing_matches(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    note = module.describe_search_result({"text": "sky*", "answers": [], "searched": 1})
+
+    assert note == f"No previous answer matches **{module.escape_markdown('sky*')}**. Searched 1 kept answer."
+
+
+def test_describe_search_result_counts_one_match(pdf_research_assistant_module):
+    note = pdf_research_assistant_module.describe_search_result({"text": "sky", "answers": [FOUND_ANSWER], "searched": 3})
+
+    assert note == "1 previous answer matches **sky**. Searched 3 kept answers."
+
+
+def test_describe_search_result_counts_several_matches(pdf_research_assistant_module):
+    result = {"text": "sky", "answers": [FOUND_ANSWER] * 2, "searched": 3}
+
+    assert pdf_research_assistant_module.describe_search_result(result).startswith("2 previous answers match **sky**")
+
+
+def test_describe_search_result_says_only_the_best_matches_are_shown(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    result = {"text": "sky", "answers": [FOUND_ANSWER] * module.saved_answers.MAX_RESULTS, "searched": 40}
+
+    assert module.describe_search_result(result).endswith(
+        f"Searched 40 kept answers. Only the best {module.saved_answers.MAX_RESULTS} are shown."
+    )
+
+
+def test_search_previous_answers_asks_for_words_when_none_were_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.saved_answers, "search") as search:
+        module.search_previous_answers("   ")
+
+    search.assert_not_called()
+    assert module.st.session_state.answer_search_found == {"note": module.ANSWER_SEARCH_EMPTY_NOTE}
+
+
+def test_search_previous_answers_searches_the_index_folder_and_keeps_what_it_found(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    found = {"text": "sky", "answers": [], "searched": 0}
+
+    with mock.patch.object(module.saved_answers, "search", return_value=found) as search:
+        module.search_previous_answers("  sky ")
+
+    search.assert_called_once_with(module.bootstrap.INDEX_DIR, "sky")
+    assert module.st.session_state.answer_search_found == found
+
+
+def test_search_previous_answers_explains_a_search_paperqa_cannot_read(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.saved_answers, "search", side_effect=ValueError("Syntax Error: AND")):
+        module.search_previous_answers("AND")
+
+    assert module.st.session_state.answer_search_found == {"note": module.ANSWER_SEARCH_UNREADABLE_NOTE}
+
+
+def test_search_previous_answers_keeps_why_the_search_failed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.saved_answers, "search", side_effect=OSError("locked")):
+        module.search_previous_answers("sky")
+
+    assert module.st.session_state.answer_search_found == {"error": "OSError: locked"}
+
+
+def test_render_found_answer_shows_the_question_when_where_the_answer_its_passages_and_settings(
+    pdf_research_assistant_module,
+):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.markdown, st.caption):
+        shown.reset_mock()
+    answer = FOUND_ANSWER | {"question": "Why *blue*?", "content": "Costs $5 to $10."}
+
+    with mock.patch.object(module, "render_source_passages") as passages, mock.patch.object(
+        module, "render_answer_settings"
+    ) as answer_settings:
+        module.render_found_answer(answer, {})
+
+    assert [call.args[0] for call in st.markdown.call_args_list] == [
+        f"**{module.escape_markdown('Why *blue*?')}**",
+        module.escape_dollars("Costs $5 to $10."),
+    ]
+    st.caption.assert_called_once_with(module.describe_found_answer(answer, {}))
+    passages.assert_called_once_with(FOUND_ANSWER["contexts"], key="found_a1")
+    answer_settings.assert_called_once_with(FOUND_ANSWER["settings"])
+
+
+def test_render_found_answer_explains_an_answer_kept_by_paperqa_itself(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+    answer = FOUND_ANSWER | {"asked_at": None, "contexts": [], "settings": None}
+
+    module.render_found_answer(answer, {})
+
+    assert module.st.caption.call_args_list[-1] == mock.call(module.NO_ANSWER_DETAILS_NOTE)
+
+
+def test_render_search_results_shows_why_the_search_failed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.error.reset_mock()
+
+    module.render_search_results({"error": "ValueError: bad"})
+
+    module.st.error.assert_called_once_with(f"{module.ANSWER_SEARCH_FAILED_NOTE} {module.escape_markdown('ValueError: bad')}")
+
+
+def test_render_search_results_shows_a_note_instead_of_answers(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    with mock.patch.object(module, "render_found_answer") as render_found_answer:
+        module.render_search_results({"note": module.ANSWER_SEARCH_EMPTY_NOTE})
+
+    module.st.caption.assert_called_once_with(module.ANSWER_SEARCH_EMPTY_NOTE)
+    render_found_answer.assert_not_called()
+
+
+def test_render_search_results_shows_each_answer_found_with_the_index_names(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    found = {"text": "sky", "answers": [FOUND_ANSWER, FOUND_ANSWER | {"id": "a2"}], "searched": 2}
+    module.index_names.load.return_value = {"pqa_index_x": "Thesis"}
+    module.st.markdown.reset_mock()
+
+    with mock.patch.object(module, "render_found_answer") as render_found_answer:
+        module.render_search_results(found)
+
+    module.st.markdown.assert_called_once_with(module.describe_search_result(found))
+    module.index_names.load.assert_called_with(module.bootstrap.INDEX_DIR)
+    assert render_found_answer.call_args_list == [
+        mock.call(FOUND_ANSWER, {"pqa_index_x": "Thesis"}),
+        mock.call(FOUND_ANSWER | {"id": "a2"}, {"pqa_index_x": "Thesis"}),
+    ]
+
+
+def test_render_search_results_leaves_the_results_up_until_cleared(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.rerun.reset_mock()
+    module.st.session_state.answer_search_found = {"note": "x"}
+
+    module.render_search_results({"note": "x"})
+
+    assert module.st.session_state.answer_search_found == {"note": "x"}
+    module.st.rerun.assert_not_called()
+
+
+def test_clearing_the_search_results_puts_them_away():
+    with imported_pdf_research_assistant(clicked_keys={"answer_search_clear"}) as module:
+        module.st.rerun.reset_mock()
+        module.st.session_state.answer_search_found = {"note": "x"}
+
+        module.render_search_results({"note": "x"})
+
+        assert module.st.session_state.answer_search_found is None
+        module.st.rerun.assert_called_once_with()
+
+
+def test_render_answer_search_draws_the_box_and_no_results_before_a_search(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.text_input.reset_mock()
+    st.session_state.pop("answer_search_found", None)
+
+    with mock.patch.object(module, "search_previous_answers") as search, mock.patch.object(
+        module, "render_search_results"
+    ) as results:
+        module.render_answer_search()
+
+    st.text_input.assert_called_once_with(
+        module.ANSWER_SEARCH_LABEL, key="answer_search_text", help=module.ANSWER_SEARCH_HELP
+    )
+    search.assert_not_called()
+    results.assert_not_called()
+
+
+def test_render_answer_search_searches_when_the_button_is_pressed_and_shows_what_it_found(
+    pdf_research_assistant_module,
+):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.text_input = mock.Mock(return_value="sky")
+    st.form_submit_button = mock.Mock(return_value=True)
+    found = {"text": "sky", "answers": [], "searched": 0}
+
+    def search(_text):
+        st.session_state.answer_search_found = found
+
+    with mock.patch.object(module, "search_previous_answers", side_effect=search) as search_mock, mock.patch.object(
+        module, "render_search_results"
+    ) as results:
+        module.render_answer_search()
+
+    search_mock.assert_called_once_with("sky")
+    results.assert_called_once_with(found)
+
+
+def test_render_answer_search_keeps_showing_the_last_results_on_later_runs(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.answer_search_found = {"note": "x"}
+
+    with mock.patch.object(module, "render_search_results") as results:
+        module.render_answer_search()
+
+    results.assert_called_once_with({"note": "x"})
+
+
+def test_page_draws_the_answer_search_above_the_chat(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    steps = mock.Mock()
+
+    with mock.patch.object(module, "render_answer_search", steps.search), mock.patch.object(
+        module, "render_history", steps.history
+    ):
+        module.main()
+
+    assert [name for name, *_ in steps.mock_calls] == ["search", "history"]
+
+
+def test_render_history_says_when_an_answer_could_not_be_kept(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.button = mock.Mock(return_value=False)
+    module.st.caption.reset_mock()
+    item = {"role": "assistant", "content": "A", "cost": 0.0, "contexts": [], "id": 1, "save_error": "OSError: full"}
+
+    module.render_history([item])
+
+    assert module.st.caption.call_args_list[-1] == mock.call(
+        f"{module.ANSWER_NOT_SAVED_NOTE} {module.escape_markdown('OSError: full')}"
+    )
+
+
+def test_submit_question_records_why_the_answer_could_not_be_kept(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+
+    with mock.patch.object(module, "answer_question", return_value=("A", 0.0, [], None, "OSError: full")):
+        module.submit_question("Q", {})
+
+    assert module.st.session_state.history[-1]["save_error"] == "OSError: full"
+
+
+def test_submit_question_records_no_save_problem_when_the_answer_was_kept(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+
+    with mock.patch.object(module, "answer_question", return_value=("A", 0.0, [], None, None)):
+        module.submit_question("Q", {})
+
+    assert "save_error" not in module.st.session_state.history[-1]

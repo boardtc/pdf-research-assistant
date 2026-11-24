@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from paperqa import Settings
 from paperqa.settings import AgentSettings, AnswerSettings, IndexSettings, ParsingSettings
 
-from pdf_research_assistant import local_llm, rate_profiles, saved_settings
+from pdf_research_assistant import local_llm, rate_profiles, saved_answers, saved_settings
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -128,11 +128,14 @@ def only_manifest(path: str | Path) -> bool:
 
 
 def iter_index_file_archives(index_dir: Path) -> list[Path]:
-    """Return the relevant index archive files for either a shard dir or an index root dir."""
+    """Return the relevant index archive files for either a shard dir or an index root dir.
+
+    The index of past answers beside the shards lists answers, not PDFs, so it is left out.
+    """
     direct_archive = index_dir / "files.zip"
     if direct_archive.exists():
         return [direct_archive]
-    return list(index_dir.glob("*/files.zip"))
+    return [path for path in index_dir.glob("*/files.zip") if path.parent.name != saved_answers.INDEX_NAME]
 
 
 def get_active_index_dir(settings: Settings | None = None) -> Path:

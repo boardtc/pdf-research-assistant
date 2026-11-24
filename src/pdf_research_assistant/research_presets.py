@@ -14,6 +14,11 @@ It has up to three parts:
 Speed limits are left out: they follow the OpenAI account, not the research task.
 
 The presets live in research_presets.json in the project folder, which Git ignores.
+
+Presets can be exported to a presets file and imported from one, to back them up or use them on another
+computer. The file holds the same choices, marked with EXPORT_FORMAT and EXPORT_VERSION, and is checked
+as a whole before any preset in it is saved. It never holds API keys or folder paths; a local model's
+server address is the one detail tied to this computer, and is left out unless asked for.
 """
 
 import json
@@ -24,6 +29,12 @@ from pdf_research_assistant import local_llm, saved_settings, settings_groups
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRESETS_PATH = PROJECT_ROOT / "research_presets.json"
 MAX_NAME_LENGTH = 60
+# A presets file made with Export says what it is, so import can turn down any other JSON file.
+EXPORT_FORMAT = "pdf-research-assistant research presets"
+EXPORT_VERSION = 1
+# Far more than any real presets file, small enough that a wrong file is turned down before it is read.
+MAX_IMPORT_BYTES = 1_000_000
+NOT_EXPORTED_NOTE = "The file is not a presets file exported from this app."
 
 ANSWER = "answer"
 INDEX = "index"
@@ -190,6 +201,141 @@ def pick_preset(preset: dict, settings_path: Path | None = None, model_path: Pat
             local_llm.clear_config(model_path)
         else:
             local_llm.save_config(preset[MODEL], model_path)
+
+
+def export_text(presets: dict, names: list[str], include_model_details: bool) -> str:
+    """Return the chosen presets as the text of a presets file, in the order the names are given.
+
+    Without model details, a preset's local model is left out, so the server address on this computer
+    never leaves it and the preset keeps whatever model is in use where it is imported. A preset that
+    uses OpenAI holds no address, so it keeps its model part.
+    """
+    chosen = {}
+    for name in names:
+        if name not in presets:
+            continue
+        preset = dict(presets[name])
+        if not include_model_details and preset.get(MODEL) is not None:
+            del preset[MODEL]
+        chosen[name] = preset
+    content = {"format": EXPORT_FORMAT, "version": EXPORT_VERSION, "presets": chosen}
+    return json.dumps(content, indent=2, ensure_ascii=False) + "\n"
+
+
+def has_model_details(presets: dict, names: list[str]) -> bool:
+    """Return whether any of the chosen presets holds a local model, whose address belongs to this computer."""
+    return any(presets[name].get(MODEL) is not None for name in names if name in presets)
+
+
+def _check_part(name: str, part: str, values: dict, problems: list[str]) -> dict:
+    """Return a part's values, adding a problem for each one a preset cannot hold or use."""
+    keys = PART_KEYS[part]
+    for key, value in values.items():
+        if key not in keys:
+            problems.append(f"“{name}”: “{key}” is not a setting a preset can hold.")
+        elif not settings_groups.usable(key, value):
+            problems.append(f"“{name}”: the value for {settings_groups.get_setting(key).label} cannot be used.")
+    return dict(values)
+
+
+def _check_imported_preset(name: str, preset: object, problems: list[str]) -> dict:
+    """Return a preset from a presets file, adding a problem for anything in it that cannot be used."""
+    if not isinstance(preset, dict) or not isinstance(preset.get(ANSWER), dict):
+        problems.append(f"“{name}”: it has no answer settings.")
+        return {}
+    for part in preset:
+        if part not in (ANSWER, INDEX, MODEL):
+            problems.append(f"“{name}”: “{part}” is not a part a preset can hold.")
+    checked = {ANSWER: _check_part(name, ANSWER, preset[ANSWER], problems)}
+    if INDEX in preset:
+        if isinstance(preset[INDEX], dict):
+            checked[INDEX] = _check_part(name, INDEX, preset[INDEX], problems)
+        else:
+            problems.append(f"“{name}”: its library and index settings are not in the expected format.")
+    if MODEL in preset:
+        try:
+            checked[MODEL] = _clean_model(preset[MODEL])
+        except ValueError:
+            problems.append(f"“{name}”: its local model details cannot be used.")
+    return checked
+
+
+def _read_presets_file(data: bytes) -> dict:
+    """Return the presets a presets file holds by name; raise ValueError when it is not a presets file."""
+    if len(data) > MAX_IMPORT_BYTES:
+        raise ValueError("The file is too large to be a presets file.")
+    try:
+        content = json.loads(data.decode("utf-8"))
+    except ValueError:
+        # UnicodeDecodeError is a ValueError too.
+        raise ValueError("The file is not a presets file: it is not JSON text.") from None
+    if not isinstance(content, dict) or content.get("format") != EXPORT_FORMAT:
+        raise ValueError(NOT_EXPORTED_NOTE)
+    version = content.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise ValueError("The file does not say which version wrote it.")
+    if version > EXPORT_VERSION:
+        raise ValueError("The file was exported by a newer version of the app. Update the app to import it.")
+    presets = content.get("presets")
+    if not isinstance(presets, dict) or not presets:
+        raise ValueError("The file holds no presets.")
+    return presets
+
+
+def check_import(data: bytes) -> tuple[dict[str, dict], list[str]]:
+    """Check a presets file before anything in it is saved.
+
+    Returns the presets by tidied name in the file's order and an empty list, or no presets and a
+    plain-language problem for everything that cannot be used. A file with any problem is refused as a
+    whole, so a preset never arrives with a setting quietly dropped.
+    """
+    try:
+        presets = _read_presets_file(data)
+    except ValueError as exc:
+        return {}, [str(exc)]
+    problems: list[str] = []
+    checked: dict[str, dict] = {}
+    for typed, preset in presets.items():
+        try:
+            name = clean_name(typed)
+        except ValueError as exc:
+            problems.append("A preset has no name." if not typed.strip() else f"“{typed}”: {exc}")
+            continue
+        if find_name(checked, name) is not None:
+            problems.append(f"“{name}”: the file has another preset with this name.")
+            continue
+        checked[name] = _check_imported_preset(name, preset, problems)
+    return ({}, problems) if problems else (checked, [])
+
+
+def find_clashes(presets: dict, imported: dict) -> list[str]:
+    """Return the imported names that a saved preset already has, ignoring capitals."""
+    return [name for name in imported if find_name(presets, name) is not None]
+
+
+def import_presets(
+    imported: dict, replace: bool, path: Path | None = None
+) -> tuple[list[str], list[str], list[str]]:
+    """Save checked presets from a file; return the names added, the names that replaced one, and those skipped.
+
+    A preset with the name of a saved one replaces it only when asked; otherwise it is skipped.
+    """
+    presets = load(path)
+    added, replaced, skipped = [], [], []
+    for name, preset in imported.items():
+        saved = find_name(presets, name)
+        if saved is not None and not replace:
+            skipped.append(name)
+            continue
+        if saved is not None:
+            del presets[saved]
+            replaced.append(name)
+        else:
+            added.append(name)
+        presets[name] = preset
+    if added or replaced:
+        _write(dict(sorted(presets.items(), key=lambda item: item[0].casefold())), path)
+    return added, replaced, skipped
 
 
 def describe_model(config: dict | None) -> str:

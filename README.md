@@ -100,6 +100,11 @@ Above them, **Research presets** keeps the settings you use for a recurring piec
 
 Presets are kept in `research_presets.json` in the project folder, which Git ignores. Each one holds your choices as they are saved in `saved_settings.json` and `local_llm.json`, so using a preset writes those files back, and the next question, the CLI and `pdf-research-rebuild` all follow it. A preset whose index settings differ from the ones in use means the PDFs have to be indexed again, so the panel says so before you use it, and the page then shows the changed-settings warning (below) until you rebuild or switch back. Such a preset cannot be used while a rebuild is running. Change any setting afterwards and the preset no longer shows as in use.
 
+To back presets up or use them on another computer, open **Import or export research presets**:
+
+- **Export**: pick the presets under **Presets to export** (all of them to start with) and click **Export presets** to download `research-presets.json`. The file holds only the setting choices, the same PaperQA-backed values the presets keep: no API keys and no folder paths. A preset that uses a local model holds that server's address, which usually only works on this computer, so it is left out unless you tick **Include local model addresses**. Without it, such a preset keeps whatever answer model is in use where it is imported.
+- **Import**: pick a file made with **Export presets** under **Presets file**. The whole file is checked before anything is saved: if it is not a presets file, or any preset in it has a name, setting or value this app cannot use, the panel lists every problem and imports nothing. Otherwise it lists the presets in the file and **Import presets** adds them to **Saved preset**. A preset with the same name as a saved one (ignoring capitals) is skipped unless you tick **Replace saved presets with the same name**. Importing only saves the presets; use one as usual to put its settings in place, which is when a preset with different index settings raises the changed-settings warning.
+
 Open **Library and index settings** in the rebuild group to change how your PDFs are indexed:
 
 | Setting | What it changes in PaperQA | Affects |

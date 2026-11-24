@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from pdf_research_assistant import answer_templates, grounding_modes, quality_presets, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, quality_presets, rate_profiles, research_presets
 
 
 class _ContextManagerStub:
@@ -183,6 +183,8 @@ def imported_pdf_research_assistant(
     streamlit_module.radio = mock.Mock(return_value=search_mode)
     streamlit_module.progress = mock.Mock()
     streamlit_module.download_button = mock.Mock()
+    streamlit_module.multiselect = mock.Mock(side_effect=lambda _label, options, default=None, **_kwargs: list(default or []))
+    streamlit_module.file_uploader = mock.Mock(return_value=None)
     streamlit_module.fragment = mock.Mock(return_value=lambda fn: fn)
     streamlit_module.dialog = mock.Mock(return_value=lambda fn: fn)
     streamlit_module.text = mock.Mock()
@@ -1104,10 +1106,10 @@ def test_import_renders_history_and_assistant_history_actions():
     ) as module:
         assert module.st.chat_message.call_args_list[:2] == [mock.call("user"), mock.call("assistant")]
         # The active index details (index and PDF folders, no paper list here) and the sidebar's guide and
-        # fixed index settings are Markdown too, as are the research preset line and the save form's title;
-        # they are drawn before the chat.
+        # fixed index settings are Markdown too, as are the research preset line, the save form's title and
+        # the import title; they are drawn before the chat.
         fixed_index_settings = [s for s in module.settings_groups.REINDEX_SETTINGS if s.write is None]
-        lines_before_chat = 2 + 2 + 1 + len(fixed_index_settings)
+        lines_before_chat = 2 + 2 + 2 + len(fixed_index_settings)
         chat_markdown = module.st.markdown.call_args_list[lines_before_chat:]
         assert chat_markdown[:2] == [mock.call("User question"), mock.call("Assistant answer")]
         module.st.caption.assert_any_call("Cost: $0.2500")
@@ -1976,6 +1978,7 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
             "Local LLM setup",
             "Library and index settings",
             module.RESEARCH_PRESETS_PANEL,
+            module.RESEARCH_PRESET_FILES_PANEL,
             # Drawn under the chat, after the sidebar.
             module.ESTIMATE_DETAILS_TITLE,
         ]
@@ -3633,6 +3636,7 @@ def test_index_settings_cannot_be_saved_while_a_rebuild_runs(pdf_research_assist
 OLLAMA_MODEL = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3"}
 QUICK = {"answer": {"quality_preset": "Fast"}}
 DEEP = {"answer": {"quality_preset": "High quality"}, "index": {"chunk_chars": 3000}}
+FILE_BOXES = ("research_preset_export_model", "research_preset_import_replace")
 
 
 def draw_research_presets(
@@ -3652,16 +3656,32 @@ def draw_research_presets(
     save_result=("Typed", False),
     rename_result=None,
     rename_error=None,
+    exported=None,
+    ticked=None,
+    uploaded=None,
+    import_result=([], [], []),
+    import_error=None,
 ):
-    """Draw the research presets panel, with the user clicking buttons by key and typing into the boxes."""
+    """Draw the research presets panel, with the user clicking buttons by key and typing into the boxes.
+
+    The save form's two boxes are ticked in turn from checks; any other box by its key, from ticked.
+    """
     st = module.st
-    for name in ("rerun", "success", "error", "caption", "markdown", "warning", "subheader"):
+    for name in ("rerun", "success", "error", "caption", "markdown", "warning", "subheader", "download_button"):
         setattr(st, name, mock.Mock())
     st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
     st.form_submit_button = mock.Mock(return_value=submitted)
     st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
     ticks = iter(checks)
-    st.checkbox = mock.Mock(side_effect=lambda *_args, **_kwargs: next(ticks))
+    st.checkbox = mock.Mock(
+        side_effect=lambda *_args, key=None, **_kwargs: (ticked or {}).get(key, False) if key in FILE_BOXES else next(ticks)
+    )
+    st.multiselect = mock.Mock(
+        side_effect=lambda _label, options, default=None, **_kwargs: list(default) if exported is None else exported
+    )
+    st.file_uploader = mock.Mock(
+        return_value=None if uploaded is None else SimpleNamespace(getvalue=lambda: uploaded)
+    )
 
     def type_into(label, value="", **_kwargs):
         if label == module.RESEARCH_PRESET_NAME_LABEL:
@@ -3678,11 +3698,14 @@ def draw_research_presets(
         mock.patch.object(module.research_presets, "save_preset", return_value=save_result) as save,
         mock.patch.object(module.research_presets, "rename_preset", rename),
         mock.patch.object(module.research_presets, "delete_preset") as delete,
+        mock.patch.object(
+            module.research_presets, "import_presets", return_value=import_result, side_effect=import_error
+        ) as import_presets,
         mock.patch.object(module.rebuild_client, "get_run", return_value={"pid": 1} if rebuilding else None),
         mock.patch.object(module, "media_reading_available", return_value=media_available),
     ):
         module.render_research_presets(module.st.sidebar)
-        return {"pick": pick, "save": save, "rename": rename, "delete": delete}
+        return {"pick": pick, "save": save, "rename": rename, "delete": delete, "import": import_presets}
 
 
 def _markdown_lines(module):
@@ -3695,9 +3718,16 @@ def test_research_presets_say_when_none_is_saved_and_offer_only_the_save_form(pd
     draw_research_presets(module)
 
     module.st.subheader.assert_called_once_with(module.RESEARCH_PRESETS_TITLE)
-    assert _markdown_lines(module) == [module.NO_RESEARCH_PRESETS_NOTE, module.RESEARCH_PRESET_SAVE_TITLE]
+    assert _markdown_lines(module) == [
+        module.NO_RESEARCH_PRESETS_NOTE,
+        module.RESEARCH_PRESET_SAVE_TITLE,
+        module.RESEARCH_PRESET_IMPORT_TITLE,
+    ]
     module.st.expander.assert_any_call(module.RESEARCH_PRESETS_PANEL)
-    module.st.caption.assert_called_once_with(module.RESEARCH_PRESETS_NOTE)
+    assert [call.args[0] for call in module.st.caption.call_args_list] == [
+        module.RESEARCH_PRESETS_NOTE,
+        module.RESEARCH_PRESET_FILES_NOTE,
+    ]
     module.st.selectbox.assert_not_called()
     module.st.form.assert_any_call("research_preset_form")
     assert _button_keys(module) == []
@@ -3753,7 +3783,13 @@ def test_the_picked_preset_shows_what_it_holds(pdf_research_assistant_module):
 
     draw_research_presets(module, presets={"Deep": DEEP}, model=OLLAMA_MODEL)
 
-    assert _markdown_lines(module)[1:-1] == module.research_presets.describe_preset(DEEP)
+    lines = _markdown_lines(module)
+    assert lines[1:-3] == module.research_presets.describe_preset(DEEP)
+    assert lines[-3:] == [
+        module.RESEARCH_PRESET_SAVE_TITLE,
+        module.RESEARCH_PRESET_EXPORT_TITLE,
+        module.RESEARCH_PRESET_IMPORT_TITLE,
+    ]
 
 
 def test_using_a_preset_puts_its_settings_in_place_and_redraws_every_control(pdf_research_assistant_module):
@@ -4060,9 +4096,291 @@ def test_the_research_preset_panel_keeps_its_own_values_apart_from_its_controls(
     module.st.session_state.research_preset_notice = "Saved."
 
     draw_research_presets(module, presets={"Quick": QUICK, "Deep": DEEP}, clicked={"research_preset_delete_confirm"})
+    widget_keys = _research_preset_widget_keys(module)
+    module.st.session_state.research_preset_file_notice = "Imported."
+    draw_research_presets(
+        module,
+        presets={"Quick": QUICK, "Local": LOCAL},
+        uploaded=_presets_file({"quick": QUICK}),
+        clicked={"research_preset_import"},
+    )
+    widget_keys |= _research_preset_widget_keys(module)
 
-    controls = [module.st.button, module.st.selectbox, module.st.text_input, module.st.checkbox]
-    widget_keys = {call.kwargs.get("key") for control in controls for call in control.call_args_list}
     kept = {key for key in module.st.session_state if key.startswith("research_preset_")}
-    assert {"research_preset_to_delete", "research_preset_selected", "research_preset_round"} <= kept
+    assert {
+        "research_preset_to_delete",
+        "research_preset_selected",
+        "research_preset_round",
+        "research_preset_file_notice",
+    } <= kept
     assert not kept & widget_keys
+
+
+# Importing and exporting research presets.
+
+LOCAL = {"answer": {"evidence_k": 3}, "model": OLLAMA_MODEL}
+
+
+def _presets_file(presets):
+    return research_presets.export_text(presets, list(presets), include_model_details=True).encode("utf-8")
+
+
+def _download(module):
+    return module.st.download_button.call_args
+
+
+def test_export_offers_every_preset_and_downloads_them_as_a_presets_file(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK})
+
+    module.st.expander.assert_any_call(module.RESEARCH_PRESET_FILES_PANEL)
+    pick = module.st.multiselect.call_args
+    assert pick.args == (module.RESEARCH_PRESET_EXPORT_PICK_LABEL, ["Deep", "Quick"])
+    assert pick.kwargs["default"] == ["Deep", "Quick"]
+    assert pick.kwargs["key"] == "research_preset_export_pick_0"
+    call = _download(module)
+    assert call.args[0] == module.RESEARCH_PRESET_EXPORT_LABEL
+    assert json.loads(call.args[1])["presets"] == {"Deep": DEEP, "Quick": QUICK}
+    assert call.kwargs["file_name"] == "research-presets.json"
+    assert call.kwargs["mime"] == "application/json"
+    assert call.kwargs["on_click"] == "ignore"
+    # No preset uses a local model, so there is no address to ask about.
+    assert [c.kwargs["key"] for c in module.st.checkbox.call_args_list if c.kwargs.get("key") in FILE_BOXES] == []
+
+
+def test_export_holds_only_the_presets_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Deep": DEEP, "Quick": QUICK}, exported=["Quick"])
+
+    assert list(json.loads(_download(module).args[1])["presets"]) == ["Quick"]
+
+
+def test_export_with_nothing_picked_says_so_and_offers_no_download(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Quick": QUICK}, exported=[])
+
+    module.st.caption.assert_any_call(module.RESEARCH_PRESET_EXPORT_NONE_NOTE)
+    module.st.download_button.assert_not_called()
+
+
+def test_export_leaves_out_local_model_addresses_unless_asked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Local": LOCAL, "Quick": QUICK})
+
+    box = next(c for c in module.st.checkbox.call_args_list if c.kwargs.get("key") == "research_preset_export_model")
+    assert box.args == (module.RESEARCH_PRESET_EXPORT_MODEL_LABEL,)
+    assert box.kwargs["value"] is False
+    assert box.kwargs["help"] == module.RESEARCH_PRESET_EXPORT_MODEL_HELP
+    text = _download(module).args[1]
+    assert "localhost" not in text
+    assert json.loads(text)["presets"]["Local"] == {"answer": {"evidence_k": 3}}
+
+
+def test_export_includes_local_model_addresses_when_ticked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, presets={"Local": LOCAL}, ticked={"research_preset_export_model": True})
+
+    assert json.loads(_download(module).args[1])["presets"]["Local"] == LOCAL
+
+
+def test_with_no_presets_saved_only_import_is_offered(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module)
+
+    module.st.multiselect.assert_not_called()
+    module.st.download_button.assert_not_called()
+    upload = module.st.file_uploader.call_args
+    assert upload.args == (module.RESEARCH_PRESET_IMPORT_FILE_LABEL,)
+    assert upload.kwargs["type"] == ["json"]
+    # In megabytes: a little over the most the check reads.
+    assert upload.kwargs["max_upload_size"] * 1024 * 1024 >= research_presets.MAX_IMPORT_BYTES
+    assert upload.kwargs["key"] == "research_preset_import_file_0"
+
+
+def test_a_file_that_cannot_be_imported_lists_its_problems_and_offers_no_import(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, uploaded=b"not json")
+
+    module.st.error.assert_called_once_with(
+        f"{module.RESEARCH_PRESET_IMPORT_REFUSED_NOTE}\n\n- "
+        + module.escape_markdown("The file is not a presets file: it is not JSON text.")
+    )
+    assert "research_preset_import" not in _button_keys(module)
+
+
+def test_a_checked_file_shows_its_presets_and_imports_them_when_asked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module,
+        presets={"Deep": DEEP},
+        uploaded=_presets_file({"Quick": QUICK, "Notes*": QUICK}),
+        clicked={"research_preset_import"},
+        import_result=(["Quick", "Notes*"], [], []),
+    )
+
+    assert r"The file holds 2 presets: Quick, Notes\*" in _markdown_lines(module)
+    patched["import"].assert_called_once_with({"Quick": QUICK, "Notes*": QUICK}, False)
+    state = module.st.session_state
+    assert state.research_preset_file_notice == r"Imported “Quick”, “Notes\*”."
+    assert state.research_preset_selected == "Quick"
+    assert state.research_preset_round == 1
+    assert "research_preset_notice" not in state
+    module.st.rerun.assert_called_once_with()
+
+
+def test_a_file_with_one_preset_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(module, uploaded=_presets_file({"Quick": QUICK}))
+
+    assert "The file holds 1 preset: Quick" in _markdown_lines(module)
+    assert "research_preset_import" in _button_keys(module)
+    patched["import"].assert_not_called()
+
+
+def test_importing_names_already_saved_asks_whether_to_replace_them(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module,
+        presets={"Quick": QUICK},
+        uploaded=_presets_file({"quick": DEEP, "New": QUICK}),
+        clicked={"research_preset_import"},
+        import_result=(["New"], [], ["quick"]),
+    )
+
+    box = next(c for c in module.st.checkbox.call_args_list if c.kwargs.get("key") == "research_preset_import_replace")
+    assert box.args == (module.RESEARCH_PRESET_IMPORT_REPLACE_LABEL,)
+    assert box.kwargs["value"] is False
+    assert "quick" in box.kwargs["help"]
+    patched["import"].assert_called_once_with({"quick": DEEP, "New": QUICK}, False)
+    assert module.st.session_state.research_preset_file_notice == (
+        "Imported “New”. Skipped “quick”, because a saved preset has the same name."
+    )
+
+
+def test_importing_can_replace_saved_presets_with_the_same_name(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_research_presets(
+        module,
+        presets={"Quick": QUICK},
+        uploaded=_presets_file({"quick": DEEP}),
+        ticked={"research_preset_import_replace": True},
+        clicked={"research_preset_import"},
+        import_result=([], ["quick"], []),
+    )
+
+    patched["import"].assert_called_once_with({"quick": DEEP}, True)
+    assert module.st.session_state.research_preset_file_notice == "Replaced “quick”."
+    assert module.st.session_state.research_preset_selected == "quick"
+
+
+def test_an_import_that_skips_every_preset_keeps_the_preset_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_selected = "Deep"
+
+    draw_research_presets(
+        module,
+        presets={"Quick": QUICK, "Deep": DEEP},
+        uploaded=_presets_file({"quick": DEEP}),
+        clicked={"research_preset_import"},
+        import_result=([], [], ["quick"]),
+    )
+
+    assert module.st.session_state.research_preset_selected == "Deep"
+
+
+def test_importing_a_preset_with_a_local_model_says_to_check_its_address(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(module, uploaded=_presets_file({"Local": LOCAL, "Quick": QUICK}))
+
+    module.st.caption.assert_any_call(module.RESEARCH_PRESET_IMPORT_MODEL_NOTE.format(count=1))
+
+
+def test_an_import_that_cannot_be_saved_says_why(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_research_presets(
+        module,
+        uploaded=_presets_file({"Quick": QUICK}),
+        clicked={"research_preset_import"},
+        import_error=OSError("disk full"),
+    )
+
+    module.st.error.assert_called_once_with(f"{module.RESEARCH_PRESET_IMPORT_FAILED_NOTE} disk full")
+    module.st.rerun.assert_not_called()
+
+
+def test_the_import_notice_shows_once_in_the_import_and_export_panel(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.research_preset_file_notice = "Imported “Quick”."
+
+    draw_research_presets(module, presets={"Quick": QUICK})
+
+    module.st.success.assert_called_once_with("Imported “Quick”.")
+    assert "research_preset_file_notice" not in module.st.session_state
+
+
+def test_describe_import_names_what_was_added_replaced_and_skipped(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert module.describe_import(["A"], ["B", "C"], ["D"]) == (
+        "Imported “A”. Replaced “B”, “C”. Skipped “D”, because a saved preset has the same name."
+    )
+    assert module.describe_import([], [], []) == ""
+
+
+def test_presets_exported_from_the_app_are_imported_into_the_normal_preset_list(pdf_research_assistant_module, tmp_path):
+    """Export from one presets file, import into another: the presets can then be picked and used as usual."""
+    module = pdf_research_assistant_module
+    st = module.st
+    for name in ("rerun", "success", "error", "caption", "markdown", "warning", "subheader", "download_button"):
+        setattr(st, name, mock.Mock())
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key == "research_preset_import")
+    st.form_submit_button = mock.Mock(return_value=False)
+    st.checkbox = mock.Mock(side_effect=lambda _label, value=False, **_kwargs: value)
+    st.multiselect = mock.Mock(side_effect=lambda _label, options, default=None, **_kwargs: list(default))
+    st.file_uploader = mock.Mock(return_value=None)
+    source, target = tmp_path / "here.json", tmp_path / "there.json"
+    source.write_text(json.dumps({"Deep": DEEP, "Local": LOCAL}), encoding="utf-8")
+    with (
+        mock.patch.object(module.saved_settings, "SETTINGS_PATH", tmp_path / "saved_settings.json"),
+        mock.patch.object(module.local_llm, "CONFIG_PATH", tmp_path / "local_llm.json"),
+    ):
+        with mock.patch.object(module.research_presets, "PRESETS_PATH", source):
+            module.render_research_presets(st.sidebar)
+        exported = _download(module).args[1].encode("utf-8")
+
+        st.file_uploader = mock.Mock(return_value=SimpleNamespace(getvalue=lambda: exported))
+        with mock.patch.object(module.research_presets, "PRESETS_PATH", target):
+            module.render_research_presets(st.sidebar)
+            st.file_uploader = mock.Mock(return_value=None)
+            st.button = mock.Mock(return_value=False)
+            st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: options[index])
+            module.render_research_presets(st.sidebar)
+
+    assert module.research_presets.load(target) == {"Deep": DEEP, "Local": {"answer": {"evidence_k": 3}}}
+    assert st.selectbox.call_args.args == (module.RESEARCH_PRESET_PICK_LABEL, ["Deep", "Local"])
+
+
+def _research_preset_widget_keys(module):
+    controls = [
+        module.st.button,
+        module.st.selectbox,
+        module.st.text_input,
+        module.st.checkbox,
+        module.st.multiselect,
+        module.st.file_uploader,
+        module.st.download_button,
+    ]
+    return {call.kwargs.get("key") for control in controls for call in control.call_args_list}

@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from pdf_research_assistant import answer_templates, grounding_modes, rate_profiles
+from pdf_research_assistant import answer_templates, grounding_modes, quality_presets, rate_profiles
 
 
 class _ContextManagerStub:
@@ -90,6 +90,7 @@ def _fake_settings(**changes):
             ),
             agent_llm=values["llm"],
             agent_llm_config={},
+            agent_type="ToolSelector",
         ),
     )
     if values["rate_profile"]:
@@ -1490,6 +1491,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     with mock.patch.multiple(
         module,
         render_local_llm_setup=steps.local_llm,
+        render_quality_preset=steps.preset,
         render_source_settings=steps.sources,
         render_answer_length=steps.length,
         render_answer_template=steps.template,
@@ -1504,6 +1506,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
     st.subheader.assert_called_once_with(module.INSTANT_SETTINGS_TITLE)
     st.caption.assert_called_once_with(module.INSTANT_SETTINGS_NOTE)
     assert steps.mock_calls == [
+        mock.call.preset(settings),
         mock.call.sources(settings),
         mock.call.length(settings),
         mock.call.template(settings),
@@ -2327,6 +2330,7 @@ def draw_source_settings(module, *, settings=None, typed=None):
     """Draw the source settings with chosen typed numbers."""
     st = module.st
     st.caption.reset_mock()
+    st.rerun.reset_mock()
     typed = typed or {}
     st.number_input = mock.Mock(side_effect=lambda label, value=None, **_kwargs: typed.get(label, value))
     with mock.patch.multiple(module.saved_settings, save_value=mock.DEFAULT) as patched:
@@ -2358,6 +2362,7 @@ def test_source_settings_start_at_the_values_the_next_question_will_use(pdf_rese
     assert (sources.kwargs["min_value"], sources.kwargs["max_value"], sources.kwargs["value"]) == (1, 12, 4)
     assert sources.kwargs["help"] == module.settings_groups.get_setting("answer_max_sources").help
     patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
 
 
 def test_source_settings_say_exhaustive_search_ignores_them(pdf_research_assistant_module):
@@ -2378,6 +2383,8 @@ def test_choosing_a_new_number_saves_it_for_the_next_question(pdf_research_assis
         mock.call("evidence_k", 20),
         mock.call("answer_max_sources", 8),
     ]
+    # The quality preset above was drawn from the old numbers, so the page is drawn again after each save.
+    assert module.st.rerun.call_count == 2
 
 
 def test_most_sources_can_never_be_more_than_the_passages_gathered(pdf_research_assistant_module):
@@ -2439,6 +2446,7 @@ def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_rese
     module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
     patched["forget"].assert_called_once_with(
         [
+            "quality_preset",
             "evidence_k",
             "answer_max_sources",
             "answer_length",
@@ -2457,6 +2465,8 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     module = pdf_research_assistant_module
     module.st.session_state.answer_settings_round = 1
 
+    draw_quality_preset(module)
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_quality_preset_1"
     draw_source_settings(module)
     draw_answer_length(module)
 
@@ -2484,6 +2494,85 @@ def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistan
     module.st.rerun.assert_not_called()
 
 
+# Sidebar control for the quality preset.
+
+PRESET_NAMES = ["Fast", "Balanced", "High quality", "Debug"]
+
+
+def draw_quality_preset(module, *, settings=None, picked=None, saved=None):
+    """Draw the quality preset control, with the user picking a preset or leaving it as it is."""
+    st = module.st
+    st.caption.reset_mock()
+    st.rerun.reset_mock()
+    st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
+    with (
+        mock.patch.object(module.saved_settings, "save_value") as save_value,
+        mock.patch.object(module.saved_settings, "forget") as forget,
+        mock.patch.object(module.saved_settings, "load", return_value=saved or {}),
+    ):
+        module.render_quality_preset(settings or _fake_settings())
+        return {"save_value": save_value, "forget": forget}
+
+
+def test_quality_preset_offers_the_presets_starting_at_the_one_in_use(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_quality_preset(module, settings=_fake_settings(evidence_k=20))
+
+    call = module.st.selectbox.call_args
+    assert call.args == ("Quality preset", PRESET_NAMES)
+    assert call.kwargs["index"] == 2
+    assert call.kwargs["help"] == module.settings_groups.get_setting("quality_preset").help
+    assert call.kwargs["key"] == "setting_quality_preset_0"
+    module.st.caption.assert_called_once_with(quality_presets.get_preset("High quality").description)
+    patched["save_value"].assert_not_called()
+    patched["forget"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_picking_a_preset_saves_it_forgets_the_numbers_it_covers_and_redraws_the_controls(
+    pdf_research_assistant_module,
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_quality_preset(module, picked="Fast")
+
+    patched["save_value"].assert_called_once_with("quality_preset", "Fast")
+    patched["forget"].assert_called_once_with(quality_presets.KEYS_WITH_CONTROLS)
+    # The number boxes and answer length were drawn with the old values, so they get new keys.
+    assert module.st.session_state.answer_settings_round == 1
+    module.st.rerun.assert_called_once_with()
+
+
+def test_numbers_that_match_no_preset_show_as_custom_until_a_preset_is_picked(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    patched = draw_quality_preset(module, settings=_fake_settings(evidence_k=7))
+
+    call = module.st.selectbox.call_args
+    assert call.args[1] == PRESET_NAMES + [quality_presets.NO_PRESET]
+    assert call.kwargs["index"] == 4
+    module.st.caption.assert_called_once_with(module.NO_PRESET_NOTE)
+    patched["save_value"].assert_not_called()
+
+
+def test_custom_says_which_saved_preset_it_started_from(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_quality_preset(module, settings=_fake_settings(evidence_k=7), saved={"quality_preset": "Fast"})
+
+    module.st.caption.assert_called_once_with(module.CHANGED_PRESET_NOTE.format(name="Fast"))
+    assert "Fast" in module.CHANGED_PRESET_NOTE.format(name="Fast")
+
+
+def test_page_draws_the_quality_preset_from_the_settings_it_built_above_the_numbers_it_covers():
+    with imported_pdf_research_assistant() as module:
+        call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Quality preset")
+
+        assert call.args[1][call.kwargs["index"]] == quality_presets.DEFAULT_PRESET
+        assert module.st.selectbox.call_args_list.index(call) == 0
+
+
 # Sidebar control for how long the answer is asked to be.
 
 SHORT = "50 to 100 words"
@@ -2494,6 +2583,7 @@ LONG = "about 400 words, but can be longer"
 def draw_answer_length(module, *, settings=None, picked=None):
     """Draw the answer length control, with the user picking a phrase or leaving it as it is."""
     st = module.st
+    st.rerun.reset_mock()
     st.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: picked or options[index])
     with mock.patch.object(module.saved_settings, "save_value") as save_value:
         module.render_answer_length(settings or _fake_settings())
@@ -2516,6 +2606,7 @@ def test_answer_length_offers_the_named_choices_starting_at_the_one_in_use(pdf_r
         "Long (about 400 words, but can be longer)",
     ]
     save_value.assert_not_called()
+    module.st.rerun.assert_not_called()
 
 
 def test_picking_another_answer_length_saves_it_for_the_next_question(pdf_research_assistant_module):
@@ -2524,6 +2615,8 @@ def test_picking_another_answer_length_saves_it_for_the_next_question(pdf_resear
     save_value = draw_answer_length(module, settings=_fake_settings(answer_length=STANDARD), picked=LONG)
 
     save_value.assert_called_once_with("answer_length", LONG)
+    # The quality preset above was drawn from the old length, so the page is drawn again.
+    module.st.rerun.assert_called_once_with()
 
 
 def test_an_answer_length_that_is_not_offered_is_kept_until_another_is_picked(pdf_research_assistant_module):

@@ -54,6 +54,7 @@ def _fake_settings(**changes):
         "rate_profile": None,
         "answer_template": None,
         "grounding": None,
+        "pre_prompt": None,
     } | changes
     settings = SimpleNamespace(
         llm=values["llm"],
@@ -74,6 +75,7 @@ def _fake_settings(**changes):
             summary_json="summary",
             qa=_template_prompt(values["answer_template"]) if values["answer_template"] else "answer",
             system="system",
+            pre=values["pre_prompt"],
         ),
         parsing=SimpleNamespace(
             parse_pdf=values["parse_pdf"],
@@ -152,6 +154,7 @@ def imported_pdf_research_assistant(
     streamlit_module.button = mock.Mock(side_effect=click)
     streamlit_module.selectbox = mock.Mock(side_effect=lambda _label, options, index=0, **_kwargs: options[index])
     streamlit_module.text_input = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
+    streamlit_module.text_area = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value)
     streamlit_module.number_input = mock.Mock(side_effect=lambda _label, value=None, **_kwargs: value)
     streamlit_module.toggle = mock.Mock(return_value=False)
     streamlit_module.checkbox = mock.Mock(side_effect=lambda _label, value=False, **_kwargs: value)
@@ -1491,6 +1494,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         render_answer_length=steps.length,
         render_answer_template=steps.template,
         render_grounding=steps.grounding,
+        render_pre_prompt=steps.pre_prompt,
         render_rate_profile=steps.profile,
         render_settings_reset=steps.reset,
         render_one_off_settings=steps.one_off,
@@ -1504,6 +1508,7 @@ def test_render_instant_settings_returns_the_chosen_mode_and_explains_the_group(
         mock.call.length(settings),
         mock.call.template(settings),
         mock.call.grounding(settings),
+        mock.call.pre_prompt(settings),
         mock.call.profile(settings),
         mock.call.reset(),
         mock.call.one_off(settings),
@@ -2422,6 +2427,7 @@ def test_the_defaults_button_is_hidden_until_a_sidebar_setting_is_saved(pdf_rese
         {"answer_length": "50 to 100 words"},
         {"answer_template": "Study notes"},
         {"grounding": "Strictly grounded"},
+        {"pre_prompt": "List the terms in: {question}"},
         {"rate_profile": "Low limits"},
     ],
 )
@@ -2432,7 +2438,15 @@ def test_the_defaults_button_forgets_every_saved_sidebar_setting(saved, pdf_rese
 
     module.st.button.assert_called_once_with(module.SETTINGS_RESET_LABEL, key="answer_settings_reset")
     patched["forget"].assert_called_once_with(
-        ["evidence_k", "answer_max_sources", "answer_length", "answer_template", "grounding", "rate_profile"]
+        [
+            "evidence_k",
+            "answer_max_sources",
+            "answer_length",
+            "answer_template",
+            "grounding",
+            "pre_prompt",
+            "rate_profile",
+        ]
     )
     # The browser keeps a control's old value, so the controls get new keys and start again from the defaults.
     assert module.st.session_state.answer_settings_round == 1
@@ -2455,6 +2469,8 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_answer_template_1"
     draw_grounding(module)
     assert module.st.selectbox.call_args.kwargs["key"] == "setting_grounding_1"
+    draw_pre_prompt(module)
+    assert module.st.text_area.call_args.kwargs["key"] == "setting_pre_prompt_1"
 
 
 def test_the_defaults_button_changes_nothing_until_clicked(pdf_research_assistant_module):
@@ -2659,6 +2675,99 @@ def test_page_draws_the_grounding_mode_from_the_settings_it_built():
         call = next(c for c in module.st.selectbox.call_args_list if c.args[0] == "Grounding")
 
         assert call.args[1][call.kwargs["index"]] == grounding_modes.DEFAULT_MODE
+
+
+# Sidebar control for the before-answer prompt.
+
+
+def draw_pre_prompt(module, *, settings=None, typed=None, refused=None):
+    """Draw the before-answer prompt box, with the user typing new text or leaving it as it is."""
+    st = module.st
+    st.caption.reset_mock()
+    st.error.reset_mock()
+    st.text_area = mock.Mock(side_effect=lambda _label, value="", **_kwargs: value if typed is None else typed)
+    side_effect = ValueError(refused) if refused else None
+    with mock.patch.object(module.saved_settings, "save_value", side_effect=side_effect) as save_value:
+        module.render_pre_prompt(settings or _fake_settings())
+        return save_value
+
+
+def test_pre_prompt_box_starts_empty_when_paperqa_has_none(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_pre_prompt(module)
+
+    call = module.st.text_area.call_args
+    setting = module.settings_groups.get_setting("pre_prompt")
+    assert call.args == (setting.label,)
+    assert call.kwargs["value"] == ""
+    assert call.kwargs["max_chars"] == module.prompt_hooks.PRE_PROMPT_CHECK.limit
+    assert call.kwargs["placeholder"] == module.prompt_hooks.PRE_PROMPT_EXAMPLE
+    assert call.kwargs["help"] == setting.help
+    assert call.kwargs["key"] == "setting_pre_prompt_0"
+    save_value.assert_not_called()
+    assert module.st.caption.call_args_list == [
+        mock.call(module.PRE_PROMPT_OFF_NOTE),
+        mock.call(module.prompt_hooks.POST_PROMPT_NOTE),
+    ]
+
+
+def test_pre_prompt_box_starts_at_the_prompt_in_use_and_says_it_costs_a_call(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_pre_prompt(module, settings=_fake_settings(pre_prompt="Terms in {question}"))
+
+    assert module.st.text_area.call_args.kwargs["value"] == "Terms in {question}"
+    save_value.assert_not_called()
+    assert module.st.caption.call_args_list == [
+        mock.call(module.PRE_PROMPT_ON_NOTE),
+        mock.call(module.prompt_hooks.POST_PROMPT_NOTE),
+    ]
+
+
+def test_typing_a_pre_prompt_saves_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_pre_prompt(module, typed="Terms in {question}")
+
+    save_value.assert_called_once_with("pre_prompt", "Terms in {question}")
+    module.st.error.assert_not_called()
+    assert module.st.caption.call_args_list[0] == mock.call(module.PRE_PROMPT_ON_NOTE)
+
+
+def test_emptying_the_pre_prompt_box_saves_it_as_off(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_pre_prompt(module, settings=_fake_settings(pre_prompt="Terms in {question}"), typed="  ")
+
+    save_value.assert_called_once_with("pre_prompt", "  ")
+    assert module.st.caption.call_args_list[0] == mock.call(module.PRE_PROMPT_OFF_NOTE)
+
+
+def test_space_around_the_prompt_in_use_is_not_a_change(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    save_value = draw_pre_prompt(module, settings=_fake_settings(pre_prompt="Terms"), typed=" Terms\n")
+
+    save_value.assert_not_called()
+
+
+def test_a_pre_prompt_that_cannot_be_used_is_not_saved_and_says_why(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_pre_prompt(module, typed="Summarise {answer}", refused="Only {question} can be used.")
+
+    module.st.error.assert_called_once_with(f"{module.PRE_PROMPT_REFUSED_NOTE} Only {{question}} can be used.")
+    # The prompt in use is still described, since nothing changed.
+    assert module.st.caption.call_args_list[0] == mock.call(module.PRE_PROMPT_OFF_NOTE)
+
+
+def test_page_draws_the_pre_prompt_box_from_the_settings_it_built():
+    with imported_pdf_research_assistant() as module:
+        call = module.st.text_area.call_args
+
+        assert call.args == ("Before-answer prompt",)
+        assert call.kwargs["value"] == ""
 
 
 # Sidebar control for the rate-limit profile.

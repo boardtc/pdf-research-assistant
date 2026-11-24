@@ -87,7 +87,7 @@ Under the title, the page names the active index and the paper list in use. Pape
 
 The Streamlit sidebar puts settings in two groups:
 
-- **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, the answer template, the grounding mode, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
+- **Applies to your next question**: the search mode, how many sources an answer uses, how long the answer is, the answer template, the grounding mode, the before-answer prompt, and the local LLM setup. Change these whenever you like; the index is not rebuilt.
 - **Needs an index rebuild**: the PDF folder, embedding model, PDF reader, chunk size and overlap, whole-page pictures, and images and tables. Each is marked `Needs rebuild`, because changing any of them means every PDF has to be indexed again.
 
 The two groups are defined in `src/pdf_research_assistant/settings_groups.py`. The rebuild group matches the settings PaperQA uses to name an index.
@@ -146,6 +146,16 @@ The same passages are found and read whichever template you pick, so the cost an
 
 Grounding leaves the answer prompt, `prompts.qa`, to the answer template, so any mode works with any template. The same passages are found and read in every mode, so the cost and time hardly change; Strictly grounded may send fewer of them to the answer.
 
+**Before-answer prompt** is optional text that sets PaperQA's `prompts.pre`. When it is set, PaperQA sends it to the answer model, with `{question}` replaced by your question, before the answer is written, and adds the reply after the passages as "Extra background information" for the answer to use. For example:
+
+```text
+List the technical terms and abbreviations in this question and say in a few words what each means: {question}
+```
+
+It differs from the answer template: a template changes the request that writes the answer, while the before-answer prompt is a request of its own that runs first, on the question alone. So it costs one more call to the answer model, a little more money and a few seconds more per question, and the `Next question:` estimate counts it. It is sent with the same system prompt as the answer, so the grounding mode applies to it too. `{question}` is the only value it can fill in; write `{{` and `}}` for braces of your own. It can be up to 2,000 characters. Leave the box empty to turn it off. Because the reply is added to the passages, PaperQA writes an answer even when no passage was relevant, rather than saying it found nothing; with Strictly grounded the model is still told to reply "I cannot answer." when the passages do not answer the question.
+
+PaperQA also has an after-answer prompt, `prompts.post`, which the app does not offer. In the PaperQA version the app uses (2026.3.18) it is filled in with the question only, never the answer, and its reply replaces the answer and is then added a second time, so the answer that was written is lost.
+
 **Speed limits** sets how fast PaperQA may send requests to the model: the `rate_limit` (tokens a minute) and `request_limit` (requests a minute) in each model config, and `answer.max_concurrent_requests` (requests sent at once). Pick the profile that fits your OpenAI account's limits, which you can see at [platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits):
 
 | Profile | Tokens a minute | Requests a minute | At once (question) | At once (exhaustive) |
@@ -160,7 +170,7 @@ Grounding leaves the answer prompt, `prompts.qa`, to the answer template, so any
 
 A profile above your account's limits makes OpenAI turn requests away, and PaperQA waits and retries, which is slower. A profile below them makes long runs slower than they need to be. The profile does not change the cost of a question. With a local model there are no account limits, so only the number of requests sent at once matters.
 
-A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source, length, template and grounding settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
+A changed setting is saved straight away in `saved_settings.json` in the project folder, which Git ignores, and applies to the next question in the app and the CLI. `Go back to the default settings` removes every saved choice. Exhaustive search ignores the passage, source, length, template, grounding and before-answer prompt settings, because it checks every passage in scope and writes no combined answer, but it follows the speed limits.
 
 To try other values on one question without changing your usual settings, open `Change for the next question only` and switch on `Use different settings for my next question`. The passage, source, length, template and grounding controls appear, starting at your usual values. Whatever you change there is sent with your next Query-mode question only: nothing is saved, and the switch turns itself off once the answer arrives. Exhaustive search ignores these values too.
 
@@ -168,6 +178,7 @@ Just above the question box, `Next question:` gives a rough sense of what your n
 
 - how many passages are gathered: each one is read by the model, a batch at a time
 - the most sources in the answer and the answer length: these set how much the answer model reads and writes
+- the before-answer prompt: when one is set, it adds a call to the answer model before the answer
 - the answer model: its price per token comes from LiteLLM's price list
 - the speed limits profile: how many passages are read at once, and whether the token limit holds the question back
 - images and tables, from the index settings: when they are on, each passage is sent with the pictures from its pages, and these often cost more than the text. The number of pictures is a guess from a typical page, since counting them would mean reading the index. Whole-page pictures send one larger picture for every page, and the picture resolution makes each one larger or smaller. With `gpt-4o-mini` and images and tables on, a question usually shows `Higher cost` and takes a minute or two. With a lower speed limits profile it can take far longer, because PaperQA's token limit counts each picture by its size as text
@@ -186,7 +197,7 @@ Each assistant response also includes:
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
 - an `Open chunk` button beside each source passage, which opens the chunk PaperQA retrieved for it: the chunk text, whether the answer cited it, its relevance score, and any images or tables stored with it. Images and tables only appear when the index was built with the `Images and tables` setting turned on.
 - a relevance score under each source passage, out of 10. This is PaperQA's `Context.score`: the rating the summary model gave the passage for your question while summarising it, not a search similarity. Scores tend to bunch at 0 or 8 to 9, so use them as a rough guide to which chunk to open. Answers given before scores were kept, and passages PaperQA did not score, show none.
-- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, the answer template, the grounding mode, and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
+- a `Show settings used` expander listing the index the question searched and the settings that shaped the answer: the answer model, how many passages were gathered, the most sources the answer may cite, the answer length, the answer template, the grounding mode, the before-answer prompt (or `Off`), and the speed limits profile. The values are read from the settings the query actually ran with, so they stay correct for older answers after you change a setting. A value changed for that question only is marked `This question only`. Exhaustive-search answers do not have this list.
 
 Clipboard support for the `Copy answer` button is currently implemented for Windows only.
 

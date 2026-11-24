@@ -7,6 +7,8 @@ page load without reading the index:
 - PaperQA's agent makes a few calls to choose its tools (search, gather evidence, answer).
 - Gathering evidence sends `answer.evidence_k` passages to the summary model, at most
   `answer.max_concurrent_requests` at a time, and asks for `answer.evidence_summary_length` each.
+- With a before-answer prompt (`prompts.pre`), the answer model is first sent that prompt with the
+  question, and its reply goes on to the answer as background.
 - The answer model then writes `answer.answer_length` from up to `answer.answer_max_sources` summaries.
 - With images and tables on (`parsing.multimodal`), each passage goes to the summary model with the
   pictures from its pages, cut out or of the whole page (`reader_config["full_page"]`), drawn at
@@ -40,6 +42,8 @@ FALLBACK_WORDS = 200
 AGENT_CALLS = 4
 AGENT_INPUT_TOKENS = 2000
 AGENT_OUTPUT_TOKENS = 50
+# PaperQA sets no length for the reply to a before-answer prompt; a short list or explanation is assumed.
+PRE_OUTPUT_TOKENS = 200
 # Each passage is sent with its citation, such as "Smith 2020 pages 3-4: Smith, J. (2020) ...".
 CITATION_TOKENS = 30
 
@@ -92,6 +96,9 @@ LOCAL_COST_NOTE = (
     "embeddings, which cost very little."
 )
 LOCAL_TIME_NOTE = "The time is based on OpenAI's speed; a local model may be much slower."
+PRE_PROMPT_NOTE = (
+    "A before-answer prompt is set, so the answer model is called once more, before it writes the answer."
+)
 PICTURE_NOTE = "Pictures often cost more than the text and make each passage slower to read."
 
 
@@ -110,6 +117,8 @@ class Estimate:
     # Pictures sent with all the passages together, and whether each is a whole page.
     pictures: int = 0
     whole_page: bool = False
+    # Whether a before-answer prompt adds a call.
+    pre_prompt: bool = False
 
 
 def get_tokens_per_minute(settings: object) -> float | None:
@@ -217,6 +226,11 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     summary_output = count_words(answer.evidence_summary_length) * TOKENS_PER_WORD
     answer_input = sources * summary_output + count_prompt_tokens(prompts.qa, prompts.system)
     answer_output = answer_words * TOKENS_PER_WORD
+    pre_prompt = prompts.pre is not None
+    pre_input = count_prompt_tokens(prompts.system, prompts.pre or "")
+    pre_output = PRE_OUTPUT_TOKENS if pre_prompt else 0
+    # The reply is sent on with the passages.
+    answer_input += pre_output
 
     pictures_per_passage = count_pictures(settings)
     pictures = passages * pictures_per_passage
@@ -226,6 +240,7 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     calls = (
         (settings.summary_llm, passages * summary_input + picture_tokens, passages * summary_output),
         (settings.llm, answer_input, answer_output),
+        (settings.llm, pre_input if pre_prompt else 0, pre_output),
         (settings.agent.agent_llm, AGENT_CALLS * AGENT_INPUT_TOKENS, AGENT_CALLS * AGENT_OUTPUT_TOKENS),
     )
     input_tokens = sum(call[1] for call in calls)
@@ -238,6 +253,7 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     seconds = (
         batches * (call_seconds(summary_output) + pictures_per_passage * SECONDS_PER_PICTURE)
         + call_seconds(answer_output)
+        + (call_seconds(pre_output) if pre_prompt else 0)
         + AGENT_CALLS * call_seconds(AGENT_OUTPUT_TOKENS)
     )
     # Unless the token rate limit holds the question back for longer. It counts pictures by their size as
@@ -261,6 +277,7 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
         local=local,
         pictures=round(pictures),
         whole_page=bool(pictures) and settings.parsing.reader_config.get("full_page", False),
+        pre_prompt=pre_prompt,
     )
 
 
@@ -312,6 +329,8 @@ def describe_estimate(estimate: Estimate) -> list[str]:
         f"then writes an answer of up to about {estimate.answer_words} words from at most {estimate.sources} "
         f"of them, plus a few short calls to plan the search.",
     ]
+    if estimate.pre_prompt:
+        lines.append(PRE_PROMPT_NOTE)
     if estimate.whole_page:
         lines.append(
             "Images and tables are on with whole-page pictures, so passages are sent with a picture of each of "

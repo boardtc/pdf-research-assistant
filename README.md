@@ -233,6 +233,16 @@ On first use, there is no search index yet. The first query builds it, which can
 
 Each question runs in a fresh helper process so repeated questions in the same session start with clean query state.
 
+### Search previous answers
+
+Every answer to a Query-mode question, from the app or the CLI, is kept on disk so you can find it again after the chat is cleared or the app restarts. Open **Search previous answers** above the chat, type a few words under **Words to look for** and click **Search**. Up to 10 matching answers are listed, best match first, under the search box. Each shows its question, when it was asked, the index it used and its cost, then the answer with its **Show source passages** (including **Open chunk**) and **Show settings used**, just as it looked under the question. **Clear search results** puts them away.
+
+The search looks for whole words in the questions and answers (so `paper` does not find `papers`), ranks answers that contain more of the words, or rarer ones, first, and understands `AND`, `OR` and `NOT` in capitals. It makes no API calls, and it does not change the PDF index, the chat or the next question.
+
+Answers are kept in PaperQA's own index of past answers, the `answers` folder in `INDEX_DIR`, in the same form PaperQA's `pqa ask` uses, so `pqa search -i answers`, pointed at the same index folder, finds them too, and answers saved by `pqa ask` into that folder show up in the app (without a date, passages or settings, which only this app records). Answers from every index are kept together, and each says which index it came from. **Clear chat** does not remove them; delete the `answers` folder to start again. Exhaustive-search reports are kept in `exhaustive_runs/` instead and are not searched. If an answer cannot be kept, for example because the disk is full, it is still shown, with a line saying it could not be kept for searching.
+
+PaperQA names each kept answer's file after its text, so two answers with exactly the same text (such as `I cannot answer.`) share one file, and only the later one is found.
+
 ### CLI
 
 ```bash
@@ -242,7 +252,7 @@ pdf-research
 
 Type a question at the prompt to search your indexed PDFs and return a cited answer with page references. Type `quit` to exit.
 
-Like the Streamlit app, the CLI runs each question in a fresh helper process so repeated questions start with clean query state.
+Like the Streamlit app, the CLI runs each question in a fresh helper process so repeated questions start with clean query state. Each answer is kept for **Search previous answers** in the app.
 
 ### Exhaustive Search
 

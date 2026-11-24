@@ -118,6 +118,24 @@ def test_main_prints_answer_when_payload_is_successful(query_papers_module):
     assert print_mock.call_args_list == [mock.call("\nAnswer text")]
 
 
+def test_main_says_when_an_answer_could_not_be_kept_for_searching(query_papers_module):
+    result = SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps({"ok": True, "answer": "Answer text", "save_error": "OSError: disk full"}),
+        stderr="",
+    )
+
+    with mock.patch("builtins.input", side_effect=["question", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", return_value=result), \
+            mock.patch("builtins.print") as print_mock:
+        query_papers_module.main()
+
+    assert print_mock.call_args_list == [
+        mock.call("\nAnswer text"),
+        mock.call(f"\n{query_papers_module.ANSWER_NOT_SAVED_NOTE} OSError: disk full"),
+    ]
+
+
 def test_main_prints_answer_when_nonzero_returncode_still_includes_successful_json_payload(query_papers_module):
     result = SimpleNamespace(
         returncode=1,

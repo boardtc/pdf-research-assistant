@@ -373,6 +373,16 @@ def test_get_indexed_doc_count_deduplicates_same_document_seen_in_multiple_index
         assert bootstrap_module.get_indexed_doc_count(index_dir) == 1
 
 
+def test_get_indexed_doc_count_leaves_out_the_saved_answers_beside_the_indexes(bootstrap_module, workspace_tmp_path):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "one", {"paper.pdf": "OK"})
+    # PaperQA's index of past answers lists each answer by its id, not a PDF.
+    _write_files_zip(index_dir, "answers", {"0d58b702-3574-4986-a214-0d522b233a18": "hash"})
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_indexed_doc_count(index_dir) == 1
+
+
 def test_get_active_index_dir_returns_current_settings_shard_path(bootstrap_module, workspace_tmp_path):
     fake_settings = SimpleNamespace(
         agent=SimpleNamespace(index=SimpleNamespace(index_directory=workspace_tmp_path / "index")),

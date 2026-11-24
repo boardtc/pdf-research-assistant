@@ -7,6 +7,7 @@ from pathlib import Path
 from pdf_research_assistant import exhaustive_client
 
 PROGRESS_POLL_SECONDS = 2
+ANSWER_NOT_SAVED_NOTE = "This answer could not be kept for searching later:"
 
 
 def run_exhaustive_question(question: str) -> None:
@@ -80,6 +81,8 @@ def main() -> int:
             continue
         if payload.get("ok"):
             print("\n" + payload["answer"])
+            if payload.get("save_error"):
+                print(f"\n{ANSWER_NOT_SAVED_NOTE} {payload['save_error']}")
         else:
             print(f"\n{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
 

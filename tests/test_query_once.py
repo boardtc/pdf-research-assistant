@@ -11,6 +11,10 @@ from paperqa.docs import Docs
 from paperqa.types import Context, Doc, ParsedMedia, PQASession, Text
 
 
+def _stub_settings():
+    return SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent", index=SimpleNamespace(index_directory="index-dir")))
+
+
 @pytest.fixture
 def query_once_module():
     paperqa_module = ModuleType("paperqa")
@@ -44,7 +48,9 @@ def query_once_module():
     ):
         sys.modules.pop("pdf_research_assistant.query_once", None)
         module = importlib.import_module("pdf_research_assistant.query_once")
-        yield module
+        # Never write to a real index of past answers; tests that check saving look at this mock.
+        with mock.patch.object(module.saved_answers, "save_answer", return_value=None):
+            yield module
         sys.modules.pop("pdf_research_assistant.query_once", None)
 
 
@@ -259,7 +265,7 @@ def test_serialize_media_uses_defaults_when_details_are_missing(query_once_modul
 
 
 def test_run_query_payload_returns_success_payload_for_completed_query(query_once_module):
-    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    settings = _stub_settings()
     response = SimpleNamespace(
         session=SimpleNamespace(
             formatted_answer="Answer text",
@@ -318,8 +324,47 @@ def test_run_query_payload_returns_success_payload_for_completed_query(query_onc
     )
 
 
+def test_run_query_payload_keeps_the_answer_with_its_passages_and_settings_for_searching(query_once_module):
+    settings = _stub_settings()
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
+    query_once_module.build_settings = mock.Mock(return_value=settings)
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+    query_once_module.serialize_contexts = mock.Mock(return_value=[{"name": "Source"}])
+    recorded = {"index": "pqa_index_x", "values": []}
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=recorded),             mock.patch.object(query_once_module.saved_answers, "build_record", return_value={"r": 1}) as build_record:
+        result = query_once_module.run_query_payload("Q")
+
+    build_record.assert_called_once_with([{"name": "Source"}], recorded)
+    query_once_module.saved_answers.save_answer.assert_called_once_with("index-dir", response, {"r": 1})
+    assert "save_error" not in result
+
+
+def test_run_query_payload_still_answers_and_says_why_when_the_answer_could_not_be_kept(query_once_module):
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.5, contexts=[]))
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+    query_once_module.saved_answers.save_answer.return_value = "OSError: disk full"
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=None):
+        result = query_once_module.run_query_payload("Q")
+
+    assert result["ok"] is True
+    assert result["answer"] == "A"
+    assert result["save_error"] == "OSError: disk full"
+
+
+def test_run_query_payload_keeps_nothing_when_the_question_fails(query_once_module):
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.run_or_ensure = mock.Mock(side_effect=RuntimeError("boom"))
+
+    query_once_module.run_query_payload("Q")
+
+    query_once_module.saved_answers.save_answer.assert_not_called()
+
+
 def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(query_once_module):
-    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    settings = _stub_settings()
     response = SimpleNamespace(session=SimpleNamespace(formatted_answer="Answer text", cost=0.0, contexts=["ctx-1"]))
     query_once_module.build_settings = mock.Mock(return_value=settings)
     query_once_module.run_or_ensure = mock.Mock(return_value=response)
@@ -334,7 +379,7 @@ def test_run_query_payload_marks_nothing_as_cited_when_the_session_does_not_say(
 
 
 def test_run_query_payload_returns_error_payload_when_query_execution_raises(query_once_module):
-    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    settings = _stub_settings()
 
     # Mock settings construction so the function gets far enough to exercise the error handler.
     query_once_module.build_settings = mock.Mock(return_value=settings)
@@ -393,7 +438,7 @@ def test_main_passes_one_off_settings_given_after_the_question(query_once_module
 
 
 def test_run_query_payload_applies_one_off_settings_after_the_saved_ones_and_records_them(query_once_module):
-    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    settings = _stub_settings()
     response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
     query_once_module.run_or_ensure = mock.Mock(return_value=response)
     steps = mock.Mock()
@@ -419,7 +464,7 @@ def test_run_query_payload_applies_one_off_settings_after_the_saved_ones_and_rec
 
 
 def test_run_query_payload_records_no_one_off_settings_when_none_are_given(query_once_module):
-    settings = SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent"))
+    settings = _stub_settings()
     response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
     query_once_module.build_settings = mock.Mock(return_value=settings)
     query_once_module.run_or_ensure = mock.Mock(return_value=response)

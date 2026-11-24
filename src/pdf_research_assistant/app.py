@@ -6,6 +6,7 @@ import subprocess
 import sys
 import traceback
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -24,6 +25,7 @@ from pdf_research_assistant import (
     rate_profiles,
     rebuild_client,
     research_presets,
+    saved_answers,
     saved_settings,
     settings_groups,
 )
@@ -214,6 +216,32 @@ SCORE_NOTE = (
     "8 to 9, so treat them as a rough guide."
 )
 ANSWER_SETTINGS_TITLE = "Show settings used"
+ANSWER_SEARCH_TITLE = "Search previous answers"
+ANSWER_SEARCH_NOTE = (
+    "Every answer to a question asked in Query mode, here or from the command line, is kept in PaperQA's "
+    "index of past answers: the `answers` folder in the index folder. It stays after a restart, and Clear chat "
+    "does not remove it. Answers from every index are searched, and each says which index it came from. "
+    "Exhaustive-search reports are kept in their own folder and are not searched here. "
+    "Searching makes no API calls and does not change the PDF index or the next question."
+)
+ANSWER_SEARCH_LABEL = "Words to look for"
+ANSWER_SEARCH_HELP = (
+    "Looks for whole words in the questions and answers, so paper does not find papers. "
+    "An answer with more of the words, or rarer ones, comes first. "
+    "AND, OR and NOT in capitals work as they do in a search engine."
+)
+ANSWER_SEARCH_BUTTON = "Search"
+ANSWER_SEARCH_EMPTY_NOTE = "Type a word or two to look for."
+ANSWER_SEARCH_FAILED_NOTE = "The previous answers could not be searched:"
+ANSWER_SEARCH_UNREADABLE_NOTE = (
+    "PaperQA could not read this search. AND, OR and NOT in capitals need a word on each side; "
+    "type them in small letters to look for them as words."
+)
+ANSWER_SEARCH_CLEAR_LABEL = "Clear search results"
+ANSWER_NOT_SAVED_NOTE = "This answer could not be kept for searching later:"
+NO_ANSWER_DETAILS_NOTE = (
+    "Kept by PaperQA itself rather than this app, so there is no date, passage list or settings list to show."
+)
 ESTIMATE_LABEL = "**Next question:**"
 ESTIMATE_DETAILS_TITLE = "What this estimate is based on"
 EXHAUSTIVE_ESTIMATE_NOTE = (
@@ -403,8 +431,114 @@ def render_answer_settings(recorded: dict | None) -> None:
             st.markdown(settings_groups.describe_recorded_setting(item))
 
 
-def run_query_subprocess(question: str, one_off: dict | None = None) -> tuple[str, float, list[dict], dict | None]:
-    """Run one question in its own process, with any settings changed for this question only."""
+def describe_asked_at(asked_at: str | None) -> str | None:
+    """Return when a kept answer was asked, such as 24 Nov 2026, 14:05, or None if that is not known."""
+    if not asked_at:
+        return None
+    try:
+        when = datetime.fromisoformat(asked_at)
+    except (TypeError, ValueError):
+        return None
+    return when.strftime("%d %b %Y, %H:%M")
+
+
+def describe_found_answer(answer: dict, names: dict) -> str:
+    """Return the line under a found answer's question: when it was asked, on which index, and its cost."""
+    parts = []
+    asked = describe_asked_at(answer.get("asked_at"))
+    if asked:
+        parts.append(f"Asked {asked}")
+    index = (answer.get("settings") or {}).get("index")
+    if index:
+        parts.append(f"Index: {describe_index_name(index, names.get(index))}")
+    parts.append(f"Cost: ${answer.get('cost') or 0.0:.4f}")
+    return " · ".join(parts)
+
+
+def describe_search_result(result: dict) -> str:
+    """Return Markdown saying how many kept answers matched the search, out of how many searched."""
+    text = escape_markdown(result["text"])
+    searched = result["searched"]
+    kept = f"Searched {searched} kept answer{'' if searched == 1 else 's'}."
+    count = len(result["answers"])
+    if not count:
+        return f"No previous answer matches **{text}**. {kept}"
+    if count == 1:
+        note = f"1 previous answer matches **{text}**. {kept}"
+    else:
+        note = f"{count} previous answers match **{text}**, best match first. {kept}"
+    if count >= saved_answers.MAX_RESULTS:
+        note += f" Only the best {saved_answers.MAX_RESULTS} are shown."
+    return note
+
+
+def search_previous_answers(text: str) -> None:
+    """Search the kept answers, and keep what was found, or why nothing could be, for the page to show."""
+    text = text.strip()
+    if not text:
+        st.session_state.answer_search_found = {"note": ANSWER_SEARCH_EMPTY_NOTE}
+        return
+    try:
+        st.session_state.answer_search_found = saved_answers.search(bootstrap.INDEX_DIR, text)
+    except ValueError:
+        # PaperQA's search raises this when the words do not make a search it can read.
+        st.session_state.answer_search_found = {"note": ANSWER_SEARCH_UNREADABLE_NOTE}
+    except Exception as exc:
+        st.session_state.answer_search_found = {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def render_found_answer(answer: dict, names: dict) -> None:
+    """Show one kept answer as it was shown under the question, with its question and when it was asked."""
+    with st.container(border=True):
+        st.markdown(f"**{escape_markdown(answer['question'])}**")
+        st.caption(describe_found_answer(answer, names))
+        st.markdown(escape_dollars(answer["content"]))
+        render_source_passages(answer["contexts"], key=f"found_{answer['id']}")
+        render_answer_settings(answer["settings"])
+        if not answer.get("asked_at"):
+            st.caption(NO_ANSWER_DETAILS_NOTE)
+
+
+def render_search_results(found: dict) -> None:
+    """Show the answers the last search found, or why there are none, with a button to put them away."""
+    with st.container(border=True):
+        if "error" in found:
+            st.error(f"{ANSWER_SEARCH_FAILED_NOTE} {escape_markdown(found['error'])}")
+        elif "note" in found:
+            st.caption(found["note"])
+        else:
+            st.markdown(describe_search_result(found))
+            names = index_names.load(bootstrap.INDEX_DIR)
+            for answer in found["answers"]:
+                render_found_answer(answer, names)
+        if st.button(ANSWER_SEARCH_CLEAR_LABEL, key="answer_search_clear"):
+            st.session_state.answer_search_found = None
+            st.rerun()
+
+
+def render_answer_search() -> None:
+    """Show the search box for previous answers and, below it, what the last search found.
+
+    The results sit outside the box's expander, because each answer has expanders of its own.
+    """
+    with st.expander(ANSWER_SEARCH_TITLE):
+        st.caption(ANSWER_SEARCH_NOTE)
+        with st.form("answer_search_form", border=False):
+            text = st.text_input(ANSWER_SEARCH_LABEL, key="answer_search_text", help=ANSWER_SEARCH_HELP)
+            if st.form_submit_button(ANSWER_SEARCH_BUTTON):
+                search_previous_answers(text)
+    found = st.session_state.get("answer_search_found")
+    if found:
+        render_search_results(found)
+
+
+def run_query_subprocess(
+    question: str, one_off: dict | None = None
+) -> tuple[str, float, list[dict], dict | None, str | None]:
+    """Run one question in its own process, with any settings changed for this question only.
+
+    The last value says why the answer could not be kept for searching later, or is None when it was.
+    """
     helper = Path(__file__).with_name("query_once.py")
     command = [sys.executable, str(helper), question]
     if one_off:
@@ -425,7 +559,13 @@ def run_query_subprocess(question: str, one_off: dict | None = None) -> tuple[st
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Invalid query response.") from exc
     if not payload.get("ok"):
         raise RuntimeError(f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
-    return payload["answer"], payload["cost"], payload.get("contexts", []), payload.get("settings")
+    return (
+        payload["answer"],
+        payload["cost"],
+        payload.get("contexts", []),
+        payload.get("settings"),
+        payload.get("save_error"),
+    )
 
 
 @st.cache_resource
@@ -1573,6 +1713,8 @@ def render_history(history: list[dict]) -> None:
                 if "report_path" in item:
                     render_exhaustive_report(item["report_path"])
                 st.caption(f"Cost: ${item['cost']:.4f}")
+                if item.get("save_error"):
+                    st.caption(f"{ANSWER_NOT_SAVED_NOTE} {escape_markdown(item['save_error'])}")
 
 
 def render_estimate(search_mode: str, one_off: dict) -> None:
@@ -1605,23 +1747,25 @@ def describe_query_failure(exc: BaseException) -> str:
     )
 
 
-def answer_question(question: str, one_off: dict | None = None) -> tuple[str, float, list[dict], dict | None]:
+def answer_question(
+    question: str, one_off: dict | None = None
+) -> tuple[str, float, list[dict], dict | None, str | None]:
     """Run one query and show its answer, or its failure; return what to record in the history."""
     with st.spinner("Searching PDFs..."):
         try:
-            answer, cost, contexts, recorded_settings = run_query_subprocess(question, one_off)
+            answer, cost, contexts, recorded_settings, save_error = run_query_subprocess(question, one_off)
         except Exception as exc:
             answer = describe_query_failure(exc)
             st.error(answer)
             st.caption("Cost: $0.0000")
             st.code("".join(traceback.format_exception(exc)))
-            return answer, 0.0, [], None
+            return answer, 0.0, [], None, None
         st.markdown(answer)
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
         render_answer_settings(recorded_settings)
         st.caption(f"Cost: ${cost:.4f}")
-        return answer, cost, contexts, recorded_settings
+        return answer, cost, contexts, recorded_settings, save_error
 
 
 def submit_question(question: str, app_state: dict, one_off: dict | None = None) -> None:
@@ -1636,19 +1780,20 @@ def submit_question(question: str, app_state: dict, one_off: dict | None = None)
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        answer, cost, contexts, recorded_settings = answer_question(question, one_off)
+        answer, cost, contexts, recorded_settings, save_error = answer_question(question, one_off)
     st.session_state.one_off_round = st.session_state.get("one_off_round", 0) + 1
 
-    st.session_state.history.append(
-        {
-            "role": "assistant",
-            "id": len(st.session_state.history),
-            "content": answer,
-            "cost": cost,
-            "contexts": contexts,
-            "settings": recorded_settings,
-        }
-    )
+    item = {
+        "role": "assistant",
+        "id": len(st.session_state.history),
+        "content": answer,
+        "cost": cost,
+        "contexts": contexts,
+        "settings": recorded_settings,
+    }
+    if save_error:
+        item["save_error"] = save_error
+    st.session_state.history.append(item)
     st.session_state.total_cost += cost
     st.session_state.query_count += 1
     sync_persistent_state(app_state)
@@ -1704,6 +1849,7 @@ def main() -> None:
     app_state = get_persistent_app_state()
     init_session_state(app_state)
     search_mode, one_off = render_sidebar(app_state, settings, index_changes, busy)
+    render_answer_search()
     render_history(st.session_state.history)
 
     if not busy:

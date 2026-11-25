@@ -15,7 +15,7 @@ from paperqa import Docs
 from paperqa.agents.main import run_agent
 from paperqa.utils import run_or_ensure
 
-from pdf_research_assistant import saved_answers, settings_groups
+from pdf_research_assistant import rate_profiles, saved_answers, settings_groups
 from pdf_research_assistant.bootstrap import build_settings
 
 
@@ -94,6 +94,8 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
     try:
         settings = build_settings()
         applied = settings_groups.apply_usable(settings, one_off or {})
+        # Pictures make each request weigh a lot against the rate limit, so let requests wait their turn.
+        rate_profiles.allow_limiter_wait(settings)
         # PaperQA adds every chunk the question reads to this Docs object, text, images and tables included.
         docs = Docs()
         response = run_or_ensure(

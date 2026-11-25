@@ -49,7 +49,10 @@ def query_once_module():
         sys.modules.pop("pdf_research_assistant.query_once", None)
         module = importlib.import_module("pdf_research_assistant.query_once")
         # Never write to a real index of past answers; tests that check saving look at this mock.
-        with mock.patch.object(module.saved_answers, "save_answer", return_value=None):
+        # Never change the wait on the real shared rate limiter; the test that checks it looks at this mock.
+        with mock.patch.object(module.saved_answers, "save_answer", return_value=None), mock.patch.object(
+            module.rate_profiles, "allow_limiter_wait"
+        ):
             yield module
         sys.modules.pop("pdf_research_assistant.query_once", None)
 
@@ -498,6 +501,30 @@ def test_run_query_payload_applies_one_off_settings_after_the_saved_ones_and_rec
         mock.call.run(),
     ]
     steps.record.assert_called_once_with(settings, one_off=["evidence_k"])
+
+
+def test_run_query_payload_lets_requests_wait_for_the_rate_limiter_before_running_the_question(query_once_module):
+    settings = _stub_settings()
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+    steps = mock.Mock()
+    steps.build.return_value = settings
+    steps.apply_usable.return_value = []
+    query_once_module.build_settings = steps.build
+    query_once_module.run_agent = mock.Mock(side_effect=lambda *args, **kwargs: steps.run())
+
+    # The wait comes from the settings the question runs with, one-off values included.
+    with mock.patch.object(query_once_module.settings_groups, "apply_usable", steps.apply_usable), mock.patch.object(
+        query_once_module.rate_profiles, "allow_limiter_wait", steps.allow_wait
+    ):
+        query_once_module.run_query_payload("Q", {"evidence_k": 3})
+
+    assert steps.mock_calls[:4] == [
+        mock.call.build(),
+        mock.call.apply_usable(settings, {"evidence_k": 3}),
+        mock.call.allow_wait(settings),
+        mock.call.run(),
+    ]
 
 
 def test_run_query_payload_records_no_one_off_settings_when_none_are_given(query_once_module):

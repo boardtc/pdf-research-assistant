@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import csv
 import html
+import io
 import json
 import logging
 import math
@@ -29,12 +30,19 @@ from pathlib import Path
 
 from paperqa import Docs, Settings
 from paperqa.core import llm_parse_json, map_fxn_summary
+from paperqa.types import ParsedMedia
+from PIL import Image
 
 from pdf_research_assistant import bootstrap, rate_profiles
 from pdf_research_assistant.estimate import (
+    BASE64_CHARACTERS_PER_BYTE,
     CHARACTERS_PER_TOKEN,
     LIMITER_TOKEN_FACTOR,
+    MAX_PICTURE_SIDE,
+    MAX_SHORT_SIDE,
     SECONDS_PER_CALL,
+    count_tiles,
+    get_picture_tokens,
     get_prices,
     get_tokens_per_minute,
 )
@@ -76,7 +84,12 @@ PROBLEM_STATUSES = {
 REPORT_NOTICE = (
     "This lists evidence, not a conclusion. It is more thorough than a normal query, but the model"
     " can still misjudge relevance, so \"no relevant evidence\" does not prove a paper has nothing."
-    " Scanned pages and figures are not searched. Check anything important against the PDF."
+    " {pictures} Check anything important against the PDF."
+)
+NO_PICTURES_NOTICE = "Scanned pages and figures are not searched, because the index was built without images and tables."
+PICTURES_NOTICE = (
+    "Each passage was sent with the pictures and tables from its pages, which the model may read less"
+    " reliably than text."
 )
 
 EVIDENCE_SUMMARY_LENGTH = "about 200 words"
@@ -131,6 +144,9 @@ QUOTE_END_PUNCTUATION = string.punctuation + "‘’“”…"
 
 # Output length is unknown before a run, so the estimate is a range. Typical is measured.
 OUTPUT_TOKENS_PER_CHUNK = {"low": 30, "typical": 160, "high": 300}
+# A saved picture whose size cannot be read is billed as the largest picture OpenAI keeps, so the
+# estimate errs high.
+UNKNOWN_PICTURE_PIXELS = (MAX_SHORT_SIDE, MAX_PICTURE_SIDE)
 
 TokenCounter = Callable[[str], int]
 
@@ -163,8 +179,14 @@ class PaperScope:
     status: str
     filehash: str | None = None
     chunk_count: int = 0
+    # The passages' text, plus the text of any tables sent with them.
     chunk_tokens: int = 0
     citation_tokens: int = 0
+    # Pictures sent with the passages, counted once for each passage they go with. The tiles set the
+    # billed tokens, which depend on the model; the rate limiter counts each picture as base64 text.
+    picture_count: int = 0
+    picture_tiles: int = 0
+    picture_limiter_tokens: int = 0
     detail: str = ""
 
 
@@ -215,14 +237,31 @@ def inspect_saved_paper(
         )
     if not docs.texts:
         return PaperScope(file_location, STATUS_UNREADABLE, filehash=filehash, detail="Saved paper has no chunks.")
+    # PaperQA's map_fxn_summary sends each passage's media once, whatever the run's settings.
+    media = [item for text in docs.texts for item in dict.fromkeys(text.media)]
+    pictures = [measure_picture(item) for item in media]
+    table_tokens = sum(count_tokens(item.text) for item in media if item.info.get("type") == "table" and item.text)
     return PaperScope(
         file_location,
         STATUS_LOADABLE,
         filehash=filehash,
         chunk_count=len(docs.texts),
-        chunk_tokens=sum(count_tokens(text.text) for text in docs.texts),
+        chunk_tokens=sum(count_tokens(text.text) for text in docs.texts) + table_tokens,
         citation_tokens=sum(count_tokens(f"{text.name}: {text.doc.formatted_citation}") for text in docs.texts),
+        picture_count=len(pictures),
+        picture_tiles=sum(tiles for tiles, _ in pictures),
+        picture_limiter_tokens=round(sum(limiter_tokens for _, limiter_tokens in pictures)),
     )
+
+
+def measure_picture(media: ParsedMedia) -> tuple[int, float]:
+    """Return the tiles OpenAI bills for a saved picture, and how many tokens the rate limiter counts for it."""
+    limiter_tokens = len(media.data) * BASE64_CHARACTERS_PER_BYTE / CHARACTERS_PER_TOKEN
+    try:
+        width, height = Image.open(io.BytesIO(media.data)).size
+    except Exception:
+        width, height = UNKNOWN_PICTURE_PIXELS
+    return count_tiles(width, height), limiter_tokens
 
 
 def build_scope(index_dir: Path, count_tokens: TokenCounter) -> list[PaperScope]:
@@ -267,7 +306,11 @@ def estimate_run(
     )
     user_prompt = settings.prompts.summary_json.format(citation="", text="", question=question)
     tokens_per_call = count_tokens(system_prompt) + count_tokens(user_prompt)
-    input_tokens = sum(paper.chunk_tokens + paper.citation_tokens for paper in papers) + chunk_count * tokens_per_call
+    text_tokens = sum(paper.chunk_tokens + paper.citation_tokens for paper in papers) + chunk_count * tokens_per_call
+    picture_count = sum(paper.picture_count for paper in papers)
+    base_tokens, tile_tokens = get_picture_tokens(settings.summary_llm)
+    picture_tokens = picture_count * base_tokens + sum(paper.picture_tiles for paper in papers) * tile_tokens
+    input_tokens = text_tokens + picture_tokens
 
     prices = get_prices(settings.summary_llm)
     cost_usd = None
@@ -282,11 +325,17 @@ def estimate_run(
     estimated_minutes = chunk_count * SECONDS_PER_CALL / settings.answer.max_concurrent_requests / 60
     tokens_per_minute = get_tokens_per_minute(settings)
     if tokens_per_minute:
-        limiter_tokens = input_tokens * LIMITER_TOKEN_FACTOR + chunk_count * OUTPUT_TOKENS_PER_CHUNK["typical"]
+        # The limiter counts pictures by their size as base64 text, not by the tokens they are billed at.
+        limiter_tokens = (
+            text_tokens * LIMITER_TOKEN_FACTOR
+            + sum(paper.picture_limiter_tokens for paper in papers)
+            + chunk_count * OUTPUT_TOKENS_PER_CHUNK["typical"]
+        )
         estimated_minutes = max(estimated_minutes, limiter_tokens / tokens_per_minute)
 
     return {
         "chunk_count": chunk_count,
+        "picture_count": picture_count,
         "input_tokens": input_tokens,
         "cost_usd": cost_usd,
         "estimated_minutes": estimated_minutes,
@@ -623,7 +672,8 @@ def render_report(summary: dict, titles: dict[str, str]) -> str:
         "",
         f"**Question:** {one_line(summary['question'])}",
         "",
-        f"Scored by `{summary['model']}`. {REPORT_NOTICE}",
+        f"Scored by `{summary['model']}`. "
+        + REPORT_NOTICE.format(pictures=PICTURES_NOTICE if summary.get("picture_count") else NO_PICTURES_NOTICE),
         "",
         *format_warnings(summary),
         *format_totals(summary),
@@ -685,10 +735,9 @@ async def run_exhaustive(
         return result
 
     started = time.monotonic()
+    scope = build_scope(active_index_dir, lambda _text: 0)
     # Papers run together so short papers still fill the request limit; the semaphore caps calls.
-    papers = await asyncio.gather(
-        *(process_paper(paper) for paper in build_scope(active_index_dir, lambda _text: 0))
-    )
+    papers = await asyncio.gather(*(process_paper(paper) for paper in scope))
 
     failed_chunks = sum(paper["chunks_failed"] for paper in papers)
     summary = {
@@ -698,6 +747,7 @@ async def run_exhaustive(
         "status_counts": dict(Counter(paper["status"] for paper in papers)),
         "tier_counts": dict(Counter(item["tier"] for paper in papers for item in paper["evidence"])),
         "possible_miss_count": sum(len(paper["possible_misses"]) for paper in papers),
+        "picture_count": sum(paper.picture_count for paper in scope),
         "failed_chunks": failed_chunks,
         "cost_usd": sum(paper["cost_usd"] for paper in papers),
         # A failed request can still be billed without its cost reaching us.

@@ -4536,15 +4536,10 @@ def test_describe_found_answer_gives_only_the_cost_when_nothing_else_is_known(pd
     assert pdf_research_assistant_module.describe_found_answer(answer, {}) == "Cost: $0.0000"
 
 
-def test_format_cost_says_when_a_real_cost_would_round_to_zero(pdf_research_assistant_module):
-    format_cost = pdf_research_assistant_module.format_cost
+def test_app_formats_costs_with_the_shared_helper_the_cli_uses(pdf_research_assistant_module):
+    from pdf_research_assistant import costs
 
-    assert format_cost(0.0123) == "$0.0123"
-    assert format_cost(0.00005) == "$0.0001"
-    # A local model's question: only the OpenAI embedding of the question is paid for.
-    assert format_cost(0.00000018) == "less than $0.0001"
-    assert format_cost(0.0) == "$0.0000"
-    assert format_cost(None) == "$0.0000"
+    assert pdf_research_assistant_module.format_cost is costs.format_cost
 
 
 def test_describe_found_answer_shows_a_tiny_cost_as_less_than_a_hundredth_of_a_cent(pdf_research_assistant_module):

@@ -365,10 +365,19 @@ def describe_media(media: dict) -> str:
     return label
 
 
+def media_image(media: dict):
+    """Return a chunk's image: its link, the picture kept with a saved answer, or the bytes carried inline."""
+    if media.get("url"):
+        return media["url"]
+    if media.get("picture"):
+        return saved_answers.load_picture(bootstrap.INDEX_DIR, media["picture"])
+    return base64.b64decode(media["image"], validate=True)
+
+
 def render_media_image(media: dict) -> None:
-    """Show a chunk's image from its link or its stored bytes, or say that it could not be shown."""
+    """Show a chunk's image, or say that it could not be shown."""
     try:
-        st.image(media.get("url") or base64.b64decode(media["image"], validate=True))
+        st.image(media_image(media))
     except Exception:
         st.caption(IMAGE_FAILED_NOTE)
 
@@ -379,7 +388,7 @@ def render_chunk_media(media_items: list[dict]) -> None:
         return
     for media in media_items:
         st.markdown(f"**{describe_media(media)}**")
-        if media.get("url") or media.get("image"):
+        if media.get("url") or media.get("picture") or media.get("image"):
             render_media_image(media)
         if media.get("text"):
             st.markdown(escape_dollars(media["text"]))

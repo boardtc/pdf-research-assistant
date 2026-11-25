@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -233,3 +236,128 @@ def test_search_skips_stored_files_that_are_not_answers(tmp_path):
         result = saved_answers.search(tmp_path, "a")
 
     assert [answer["id"] for answer in result["answers"]] == ["a"]
+
+
+PICTURE = b"\x89PNG picture bytes"
+PICTURE_TEXT = base64.b64encode(PICTURE).decode("ascii")
+PICTURE_NAME = hashlib.sha256(PICTURE).hexdigest()
+
+
+def _picture_record(*media_lists):
+    contexts = [{"name": f"Paper p{n}", "media": media} for n, media in enumerate(media_lists, start=1)]
+    return saved_answers.build_record(contexts, {"index": "pqa_index_x", "values": []}, "2026-11-24T14:05:00+00:00")
+
+
+def test_pictures_folder_is_inside_the_answers_folder(tmp_path):
+    assert saved_answers.pictures_folder(tmp_path) == tmp_path / "answers" / "pictures"
+
+
+def test_keep_pictures_stores_each_distinct_picture_once_and_names_it_in_the_record(tmp_path):
+    other = b"another page"
+    record = _picture_record(
+        [{"page": 1, "image": PICTURE_TEXT, "url": ""}, {"page": 2, "image": base64.b64encode(other).decode()}],
+        [{"page": 1, "image": PICTURE_TEXT}],
+    )
+
+    kept = saved_answers.keep_pictures(tmp_path, record)
+
+    folder = saved_answers.pictures_folder(tmp_path)
+    assert sorted(path.name for path in folder.iterdir()) == sorted([PICTURE_NAME, hashlib.sha256(other).hexdigest()])
+    assert (folder / PICTURE_NAME).read_bytes() == PICTURE
+    assert kept["contexts"][0]["media"][0] == {"page": 1, "url": "", "picture": PICTURE_NAME}
+    assert kept["contexts"][1]["media"][0] == {"page": 1, "picture": PICTURE_NAME}
+    assert kept["asked_at"] == record["asked_at"]
+    assert kept["settings"] == record["settings"]
+    # The record shown under the question keeps its pictures.
+    assert record["contexts"][0]["media"][0]["image"] == PICTURE_TEXT
+
+
+def test_keep_pictures_leaves_media_without_a_readable_picture_as_it_is(tmp_path):
+    media = [{"kind": "table", "text": "| a |", "image": ""}, {"url": "https://example.org/f.png"}, {"image": "not base64!"}]
+    record = _picture_record(media, [])
+    record["contexts"] += [{"name": "No media list"}, {"name": "Empty media list", "media": None}]
+
+    kept = saved_answers.keep_pictures(tmp_path, record)
+
+    assert kept["contexts"] == [
+        {"name": "Paper p1", "media": [{"kind": "table", "text": "| a |"}, {"url": "https://example.org/f.png"}, {"image": "not base64!"}]},
+        {"name": "Paper p2", "media": []},
+        {"name": "No media list"},
+        {"name": "Empty media list", "media": []},
+    ]
+    assert not saved_answers.pictures_folder(tmp_path).exists()
+
+
+def test_keep_pictures_does_not_write_a_picture_that_is_already_kept(tmp_path):
+    folder = saved_answers.pictures_folder(tmp_path)
+    folder.mkdir(parents=True)
+    (folder / PICTURE_NAME).write_bytes(PICTURE)
+
+    with mock.patch.object(saved_answers.os, "replace") as replace:
+        saved_answers.keep_pictures(tmp_path, _picture_record([{"image": PICTURE_TEXT}]))
+
+    replace.assert_not_called()
+    assert [path.name for path in folder.iterdir()] == [PICTURE_NAME]
+
+
+def test_keep_pictures_accepts_a_picture_another_save_kept_at_the_same_moment(tmp_path):
+    folder = saved_answers.pictures_folder(tmp_path)
+
+    def other_save_won(_source, target):
+        # Another process kept the same picture first and Windows refuses to replace it while it is open.
+        Path(target).write_bytes(PICTURE)
+        raise PermissionError("Access is denied")
+
+    with mock.patch.object(saved_answers.os, "replace", side_effect=other_save_won):
+        kept = saved_answers.keep_pictures(tmp_path, _picture_record([{"image": PICTURE_TEXT}]))
+
+    assert kept["contexts"][0]["media"] == [{"picture": PICTURE_NAME}]
+    assert [path.name for path in folder.iterdir()] == [PICTURE_NAME]
+
+
+def test_keep_pictures_raises_when_a_picture_cannot_be_written_and_leaves_no_part_file(tmp_path):
+    with mock.patch.object(saved_answers.os, "replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            saved_answers.keep_pictures(tmp_path, _picture_record([{"image": PICTURE_TEXT}]))
+
+    assert list(saved_answers.pictures_folder(tmp_path).iterdir()) == []
+
+
+def test_a_saved_answer_keeps_its_pictures_beside_it_and_is_found_with_their_names(tmp_path):
+    _save(tmp_path, _response(), _picture_record([{"page": 1, "image": PICTURE_TEXT}]))
+
+    found = saved_answers.search(tmp_path, "sky")
+
+    assert found["answers"][0]["contexts"] == [{"name": "Paper p1", "media": [{"page": 1, "picture": PICTURE_NAME}]}]
+    assert saved_answers.load_picture(tmp_path, PICTURE_NAME) == PICTURE
+    stored = next((saved_answers.answers_folder(tmp_path) / "docs").iterdir()).read_text(encoding="utf-8")
+    assert PICTURE_TEXT not in stored
+
+
+def test_an_answer_whose_picture_cannot_be_kept_is_not_saved(tmp_path):
+    with mock.patch.object(saved_answers.os, "replace", side_effect=OSError("disk full")):
+        error = saved_answers.save_answer(tmp_path, _response(), _picture_record([{"image": PICTURE_TEXT}]))
+
+    assert error == "OSError: disk full"
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 0
+
+
+def test_an_answer_saved_with_its_pictures_inline_still_comes_back_with_them(tmp_path):
+    # Answers saved before pictures were kept apart carry each picture in the record itself.
+    record = _picture_record([{"page": 1, "image": PICTURE_TEXT}])
+
+    with mock.patch.object(saved_answers, "keep_pictures", side_effect=lambda _directory, kept: kept):
+        _save(tmp_path, _response(), record)
+
+    assert saved_answers.search(tmp_path, "sky")["answers"][0]["contexts"][0]["media"] == [{"page": 1, "image": PICTURE_TEXT}]
+
+
+@pytest.mark.parametrize("name", ["../secret", "a" * 63, "A" * 64, "", None])
+def test_load_picture_refuses_a_name_that_is_not_a_kept_picture(tmp_path, name):
+    with pytest.raises(ValueError):
+        saved_answers.load_picture(tmp_path, name)
+
+
+def test_load_picture_raises_when_the_picture_is_gone(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        saved_answers.load_picture(tmp_path, PICTURE_NAME)

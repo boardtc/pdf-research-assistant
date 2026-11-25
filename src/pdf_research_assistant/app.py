@@ -557,6 +557,14 @@ def render_answer_search() -> None:
         render_search_results(found)
 
 
+class QueryFailedError(RuntimeError):
+    """A question that failed, with what it spent before failing."""
+
+    def __init__(self, message: str, cost: float = 0.0):
+        super().__init__(message)
+        self.cost = cost
+
+
 def run_query_subprocess(
     question: str, one_off: dict | None = None
 ) -> tuple[str, float, list[dict], dict | None, str | None]:
@@ -583,7 +591,10 @@ def run_query_subprocess(
     except json.JSONDecodeError as exc:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Invalid query response.") from exc
     if not payload.get("ok"):
-        raise RuntimeError(f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
+        raise QueryFailedError(
+            f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}",
+            cost=payload.get("cost") or 0.0,
+        )
     return (
         payload["answer"],
         payload["cost"],
@@ -1791,10 +1802,12 @@ def answer_question(
             answer, cost, contexts, recorded_settings, save_error = run_query_subprocess(question, one_off)
         except Exception as exc:
             answer = describe_query_failure(exc)
+            # Only a failure reported by the question's own process knows what was spent before it.
+            cost = getattr(exc, "cost", 0.0)
             st.error(answer)
-            st.caption("Cost: $0.0000")
+            st.caption(f"Cost: {format_cost(cost)}")
             st.code("".join(traceback.format_exception(exc)))
-            return answer, 0.0, [], None, None
+            return answer, cost, [], None, None
         st.markdown(answer)
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")

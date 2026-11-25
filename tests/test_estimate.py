@@ -178,9 +178,7 @@ def test_sources_cannot_exceed_passages():
 def test_passages_go_out_in_batches_of_the_requests_sent_at_once():
     settings = _paperqa_settings(profile=None, evidence_k=10, max_concurrent_requests=5)
     summary_seconds = estimate.call_seconds(estimate.count_words("about 100 words") * estimate.TOKENS_PER_WORD)
-    rest = estimate.call_seconds(200 * estimate.TOKENS_PER_WORD) + estimate.AGENT_CALLS * estimate.call_seconds(
-        estimate.AGENT_OUTPUT_TOKENS
-    )
+    rest = estimate.call_seconds(200 * estimate.TOKENS_PER_WORD) + estimate.AGENT_CALLS * estimate.AGENT_STEP_SECONDS
 
     # Without a profile there is no token rate limit, so only the start-up and the calls set the time. The
     # model gathers evidence a few times, and each time the passages go out in two batches.
@@ -195,7 +193,7 @@ def test_the_token_rate_limit_can_set_the_time():
     result = estimate.estimate_question(settings)
     limited = (result.input_tokens * estimate.LIMITER_TOKEN_FACTOR + result.output_tokens) / 5000 * 60
 
-    # Starting the question and opening the index come before any call the limit can hold back.
+    # Starting the question comes before any call the limit can hold back.
     assert result.seconds == pytest.approx(estimate.START_SECONDS + limited, rel=0.001)
 
 
@@ -208,7 +206,19 @@ def test_the_calls_set_the_time_when_the_token_rate_limit_is_not_reached():
     assert estimate.estimate_question(limited).seconds == pytest.approx(estimate.estimate_question(unlimited).seconds)
 
 
-def test_a_question_counts_the_time_to_start_and_open_the_index():
+def test_the_start_up_is_the_measured_time_to_start_a_question():
+    # Starting a question's process, its imports, the settings and the scan of the PDF folder, measured on the
+    # real library: 9 to 23 seconds after a first cold run, with a median of about 16.
+    assert estimate.START_SECONDS == 16
+
+
+def test_an_agent_step_takes_longer_than_a_short_reply_alone():
+    # Each step's call is sent the conversation so far; the search it runs was measured at under a tenth of a
+    # second, so nearly all of the step is the call.
+    assert estimate.AGENT_STEP_SECONDS > estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS)
+
+
+def test_a_question_counts_the_time_to_start():
     with mock.patch.object(estimate, "START_SECONDS", 0):
         without_start = estimate.estimate_question(_paperqa_settings()).seconds
 
@@ -566,7 +576,7 @@ def test_fixed_search_steps_make_two_short_calls_instead_of_the_agent_s_planning
     summary_seconds = estimate.call_seconds(estimate.count_words("about 100 words") * estimate.TOKENS_PER_WORD)
     saved_reads = (estimate.EVIDENCE_ROUNDS - 1) * summary_seconds
     assert result.seconds == pytest.approx(
-        usual.seconds - saved_calls * estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS) - saved_reads
+        usual.seconds - saved_calls * estimate.AGENT_STEP_SECONDS - saved_reads
     )
     assert result.input_tokens == usual.input_tokens - (
         estimate.AGENT_CALLS * estimate.AGENT_INPUT_TOKENS - estimate.FIXED_STEPS_INPUT_TOKENS

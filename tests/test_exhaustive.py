@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import io
 import json
 import math
 import os
@@ -17,7 +18,8 @@ import pytest
 from lmi import LiteLLMModel, LLMResult
 from lmi.rate_limiter import GLOBAL_LIMITER
 from paperqa import Docs
-from paperqa.types import Doc, Text
+from paperqa.types import Doc, ParsedMedia, Text
+from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SHARD_NAME = "pqa_index_test"
@@ -76,6 +78,27 @@ def _make_docs(name: str, chunks: list[str]) -> Docs:
     docs.docs[name] = doc
     docs.docnames.add(name)
     docs.texts = [Text(text=chunk, name=f"{name} pages {i}", doc=doc) for i, chunk in enumerate(chunks, start=1)]
+    return docs
+
+
+def _png(width: int, height: int) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _picture(width: int, height: int, index: int = 0) -> ParsedMedia:
+    return ParsedMedia(index=index, data=_png(width, height), info={"type": "picture"})
+
+
+def _limiter_tokens(media: ParsedMedia) -> float:
+    return len(media.data) * 4 / 3 / 4
+
+
+def _make_picture_docs(name: str, media_per_chunk: list[list[ParsedMedia]]) -> Docs:
+    docs = _make_docs(name, ["text"] * len(media_per_chunk))
+    for text, media in zip(docs.texts, media_per_chunk):
+        text.media = media
     return docs
 
 
@@ -261,6 +284,41 @@ def test_build_scope_counts_chunks_and_tokens_for_loadable_papers(exhaustive_mod
     expected_citations = len("good pages 1: good citation") + len("good pages 2: good citation")
     assert (paper.chunk_count, paper.chunk_tokens, paper.citation_tokens) == (2, 9, expected_citations)
     assert paper.filehash == "hash-good"
+    assert (paper.picture_count, paper.picture_tiles, paper.picture_limiter_tokens) == (0, 0, 0)
+
+
+def test_build_scope_counts_the_pictures_and_table_text_sent_with_each_passage(
+    exhaustive_module, shard_dir, manifest_path
+):
+    figure = _picture(1000, 500)
+    table = ParsedMedia(index=1, data=_png(600, 850), text="| a |", info={"type": "table"})
+    # PaperQA sends a passage's media once each, but a picture shared by two passages goes with both.
+    docs = _make_picture_docs("good", [[figure, _picture(1000, 500)], [figure, table]])
+    _write_manifest(manifest_path, ["good.pdf"])
+    _write_files_zip(shard_dir, {"good.pdf": "hash-good"})
+    _write_saved_docs(shard_dir, "hash-good", docs)
+
+    (paper,) = exhaustive_module.build_scope(shard_dir, _count_chars)
+
+    assert paper.picture_count == 3
+    # 1000 x 500 is two 512-pixel tiles across and one down; 600 x 850 is two by two.
+    assert paper.picture_tiles == 2 + 2 + 4
+    assert paper.picture_limiter_tokens == round(2 * _limiter_tokens(figure) + _limiter_tokens(table))
+    # PaperQA adds a table's text to the passage's text.
+    assert paper.chunk_tokens == 2 * len("text") + len("| a |")
+
+
+def test_build_scope_assumes_a_large_picture_when_its_size_cannot_be_read(exhaustive_module, shard_dir, manifest_path):
+    broken = ParsedMedia(index=0, data=b"not a picture", info={"type": "picture"})
+    _write_manifest(manifest_path, ["good.pdf"])
+    _write_files_zip(shard_dir, {"good.pdf": "hash-good"})
+    _write_saved_docs(shard_dir, "hash-good", _make_picture_docs("good", [[broken]]))
+
+    (paper,) = exhaustive_module.build_scope(shard_dir, _count_chars)
+
+    # The largest picture OpenAI keeps, 768 x 2048 pixels, is two tiles by four.
+    assert (paper.picture_count, paper.picture_tiles) == (1, 8)
+    assert paper.picture_limiter_tokens == round(_limiter_tokens(broken))
 
 
 def test_build_scope_matches_windows_index_keys_to_forward_slash_manifest_paths(exhaustive_module, shard_dir, manifest_path):
@@ -337,6 +395,38 @@ def test_estimate_run_counts_only_loadable_papers(exhaustive_module):
     fixed_tokens = len("system about 100 words") + len("||q")
     assert estimate["chunk_count"] == 2
     assert estimate["input_tokens"] == 110 + 2 * fixed_tokens
+
+
+@pytest.mark.parametrize(
+    ("model", "base", "tile"),
+    [("gpt-4o-mini", 2833, 5667), ("openai/gpt-4o-mini-2024-07-18", 2833, 5667), ("gpt-4o", 85, 170)],
+)
+def test_estimate_run_bills_pictures_by_their_tiles_for_the_model(exhaustive_module, model, base, tile):
+    paper = _paper(exhaustive_module, picture_count=3, picture_tiles=8, picture_limiter_tokens=1000)
+
+    estimate = exhaustive_module.estimate_run([paper], "q", _settings(model=model), _count_chars)
+
+    fixed_tokens = len("system about 100 words") + len("||q")
+    assert estimate["input_tokens"] == 110 + 2 * fixed_tokens + 3 * base + 8 * tile
+    assert estimate["picture_count"] == 3
+
+
+def test_estimate_run_reports_no_pictures_for_a_text_only_index(exhaustive_module):
+    estimate = exhaustive_module.estimate_run([_paper(exhaustive_module)], "q", _settings(), _count_chars)
+
+    assert estimate["picture_count"] == 0
+
+
+def test_estimate_run_weighs_pictures_against_the_rate_limit_by_their_size_as_text(exhaustive_module):
+    settings = _settings(rate_limit={"gpt-4o-mini": "100 per 1 minute"})
+    paper = _paper(exhaustive_module, picture_count=3, picture_tiles=8, picture_limiter_tokens=400_000)
+
+    estimate = exhaustive_module.estimate_run([paper], "q", settings, _count_chars)
+
+    text_tokens = 110 + 2 * (len("system about 100 words") + len("||q"))
+    typical_output = exhaustive_module.OUTPUT_TOKENS_PER_CHUNK["typical"]
+    limiter_tokens = text_tokens * exhaustive_module.LIMITER_TOKEN_FACTOR + 400_000 + 2 * typical_output
+    assert estimate["estimated_minutes"] == pytest.approx(limiter_tokens / 100)
 
 
 def test_estimate_run_prices_low_typical_and_high_output(exhaustive_module):
@@ -783,6 +873,34 @@ def test_render_report_says_it_is_an_evidence_listing_that_can_misjudge(exhausti
 
     assert "not a conclusion" in report
     assert "can still misjudge relevance" in report
+
+
+def test_render_report_says_figures_are_not_searched_on_a_text_only_index(exhaustive_module):
+    report = exhaustive_module.render_report(_summary([], picture_count=0), {})
+
+    assert "Scanned pages and figures are not searched" in report
+    assert "sent with the pictures" not in report
+
+
+def test_render_report_says_passages_were_sent_with_their_pictures(exhaustive_module):
+    report = exhaustive_module.render_report(_summary([], picture_count=2), {})
+
+    assert "sent with the pictures and tables from its pages" in report
+    assert "not searched" not in report
+    assert "Check anything important against the PDF." in report
+
+
+def test_run_counts_the_pictures_sent_and_says_so_in_the_report(
+    exhaustive_module, shard_dir, manifest_path, output_dir
+):
+    _write_manifest(manifest_path, ["a.pdf"])
+    _write_files_zip(shard_dir, {"a.pdf": "hash-a"})
+    _write_saved_docs(shard_dir, "hash-a", _make_picture_docs("a", [[_picture(20, 10)], []]))
+
+    summary = _run(exhaustive_module, shard_dir, output_dir, FakeSummaryLLM())
+
+    assert summary["picture_count"] == 1
+    assert "sent with the pictures" in (output_dir / "report.md").read_text(encoding="utf-8")
 
 
 def test_render_report_shows_question_cost_and_runtime(exhaustive_module):

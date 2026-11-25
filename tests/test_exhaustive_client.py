@@ -126,6 +126,17 @@ def test_describe_plan_shows_counts_cost_and_time(client):
     assert "Estimated time: about 4 minutes" in text
 
 
+def test_describe_plan_says_how_many_pictures_go_with_the_passages(client):
+    text = "\n".join(client.describe_plan(_plan(picture_count=1234)))
+
+    assert "Pictures sent with the passages: 1234" in text
+
+
+@pytest.mark.parametrize("plan", [_plan(picture_count=0), _plan()])
+def test_describe_plan_leaves_out_pictures_for_a_text_only_index(client, plan):
+    assert not any("Pictures" in line for line in client.describe_plan(plan))
+
+
 def test_describe_plan_shows_small_costs_instead_of_rounding_to_zero(client):
     plan = _plan(cost_usd={"low": 0.0021, "typical": 0.0028, "high": 0.0035})
 

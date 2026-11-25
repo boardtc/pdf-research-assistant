@@ -263,7 +263,11 @@ LOCAL_LLM_GUIDE = (
     "- Local models are usually slower than OpenAI, and small ones may give weaker answers or lose track "
     "of PaperQA's instructions.\n"
     "- **Speed limits** then only sets how many requests are sent at once; OpenAI's account limits "
-    "no longer apply."
+    "no longer apply.\n\n"
+    "**Tip for small models**\n\n"
+    "Small models often lose their way when they plan their own searches: the answer says there are no "
+    "papers, or no answer is written. If that happens, choose the **Fast** quality preset, which runs "
+    "PaperQA's steps in a fixed order, and **Low limits**, which sends fewer requests at once."
 )
 LOCAL_LLM_PROVIDER_HELP = (
     "The program that runs the model on your computer. Pick **Ollama** if you use Ollama. Pick "

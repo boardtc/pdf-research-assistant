@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from pdf_research_assistant import exhaustive_client
+from pdf_research_assistant.costs import format_cost
 
 PROGRESS_POLL_SECONDS = 2
 ANSWER_NOT_SAVED_NOTE = "This answer could not be kept for searching later:"
@@ -49,9 +50,13 @@ def run_exhaustive_question(question: str) -> None:
 def main() -> int:
     """Run the interactive CLI loop that forwards questions to the one-shot query helper."""
     exhaustive_mode = "--exhaustive" in sys.argv[1:]
+    answered = 0
+    total_cost = 0.0
     while True:
         q = input("\nQuestion (or quit): ").strip()
         if q.lower() == "quit":
+            if answered:
+                print(f"\nQuestions answered this session: {answered}. Total cost: {format_cost(total_cost)}")
             return 0
         if exhaustive_mode:
             run_exhaustive_question(q)
@@ -80,7 +85,11 @@ def main() -> int:
                 print(result.stdout.strip())
             continue
         if payload.get("ok"):
+            cost = payload.get("cost") or 0.0
+            answered += 1
+            total_cost += cost
             print("\n" + payload["answer"])
+            print(f"Cost: {format_cost(cost)}")
             if payload.get("save_error"):
                 print(f"\n{ANSWER_NOT_SAVED_NOTE} {payload['save_error']}")
         else:

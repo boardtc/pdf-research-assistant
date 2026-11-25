@@ -93,6 +93,7 @@ The modules in `src/pdf_research_assistant/`:
 | `prompt_hooks.py` | The before-answer prompt |
 | `rate_profiles.py` | The speed limits profiles, and how long a request may wait for the rate limiter |
 | `estimate.py` | The `Next question:` cost and time estimate |
+| `costs.py` | Shows a cost in dollars the same way in the app and the CLI |
 | `research_presets.py` | Research presets, and their import and export |
 | `local_llm.py` | The local LLM settings in `local_llm.json` |
 | `index_names.py` | Friendly names for index folders |
@@ -342,6 +343,21 @@ pdf-research
 ```
 
 Type a question at the prompt to search your indexed PDFs and return a cited answer with page references. Type `quit` to exit.
+
+After each answer the CLI prints what the question cost, in the same format as the app: `Cost: $0.0012`, or `Cost: less than $0.0001` when a local model answered and only the embeddings were paid for. When you type `quit`, it prints how many questions were answered and their total cost:
+
+```text
+Question (or quit): What do the papers say about sleep and memory?
+
+Sleep supports memory consolidation (Walker 2017 pages 3-5) ...
+Cost: $0.0124
+
+Question (or quit): quit
+
+Questions answered this session: 1. Total cost: $0.0124
+```
+
+A question that fails prints its error instead and is left out of the total. If the answer could not be kept for searching later, a note under the cost line says why. With `--exhaustive`, each run reports its own actual cost instead, as described under [Exhaustive Search](#exhaustive-search), and there is no session total.
 
 The CLI uses the settings saved in the sidebar and the local LLM setup. Like the Streamlit app, it runs each question in a fresh helper process so repeated questions start with clean query state. Each answer is kept for **Search previous answers** in the app.
 

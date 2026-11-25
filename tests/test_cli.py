@@ -115,7 +115,11 @@ def test_main_prints_answer_when_payload_is_successful(query_papers_module):
                 exit_code = query_papers_module.main()
 
     assert exit_code == 0
-    assert print_mock.call_args_list == [mock.call("\nAnswer text")]
+    assert print_mock.call_args_list == [
+        mock.call("\nAnswer text"),
+        mock.call("Cost: $0.0000"),
+        mock.call("\nQuestions answered this session: 1. Total cost: $0.0000"),
+    ]
 
 
 def test_main_says_when_an_answer_could_not_be_kept_for_searching(query_papers_module):
@@ -132,7 +136,9 @@ def test_main_says_when_an_answer_could_not_be_kept_for_searching(query_papers_m
 
     assert print_mock.call_args_list == [
         mock.call("\nAnswer text"),
+        mock.call("Cost: $0.0000"),
         mock.call(f"\n{query_papers_module.ANSWER_NOT_SAVED_NOTE} OSError: disk full"),
+        mock.call("\nQuestions answered this session: 1. Total cost: $0.0000"),
     ]
 
 
@@ -152,7 +158,11 @@ def test_main_prints_answer_when_nonzero_returncode_still_includes_successful_js
                 exit_code = query_papers_module.main()
 
     assert exit_code == 0
-    assert print_mock.call_args_list == [mock.call("\nRecovered answer")]
+    assert print_mock.call_args_list == [
+        mock.call("\nRecovered answer"),
+        mock.call("Cost: $0.0000"),
+        mock.call("\nQuestions answered this session: 1. Total cost: $0.0000"),
+    ]
 
 
 def test_main_prints_payload_error_type_and_message_when_payload_is_not_ok(query_papers_module):
@@ -191,6 +201,59 @@ def test_main_defaults_error_type_and_message_when_error_payload_fields_are_miss
 
     assert exit_code == 0
     assert print_mock.call_args_list == [mock.call("\nError: Unknown error")]
+
+
+def _ok_result(answer, cost):
+    return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": answer, "cost": cost}), stderr="")
+
+
+def test_main_prints_each_answers_cost_on_its_own_line(query_papers_module):
+    with mock.patch("builtins.input", side_effect=["question", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", return_value=_ok_result("Answer text", 0.0012)), \
+            mock.patch("builtins.print") as print_mock:
+        query_papers_module.main()
+
+    assert print_mock.call_args_list[:2] == [mock.call("\nAnswer text"), mock.call("Cost: $0.0012")]
+
+
+def test_main_says_when_an_answers_cost_would_round_to_zero(query_papers_module):
+    with mock.patch("builtins.input", side_effect=["question", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", return_value=_ok_result("Answer text", 0.00000018)), \
+            mock.patch("builtins.print") as print_mock:
+        query_papers_module.main()
+
+    assert mock.call("Cost: less than $0.0001") in print_mock.call_args_list
+
+
+def test_main_prints_the_question_count_and_total_cost_on_quit(query_papers_module):
+    results = [_ok_result("First", 0.0012), _ok_result("Second", 0.0030)]
+
+    with mock.patch("builtins.input", side_effect=["one", "two", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", side_effect=results), \
+            mock.patch("builtins.print") as print_mock:
+        exit_code = query_papers_module.main()
+
+    assert exit_code == 0
+    assert print_mock.call_args_list[-1] == mock.call("\nQuestions answered this session: 2. Total cost: $0.0042")
+
+
+def test_main_leaves_failed_questions_out_of_the_session_total(query_papers_module):
+    failed = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": False, "error": "boom"}), stderr="")
+
+    with mock.patch("builtins.input", side_effect=["one", "two", "quit"]), \
+            mock.patch.object(query_papers_module.subprocess, "run", side_effect=[_ok_result("First", 0.0012), failed]), \
+            mock.patch("builtins.print") as print_mock:
+        query_papers_module.main()
+
+    assert print_mock.call_args_list[-1] == mock.call("\nQuestions answered this session: 1. Total cost: $0.0012")
+
+
+def test_main_prints_no_session_total_when_no_question_was_answered(query_papers_module):
+    with mock.patch("builtins.input", return_value="quit"), \
+            mock.patch("builtins.print") as print_mock:
+        query_papers_module.main()
+
+    print_mock.assert_not_called()
 
 
 def _plan(**overrides):
@@ -313,3 +376,9 @@ def test_exhaustive_says_so_when_the_run_crashes(query_papers_module):
     outcome = _run_exhaustive_cli(query_papers_module, ["q", "yes", "quit"], summary=None)
 
     assert "It crashed." in outcome.output
+
+
+def test_exhaustive_prints_no_session_total_on_quit(query_papers_module):
+    outcome = _run_exhaustive_cli(query_papers_module, ["q", "YES", "quit"], summary=_finished_summary())
+
+    assert "this session" not in outcome.output

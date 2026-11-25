@@ -53,6 +53,11 @@ def describe_plan(plan: dict) -> list[str]:
     lines = [f"Papers in scope: {plan['paper_count']}", f"Ready to search: {ready} ({plan['chunk_count']} chunks)"]
     if ready < plan["paper_count"]:
         lines.append(f"Cannot be searched: {plan['paper_count'] - ready}. These will be listed in the report.")
+    if plan.get("picture_count"):
+        lines.append(
+            f"Pictures sent with the passages: {plan['picture_count']}. The index was built with images and"
+            " tables, so each passage goes with the pictures from its pages, which cost more and slow the run."
+        )
     cost = plan["cost_usd"]
     if cost:
         low, high, typical = (format_usd(cost[label]) for label in ("low", "high", "typical"))

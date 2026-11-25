@@ -423,6 +423,17 @@ def test_escape_dollars_stops_streamlit_reading_amounts_as_maths(pdf_research_as
     assert result == r"\$0.01 to \$0.03"
 
 
+def test_escape_dollars_leaves_an_already_escaped_dollar_alone(pdf_research_assistant_module):
+    escape = pdf_research_assistant_module.escape_dollars
+
+    assert escape(r"\$5 and $10") == r"\$5 and \$10"
+    assert escape(escape("$5 and $10")) == r"\$5 and \$10"
+
+
+def test_escape_dollars_leaves_text_without_dollars_alone(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.escape_dollars("No money here") == "No money here"
+
+
 def test_pending_plan_escapes_dollar_amounts():
     state = _empty_state() | {"exhaustive_pending": {"question": "Cost of $5 and $6?", "plan": READY_PLAN}}
 
@@ -433,12 +444,14 @@ def test_pending_plan_escapes_dollar_amounts():
     assert r"Cost of \$5 and \$6?" in text
 
 
-def test_finished_search_escapes_dollar_amounts_in_the_message(tmp_path):
+def test_finished_search_keeps_the_message_unescaped_so_it_copies_as_typed(tmp_path):
     (tmp_path / "summary.json").write_text(json.dumps(FINISHED_SUMMARY), encoding="utf-8")
     state = _empty_state() | {"exhaustive_run": _active_run(tmp_path, 0)}
 
     with imported_pdf_research_assistant(app_state=state) as module:
-        assert r"Actual cost: \$0.5000" in module.st.session_state.history[-1]["content"]
+        content = module.st.session_state.history[-1]["content"]
+        assert "Actual cost: $0.5000" in content
+        assert r"\$" not in content
 
 
 def test_full_report_escapes_dollars_on_screen_but_not_in_the_download(tmp_path):
@@ -2054,6 +2067,34 @@ def test_render_history_shows_a_user_message_without_answer_actions(pdf_research
     st.caption.assert_not_called()
 
 
+def test_render_history_escapes_dollars_but_copies_the_text_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.button = mock.Mock(return_value=False)
+    st.markdown.reset_mock()
+    items = [
+        {"role": "user", "content": "Is it $5 or $10?"},
+        {"role": "assistant", "content": "Between $5 and $10.", "cost": 0.25, "id": 3},
+    ]
+
+    with mock.patch.object(module, "render_copy_button") as copy_button:
+        module.render_history(items)
+
+    assert [call.args[0] for call in st.markdown.call_args_list] == [r"Is it \$5 or \$10?", r"Between \$5 and \$10."]
+    copy_button.assert_called_once_with("Between $5 and $10.", key="copy_history_3")
+
+
+def test_render_history_does_not_escape_an_exhaustive_answer_kept_already_escaped(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.button = mock.Mock(return_value=False)
+    st.markdown.reset_mock()
+
+    module.render_history([{"role": "assistant", "content": r"Cost \$5 to \$10", "cost": 0.5, "id": 0}])
+
+    assert st.markdown.call_args_list[0] == mock.call(r"Cost \$5 to \$10")
+
+
 def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_assistant_module):
     st = pdf_research_assistant_module.st
     st.button = mock.Mock(return_value=False)
@@ -2215,6 +2256,23 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
     st.error.assert_not_called()
 
 
+def test_answer_question_escapes_dollars_on_screen_but_copies_the_text_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+    st.markdown.reset_mock()
+
+    with mock.patch.object(
+        module, "run_query_subprocess", return_value=("From $5 to $10", 0.1, [], None, None)
+    ), mock.patch.object(module, "render_copy_button") as copy_button, mock.patch.object(
+        module, "render_source_passages"
+    ), mock.patch.object(module, "render_answer_settings"):
+        module.answer_question("Q")
+
+    st.markdown.assert_called_once_with(r"From \$5 to \$10")
+    copy_button.assert_called_once_with("From $5 to $10", key="copy_current_0")
+
+
 def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_research_assistant_module):
     module = pdf_research_assistant_module
     st = module.st
@@ -2260,6 +2318,19 @@ def test_answer_question_shows_a_tiny_failed_cost_as_less_than_a_hundredth_of_a_
 
     assert cost == 0.00002
     st.caption.assert_called_once_with("Cost: less than $0.0001")
+
+
+def test_submit_question_escapes_dollars_in_the_question_but_records_it_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+    st.markdown.reset_mock()
+
+    with mock.patch.object(module, "answer_question", return_value=("A", 0.0, [], None, None)):
+        module.submit_question("Is it $5 or $10?", {})
+
+    st.markdown.assert_called_once_with(r"Is it \$5 or \$10?")
+    assert st.session_state.history[0] == {"role": "user", "content": "Is it $5 or $10?"}
 
 
 def test_submit_question_records_the_question_answer_and_cost(pdf_research_assistant_module):

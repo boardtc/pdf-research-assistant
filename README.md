@@ -330,7 +330,7 @@ Every answer to a Query-mode question, from the app or the CLI, is kept on disk 
 
 The search looks for whole words in the questions and answers (so `paper` does not find `papers`), ranks answers that contain more of the words, or rarer ones, first, and understands `AND`, `OR` and `NOT` in capitals. It makes no API calls, and it does not change the PDF index, the chat or the next question.
 
-Answers are kept in PaperQA's own index of past answers, the `answers` folder in `INDEX_DIR`, in the same form PaperQA's `pqa ask` uses, so `pqa search -i answers`, pointed at the same index folder, finds them too, and answers saved by `pqa ask` into that folder show up in the app (without a date, passages or settings, which only this app records). Answers from every index are kept together, and each says which index it came from. **Clear chat** does not remove them; delete the `answers` folder to start again. Exhaustive-search reports are kept in `exhaustive_runs/` instead and are not searched. If an answer cannot be kept, for example because the disk is full, it is still shown, with a line saying it could not be kept for searching. A save that fails for a moment, as can happen on Windows when another program briefly holds the index files, is tried again a few times first.
+Answers are kept in PaperQA's own index of past answers, the `answers` folder in `INDEX_DIR`, in the same form PaperQA's `pqa ask` uses, so `pqa search -i answers`, pointed at the same index folder, finds them too, and answers saved by `pqa ask` into that folder show up in the app (without a date, passages or settings, which only this app records). Answers from every index are kept together, and each says which index it came from. **Clear chat** does not remove them; delete the `answers` folder to start again. The pictures shown under **Open chunk** are kept once each in `answers/pictures`, however many answers showed them, so answers from an index with whole-page pictures stay small; answers kept before this change carry their pictures inside them and still show them. If a picture has been deleted from that folder, **Open chunk** says it could not be shown. Exhaustive-search reports are kept in `exhaustive_runs/` instead and are not searched. If an answer cannot be kept, for example because the disk is full, it is still shown, with a line saying it could not be kept for searching. A save that fails for a moment, as can happen on Windows when another program briefly holds the index files, is tried again a few times first.
 
 PaperQA names each kept answer's file after its text, so two answers with exactly the same text (such as `I cannot answer.`) share one file, and only the later one is found.
 
@@ -436,7 +436,7 @@ These are created as you use the app. The ones in the project folder are ignored
 | `index_names.json` | `INDEX_DIR` | Friendly index names |
 | `last_index.json` | `INDEX_DIR` | The settings of the last built index, for the changed-settings warning |
 | `rebuild.log` | `INDEX_DIR` | Output of the last rebuild started from the app |
-| `answers/` | `INDEX_DIR` | Kept answers, for **Search previous answers** |
+| `answers/` | `INDEX_DIR` | Kept answers, for **Search previous answers**, with the pictures shown with them in `answers/pictures` |
 
 ## Additional Notes
 

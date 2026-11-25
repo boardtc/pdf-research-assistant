@@ -6,10 +6,20 @@ that step, so the query process adds each answer itself: same index, same fields
 app's own record of the answer (its passages, the settings used and when it was asked) is stored beside
 PaperQA's answer, where PaperQA ignores it, so `pqa search -i answers` still reads these answers.
 
+The pictures shown with the passages are kept apart, each once, in a "pictures" folder inside the answers
+folder, named after their contents; the record names them. Kept inline, a whole-page picture would add
+about a megabyte to every answer that showed it, each time it showed it.
+
 PaperQA is imported inside the functions, so modules that import this one load without it.
 """
 
 import asyncio
+import base64
+import copy
+import hashlib
+import os
+import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +29,9 @@ from pydantic import BaseModel, ConfigDict
 INDEX_NAME = "answers"
 INDEX_FIELDS = ["file_location", "body", "question"]
 APP_FIELD = "app"
+PICTURES_FOLDER = "pictures"
+# A kept picture's name: the SHA-256 of its bytes.
+PICTURE_NAME = re.compile(r"[0-9a-f]{64}")
 MAX_RESULTS = 10
 # How often to try a save that fails, and how long to pause before the second try; the pause doubles after
 # each try, so five tries pause three seconds in all. Failures on Windows tend to come a few in a row.
@@ -41,6 +54,72 @@ class StoredAnswer(BaseModel):
 
 def answers_folder(index_directory) -> Path:
     return Path(index_directory) / INDEX_NAME
+
+
+def pictures_folder(index_directory) -> Path:
+    return answers_folder(index_directory) / PICTURES_FOLDER
+
+
+def write_picture(folder: Path, data: bytes) -> str:
+    """Keep one picture in the folder, unless it is already there, and return its name.
+
+    It is written to a part file first and then renamed, so a picture that is there is always whole. Two
+    saves keeping the same picture at once both end with it kept, whichever renames first.
+    """
+    name = hashlib.sha256(data).hexdigest()
+    target = folder / name
+    if target.exists():
+        return name
+    folder.mkdir(parents=True, exist_ok=True)
+    part = folder / f"{name}.{uuid.uuid4().hex}.part"
+    try:
+        part.write_bytes(data)
+        os.replace(part, target)
+    except OSError:
+        if not target.exists():
+            raise
+    finally:
+        part.unlink(missing_ok=True)
+    return name
+
+
+def keep_media_picture(folder: Path, media: dict) -> dict:
+    """Return one image or table as the record keeps it: its picture kept in the folder and named.
+
+    Media with no picture lose the empty field; a picture that is not base64 stays inline, since it has
+    no bytes to keep.
+    """
+    kept = dict(media)
+    image = kept.pop("image", None)
+    if not image:
+        return kept
+    try:
+        data = base64.b64decode(image, validate=True)
+    except ValueError:
+        kept["image"] = image
+        return kept
+    kept["picture"] = write_picture(folder, data)
+    return kept
+
+
+def keep_pictures(index_directory, record: dict) -> dict:
+    """Return a copy of the app's record with each picture kept in the pictures folder instead of inline.
+
+    The record given is left as it is, since the chat shows it too.
+    """
+    folder = pictures_folder(index_directory)
+    kept = copy.deepcopy(record)
+    for context in kept.get("contexts") or []:
+        if "media" in context:
+            context["media"] = [keep_media_picture(folder, media) for media in context["media"] or []]
+    return kept
+
+
+def load_picture(index_directory, name) -> bytes:
+    """Return the bytes of a picture kept with the saved answers; raise if the name is not a picture's."""
+    if not isinstance(name, str) or not PICTURE_NAME.fullmatch(name):
+        raise ValueError(f"Not the name of a kept picture: {name!r}")
+    return (pictures_folder(index_directory) / name).read_bytes()
 
 
 def open_index(index_directory):
@@ -82,9 +161,10 @@ def release_writer(index) -> None:
 async def add_answer(index_directory, response, record: dict) -> None:
     """Add one answer to the index the way PaperQA's agent_query does, with the app's record beside it.
 
-    On Windows a save now and then fails with "Access is denied" on one of the index's own files, so a
+    Its pictures are kept first, in the pictures folder. On Windows a save now and then fails with "Access is denied" on one of the index's own files, so a
     failed save is tried again, after its writer has been let go.
     """
+    record = keep_pictures(index_directory, record)
     session = response.session
     fields = {"file_location": str(session.id), "body": session.answer, "question": session.question}
     for attempt in range(1, SAVE_ATTEMPTS + 1):

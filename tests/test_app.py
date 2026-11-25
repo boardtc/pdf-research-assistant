@@ -831,6 +831,36 @@ def test_render_chunk_media_shows_table_text_when_there_is_no_image(pdf_research
     st.image.assert_not_called()
 
 
+def test_render_chunk_media_shows_a_picture_kept_beside_a_saved_answer(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.caption, st.image, st.markdown):
+        shown.reset_mock()
+    st.image = mock.Mock()
+    name = "a" * 64
+
+    with mock.patch.object(module.saved_answers, "load_picture", return_value=b"page") as load_picture:
+        module.render_chunk_media([{"kind": "image", "page": 2, "picture": name, "url": ""}])
+
+    load_picture.assert_called_once_with(module.bootstrap.INDEX_DIR, name)
+    st.markdown.assert_called_once_with("**Image, page 2**")
+    st.image.assert_called_once_with(b"page")
+    st.caption.assert_not_called()
+
+
+def test_render_chunk_media_says_when_a_kept_picture_is_gone(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.caption.reset_mock()
+    st.image = mock.Mock()
+
+    with mock.patch.object(module.saved_answers, "load_picture", side_effect=FileNotFoundError("gone")):
+        module.render_chunk_media([{"picture": "a" * 64}])
+
+    st.image.assert_not_called()
+    st.caption.assert_called_once_with(module.IMAGE_FAILED_NOTE)
+
+
 @pytest.mark.parametrize("media", [{"image": "not base64!"}, {"image": "aW1hZ2U="}])
 def test_render_chunk_media_says_when_an_image_cannot_be_shown(pdf_research_assistant_module, media):
     module = pdf_research_assistant_module

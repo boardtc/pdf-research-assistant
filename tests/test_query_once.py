@@ -12,7 +12,9 @@ from paperqa.types import Context, Doc, ParsedMedia, PQASession, Text
 
 
 def _stub_settings():
-    return SimpleNamespace(agent=SimpleNamespace(agent_type="stub-agent", index=SimpleNamespace(index_directory="index-dir")))
+    return SimpleNamespace(
+        agent=SimpleNamespace(agent_type="stub-agent", timeout=900, index=SimpleNamespace(index_directory="index-dir"))
+    )
 
 
 @pytest.fixture
@@ -559,7 +561,7 @@ def test_run_query_payload_lets_requests_wait_for_the_rate_limiter_before_runnin
     query_once_module.build_settings = steps.build
     query_once_module.run_agent = mock.Mock(side_effect=lambda *args, **kwargs: steps.run())
 
-    # The wait comes from the settings the question runs with, one-off values included.
+    # The wait is the time the question may run, from its settings with one-off values included.
     with mock.patch.object(query_once_module.settings_groups, "apply_usable", steps.apply_usable), mock.patch.object(
         query_once_module.rate_profiles, "allow_limiter_wait", steps.allow_wait
     ):
@@ -568,7 +570,7 @@ def test_run_query_payload_lets_requests_wait_for_the_rate_limiter_before_runnin
     assert steps.mock_calls[:4] == [
         mock.call.build(),
         mock.call.apply_usable(settings, {"evidence_k": 3}),
-        mock.call.allow_wait(settings),
+        mock.call.allow_wait(900),
         mock.call.run(),
     ]
 

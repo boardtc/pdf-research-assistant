@@ -288,7 +288,7 @@ A failed request or rate limit is never reported as "no relevant evidence".
 > **Important**
 > Exhaustive search is more thorough than a normal query, but it can still misjudge relevance. A model scores each chunk, so it can reject something relevant or accept something that is not. Scanned pages and figures are not searched. Quotes are marked verified or not verified, and a quote marked not verified may still be genuine, so check it against the PDF. Treat the report as a list to review, not a conclusion.
 
-Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed comes from the **Speed limits** profile in the sidebar; pick a lower profile if your OpenAI account has lower limits.
+Exhaustive search reads the saved index and never builds it, so run `pdf-research-rebuild` first. Its speed comes from the **Speed limits** profile in the sidebar; pick a lower profile if your OpenAI account has lower limits. If the index was built with images and tables on, each passage is sent with its pictures, and PaperQA's token limit counts each picture by its size as text, so a run with whole-page pictures is much slower. Passages wait their turn under the token limit for as long as it takes, rather than the rate limiter's own 60 seconds, after which they would fail and be listed as not checked.
 
 ### Local LLM
 

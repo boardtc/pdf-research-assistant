@@ -102,7 +102,11 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
 
     one_off holds settings changed for this question only, by setting key. They go on top of the saved
     settings for this run and are never saved; any that cannot be used are skipped.
+
+    A failed question still says what it spent before failing, from the cost tracker; nothing was
+    spent if it failed before tracking started.
     """
+    tracked_before = None
     try:
         settings = build_settings()
         applied = settings_groups.apply_usable(settings, one_off or {})
@@ -146,10 +150,13 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
             payload["save_error"] = save_error
         return payload
     except Exception as exc:
+        tracked = None if tracked_before is None else GLOBAL_COST_TRACKER.lifetime_cost_usd - tracked_before
         return {
             "ok": False,
             "error_type": type(exc).__name__,
             "error": str(exc),
+            # PaperQA gives no session when the question fails, so only the tracker's figure is known.
+            "cost": question_cost(None, tracked),
         }
 
 

@@ -991,8 +991,21 @@ def test_run_query_subprocess_raises_payload_error_type_and_message_when_query_p
 
     # Mock subprocess.run so the function reaches the application-level error payload branch.
     with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
-        with pytest.raises(RuntimeError, match="ValueError: bad payload"):
+        with pytest.raises(pdf_research_assistant_module.QueryFailedError, match="ValueError: bad payload") as caught:
             pdf_research_assistant_module.run_query_subprocess("What is new?")
+    # A payload from before failed questions carried a cost counts as spending nothing.
+    assert caught.value.cost == 0.0
+
+
+def test_run_query_subprocess_passes_on_what_a_failed_question_spent(pdf_research_assistant_module):
+    payload = {"ok": False, "error_type": "RateLimitError", "error": "slow down", "cost": 0.0042}
+    result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+        with pytest.raises(RuntimeError, match="RateLimitError: slow down") as caught:
+            pdf_research_assistant_module.run_query_subprocess("What is new?")
+
+    assert caught.value.cost == 0.0042
 
 
 def test_run_query_subprocess_defaults_unknown_error_type_and_message_when_error_payload_fields_are_missing(
@@ -2218,6 +2231,35 @@ def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_
     st.caption.assert_called_once_with("Cost: $0.0000")
     st.code.assert_called_once_with("trace line\n")
     st.markdown.assert_not_called()
+
+
+def test_answer_question_shows_and_returns_what_a_failed_question_spent(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.markdown, st.caption, st.error, st.code):
+        shown.reset_mock()
+    failure = module.QueryFailedError("RateLimitError: slow down", cost=0.0042)
+
+    with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
+        answer, cost, contexts, settings, save_error = module.answer_question("Q")
+
+    assert answer == module.describe_query_failure(failure)
+    assert (cost, contexts, settings, save_error) == (0.0042, [], None, None)
+    st.error.assert_called_once_with(answer)
+    st.caption.assert_called_once_with("Cost: $0.0042")
+
+
+def test_answer_question_shows_a_tiny_failed_cost_as_less_than_a_hundredth_of_a_cent(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.caption.reset_mock()
+    failure = module.QueryFailedError("APIError: down", cost=0.00002)
+
+    with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
+        _, cost, _, _, _ = module.answer_question("Q")
+
+    assert cost == 0.00002
+    st.caption.assert_called_once_with("Cost: less than $0.0001")
 
 
 def test_submit_question_records_the_question_answer_and_cost(pdf_research_assistant_module):

@@ -487,7 +487,37 @@ def test_run_query_payload_returns_error_payload_when_query_execution_raises(que
         "ok": False,
         "error_type": "RuntimeError",
         "error": "boom",
+        "cost": 0.0,
     }
+
+
+def _fail_after_tracked_cost(query_once_module, tracked_cost, build_error=None):
+    """Run a question that fails after its PaperQA run adds tracked_cost to a fake cost tracker."""
+    tracker = SimpleNamespace(lifetime_cost_usd=1.5)
+
+    def run(coro):
+        tracker.lifetime_cost_usd += tracked_cost
+        raise RuntimeError("rate limited")
+
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings(), side_effect=build_error)
+    query_once_module.run_or_ensure = mock.Mock(side_effect=run)
+    with mock.patch.object(query_once_module, "GLOBAL_COST_TRACKER", tracker),             mock.patch.object(query_once_module, "enable_cost_tracking"):
+        return query_once_module.run_query_payload("Q")
+
+
+def test_run_query_payload_reports_what_a_failed_question_spent_before_failing(query_once_module):
+    result = _fail_after_tracked_cost(query_once_module, tracked_cost=0.0042)
+
+    assert result["ok"] is False
+    assert result["error"] == "rate limited"
+    assert result["cost"] == pytest.approx(0.0042)
+
+
+def test_run_query_payload_reports_no_cost_when_the_question_fails_before_tracking_starts(query_once_module):
+    result = _fail_after_tracked_cost(query_once_module, tracked_cost=0.0042, build_error=ValueError("bad .env"))
+
+    assert result == {"ok": False, "error_type": "ValueError", "error": "bad .env", "cost": 0.0}
+    query_once_module.run_or_ensure.assert_not_called()
 
 
 def test_main_returns_exit_code_1_when_question_argument_count_is_incorrect(query_once_module):

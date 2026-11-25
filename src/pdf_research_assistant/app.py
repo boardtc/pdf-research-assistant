@@ -2,6 +2,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -620,8 +621,11 @@ def sync_persistent_state(app_state: dict) -> None:
 
 
 def escape_dollars(text: str) -> str:
-    """Stop Streamlit Markdown reading text between two dollar signs as a maths formula."""
-    return text.replace("$", r"\$")
+    """Stop Streamlit Markdown reading text between two dollar signs as a maths formula.
+
+    A dollar sign that is already escaped is left alone, so text kept escaped by an earlier version is not escaped twice.
+    """
+    return re.sub(r"(?<!\\)\$", r"\\$", text)
 
 
 def render_exhaustive_report(report_path: str) -> None:
@@ -689,7 +693,7 @@ def finish_exhaustive_run(run: dict, app_state: dict) -> None:
         item |= {"content": exhaustive_client.describe_crash(output_dir), "cost": exhaustive_client.read_saved_cost(output_dir)}
     else:
         item |= {
-            "content": escape_dollars("\n\n".join(exhaustive_client.describe_result(summary, output_dir))),
+            "content": "\n\n".join(exhaustive_client.describe_result(summary, output_dir)),
             "cost": summary["cost_usd"],
             "report_path": str(output_dir / "report.md"),
         }
@@ -1751,7 +1755,7 @@ def render_local_llm_setup() -> None:
 def render_history(history: list[dict]) -> None:
     for item in history:
         with st.chat_message(item["role"]):
-            st.markdown(item["content"])
+            st.markdown(escape_dollars(item["content"]))
             if item["role"] == "assistant" and "cost" in item:
                 render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
                 render_source_passages(item.get("contexts", []), key=f"history_{item.get('id', 0)}")
@@ -1808,7 +1812,7 @@ def answer_question(
             st.caption(f"Cost: {format_cost(cost)}")
             st.code("".join(traceback.format_exception(exc)))
             return answer, cost, [], None, None
-        st.markdown(answer)
+        st.markdown(escape_dollars(answer))
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
         render_answer_settings(recorded_settings)
@@ -1825,7 +1829,7 @@ def submit_question(question: str, app_state: dict, one_off: dict | None = None)
     st.session_state.history.append({"role": "user", "content": question})
     sync_persistent_state(app_state)
     with st.chat_message("user"):
-        st.markdown(question)
+        st.markdown(escape_dollars(question))
 
     with st.chat_message("assistant"):
         answer, cost, contexts, recorded_settings, save_error = answer_question(question, one_off)

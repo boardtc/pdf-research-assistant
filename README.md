@@ -278,9 +278,12 @@ From the app, click **Rebuild the index**. The button appears at the top of the 
 2. Nothing starts until you click **Start paid rebuild**. **Cancel** leaves everything as it was.
 3. The rebuild runs the same code as `pdf-research-rebuild`, in its own process, with the library and index settings saved in the sidebar. PDFs already in the index are left alone; new ones, and ones that failed before, are indexed.
 4. A progress bar shows how many PDFs are done. Questions and the index settings are switched off until it finishes, and the output goes to `rebuild.log` in `INDEX_DIR`.
-5. When it finishes, the page shows the end of the log (**Show the end of the rebuild log**) and the new state of the index, and the warning about changed settings goes away.
+5. **Stop rebuild**, under the progress bar, ends the rebuild early (see below).
+6. When it finishes, the page shows the end of the log (**Show the end of the rebuild log**) and the new state of the index, and the warning about changed settings goes away.
 
-The rebuild carries on if you close the page, and a reloaded page picks its progress up again. Stopping the Streamlit server does not stop it, but the page then no longer follows it. There is no stop button; PaperQA saves the index after each PDF, so a rebuild that is interrupted carries on from there next time.
+The rebuild carries on if you close the page, and a reloaded page picks its progress up again. Stopping the Streamlit server does not stop it, but the page then no longer follows it. 
+
+**Stopping a rebuild.** Click **Stop rebuild** to end it early. This is a request, not a kill: the page writes a `rebuild.stop` file beside the log, and the rebuild process, which checks for it each time a PDF is about to start, starts no more PDFs. PDFs already under way (as many as PaperQA's index concurrency setting allows at once) are finished, and PaperQA then makes its usual closing save of the index, so nothing already paid for is lost. That is why stopping can take a minute or two, and the page says `Stopping` until it has ended. Afterwards the page says whether the index can still be used and how many PDFs it holds, by reading PaperQA's own file list (`files.zip`), and the rebuild log ends with how many PDFs were not started. A later rebuild carries on from there. The rebuild process is never killed, because PaperQA rewrites `files.zip` in place after committing the search index, and a kill in the middle of that write could leave the index damaged. A stop request still works if you close the page straight after clicking. If you end the rebuild process yourself, the page's note after the failed rebuild says whether the index can still be read.
 
 From a terminal:
 

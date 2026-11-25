@@ -1,4 +1,6 @@
+import pickle
 import sys
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -137,8 +139,11 @@ def test_collect_result_ends_a_finished_rebuild_and_keeps_its_last_log_lines(tmp
 
     assert result == {
         "ok": True,
+        "stopped": False,
         "log_path": str(run["log_path"]),
         "lines": ["Indexed after run: 3", "Failed PDFs: 0"],
+        "index_dir": run["index_dir"],
+        "index": {"usable": True, "indexed": 0},
     }
     assert rebuild_client.get_run() is None
 
@@ -169,3 +174,120 @@ def test_read_log_tail_returns_only_the_last_lines(tmp_path):
 
 def test_read_log_tail_is_empty_when_there_is_no_log(tmp_path):
     assert rebuild_client.read_log_tail(tmp_path / "missing.log") == []
+
+
+# Stopping a rebuild
+
+
+def _write_files_zip(index_dir, payload):
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "files.zip").write_bytes(zlib.compress(pickle.dumps(payload)))
+
+
+def test_stop_path_sits_beside_the_log(tmp_path):
+    assert rebuild_client.stop_path(tmp_path / "index" / "pqa_index_abc") == tmp_path / "index" / "rebuild.stop"
+
+
+def test_start_tells_the_rebuild_where_to_look_for_a_stop_request(tmp_path):
+    _, popen = _start(tmp_path)
+
+    env = popen.call_args.kwargs["env"]
+    assert env[rebuild_client.STOP_ENV] == str(tmp_path / "index" / "rebuild.stop")
+    assert rebuild_client.STOP_ENV == "PDF_RESEARCH_STOP_FILE"
+
+
+def test_start_clears_a_stop_request_left_by_an_earlier_rebuild(tmp_path):
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "rebuild.stop").write_text("stop", encoding="utf-8")
+
+    _start(tmp_path)
+
+    assert not (tmp_path / "index" / "rebuild.stop").exists()
+
+
+def test_request_stop_writes_the_stop_file_and_marks_the_run_as_stopping(tmp_path):
+    run, _ = _start(tmp_path)
+
+    rebuild_client.request_stop(run)
+
+    assert (tmp_path / "index" / "rebuild.stop").exists()
+    assert rebuild_client.is_stopping(run) is True
+
+
+def test_request_stop_twice_changes_nothing(tmp_path):
+    run, _ = _start(tmp_path)
+
+    rebuild_client.request_stop(run)
+    rebuild_client.request_stop(run)
+
+    assert rebuild_client.is_stopping(run) is True
+
+
+def test_a_run_is_not_stopping_until_a_stop_is_asked_for(tmp_path):
+    run, _ = _start(tmp_path)
+
+    assert rebuild_client.is_stopping(run) is False
+
+
+def test_a_stop_asked_for_in_another_browser_session_shows_in_this_one(tmp_path):
+    run, _ = _start(tmp_path)
+    rebuild_client.request_stop(run)
+
+    # The run is one dictionary in the server process, so every session sees the flag.
+    assert rebuild_client.get_run()["stopping"] is True
+
+
+def test_collect_result_reports_a_stopped_rebuild_and_clears_the_stop_file(tmp_path):
+    run, _ = _start(tmp_path, _process(returncode=rebuild_client.STOPPED_EXIT_CODE))
+    rebuild_client.request_stop(run)
+
+    result = rebuild_client.collect_result()
+
+    assert result["stopped"] is True
+    assert result["ok"] is False
+    assert not (tmp_path / "index" / "rebuild.stop").exists()
+
+
+def test_collect_result_does_not_call_a_rebuild_that_finished_first_stopped(tmp_path):
+    run, _ = _start(tmp_path, _process(returncode=0))
+    rebuild_client.request_stop(run)
+
+    result = rebuild_client.collect_result()
+
+    assert result["stopped"] is False
+    assert result["ok"] is True
+
+
+def test_collect_result_says_whether_the_index_can_be_used_and_how_many_pdfs_it_holds(tmp_path):
+    run, _ = _start(tmp_path, _process(returncode=rebuild_client.STOPPED_EXIT_CODE))
+    _write_files_zip(run["index_dir"], {"a.pdf": "h1", "b.pdf": "h2", "c.pdf": "ERROR"})
+
+    assert rebuild_client.collect_result()["index"] == {"usable": True, "indexed": 2}
+
+
+def test_read_index_state_is_an_empty_but_undamaged_index_when_nothing_was_saved_yet(tmp_path):
+    assert rebuild_client.read_index_state(tmp_path / "missing") == {"usable": True, "indexed": 0}
+
+
+def test_read_index_state_is_unusable_when_the_file_list_is_damaged(tmp_path):
+    (tmp_path / "files.zip").write_bytes(b"half a write")
+
+    assert rebuild_client.read_index_state(tmp_path) == {"usable": False, "indexed": 0}
+
+
+def test_read_index_state_is_unusable_when_the_file_list_is_not_a_dictionary(tmp_path):
+    (tmp_path / "files.zip").write_bytes(zlib.compress(pickle.dumps(["a.pdf"])))
+
+    assert rebuild_client.read_index_state(tmp_path) == {"usable": False, "indexed": 0}
+
+
+def test_read_index_state_counts_only_pdfs_that_did_not_fail(tmp_path):
+    _write_files_zip(tmp_path, {"a.pdf": "h1", "b.pdf": rebuild_client.FAILED_DOCUMENT_ADD_ID})
+
+    assert rebuild_client.read_index_state(tmp_path) == {"usable": True, "indexed": 1}
+
+
+def test_the_failed_marker_matches_the_one_paperqa_writes():
+    from paperqa.agents.search import FAILED_DOCUMENT_ADD_ID
+
+    assert rebuild_client.FAILED_DOCUMENT_ADD_ID == FAILED_DOCUMENT_ADD_ID

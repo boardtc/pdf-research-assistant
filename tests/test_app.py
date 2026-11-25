@@ -3643,10 +3643,119 @@ def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_setti
         module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
         module.st.form_submit_button.assert_any_call(module.INDEX_SETTINGS_SAVE_LABEL, disabled=True)
         module.bootstrap.get_indexed_doc_count.assert_any_call(index_dir=run["index_dir"])
-        assert not any(str(key).startswith("rebuild_") for key in keys)
+        # Only the stop button; no button starts or offers a rebuild.
+        assert [key for key in keys if str(key).startswith("rebuild_")] == ["rebuild_stop"]
         assert module.st.chat_input.call_args.kwargs["disabled"] is True
         assert module.st.session_state.history == []
         module.st.rerun.assert_not_called()
+
+
+def test_a_running_rebuild_offers_a_stop_button(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path)
+    module.st.button.reset_mock()
+    module.st.button.return_value = False
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        module.render_rebuild_run()
+
+    stop = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_stop")
+    assert stop.args[0] == module.REBUILD_STOP_LABEL
+    assert stop.kwargs["help"] == module.REBUILD_STOP_HELP
+    assert stop.kwargs.get("disabled") is not True
+    module.st.caption.assert_any_call(module.REBUILD_STOP_NOTE)
+
+
+def test_clicking_stop_asks_the_rebuild_to_stop_and_draws_the_progress_again(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path)
+    module.st.button.reset_mock()
+    module.st.button.side_effect = lambda *args, **kwargs: kwargs.get("key") == "rebuild_stop"
+    request_stop = mock.Mock()
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        with mock.patch.object(module.rebuild_client, "request_stop", request_stop):
+            module.render_rebuild_run()
+
+    request_stop.assert_called_once_with(run)
+    module.st.button.side_effect = None
+
+
+def test_a_stopping_rebuild_says_so_and_disables_the_stop_button(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path) | {"stopping": True}
+    module.st.button.reset_mock()
+    module.st.button.return_value = False
+    module.st.warning.reset_mock()
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        module.render_rebuild_run()
+
+    module.st.warning.assert_any_call(module.REBUILD_STOPPING_NOTE)
+    stop = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_stop")
+    assert stop.kwargs["disabled"] is True
+
+
+def test_a_stopped_rebuild_says_the_index_can_still_be_used_and_how_many_pdfs_it_holds(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 7}}
+    )
+
+    module.st.success.assert_called_once_with(module.REBUILD_STOPPED_USABLE_NOTICE.format(count=7))
+    module.st.error.assert_not_called()
+
+
+def test_a_rebuild_stopped_before_any_pdf_was_saved_says_nothing_is_indexed_yet(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 0}}
+    )
+
+    module.st.success.assert_called_once_with(module.REBUILD_STOPPED_EMPTY_NOTICE)
+    module.st.error.assert_not_called()
+
+
+def test_a_stopped_rebuild_whose_index_cannot_be_read_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "index/rebuild.log", "lines": [], "index": {"usable": False, "indexed": 0}}
+    )
+
+    module.st.error.assert_called_once_with(f"{module.REBUILD_STOPPED_UNUSABLE_NOTICE} See `index/rebuild.log`.")
+    module.st.success.assert_not_called()
+
+
+def test_a_rebuild_that_failed_says_whether_the_index_can_still_be_used(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.error.reset_mock()
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 3}}
+    )
+
+    module.st.info.assert_called_once_with(module.REBUILD_INDEX_STATE_USABLE.format(count=3))
+
+
+def test_a_rebuild_that_failed_and_left_an_unreadable_index_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": False, "indexed": 0}}
+    )
+
+    module.st.error.assert_any_call(module.REBUILD_INDEX_STATE_UNUSABLE)
 
 
 def test_rebuild_progress_counts_failed_pdfs_as_done(pdf_research_assistant_module, tmp_path):

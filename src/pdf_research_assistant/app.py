@@ -87,6 +87,31 @@ REBUILD_QUESTION_NOTE = "Your question was not sent, because the index is being 
 REBUILD_LOCKED_NOTE = "These cannot be changed while the index is being rebuilt."
 REBUILD_FINISHED_NOTICE = "The index rebuild has finished. This page shows what the index holds now."
 REBUILD_FAILED_NOTICE = "The index rebuild stopped unexpectedly, so the index may be incomplete."
+REBUILD_STOP_LABEL = "Stop rebuild"
+REBUILD_STOP_HELP = (
+    "Starts no more PDFs. The ones already under way are finished and saved, which can take a minute or two. "
+    "Nothing is killed, so the index is never cut off mid-write. Start a rebuild again later to carry on."
+)
+REBUILD_STOP_NOTE = "Stopping keeps the PDFs already indexed. You pay only for the PDFs already started."
+REBUILD_STOPPING_NOTE = (
+    "Stopping: no new PDFs are being started, and the ones under way are being finished and saved. "
+    "This page updates when the rebuild has ended."
+)
+REBUILD_STOPPED_USABLE_NOTICE = (
+    "The index rebuild was stopped. The index can still be used: it holds {count} PDFs. "
+    "Rebuild again to index the rest."
+)
+REBUILD_STOPPED_EMPTY_NOTICE = (
+    "The index rebuild was stopped before any PDF was saved, so the index is still empty and nothing is damaged. "
+    "Rebuild again to index your PDFs."
+)
+REBUILD_STOPPED_UNUSABLE_NOTICE = (
+    "The index rebuild was stopped, but the index's file list cannot be read, so the index may be damaged."
+)
+REBUILD_INDEX_STATE_USABLE = "The index can still be used: it holds {count} PDFs."
+REBUILD_INDEX_STATE_UNUSABLE = (
+    "The index's file list cannot be read, so the index may be damaged. Rebuild it before asking questions."
+)
 REBUILD_LOG_TITLE = "Show the end of the rebuild log"
 INDEX_SETTINGS_UNCHANGED_NOTE = "These are the settings already in use, so nothing was saved."
 MEDIA_PACKAGE_NOTE = (
@@ -924,16 +949,38 @@ def render_rebuild_run() -> None:
     st.info(REBUILD_RUNNING_NOTE)
     st.progress(rebuild_client.progress_fraction(run, done), text=rebuild_client.describe_progress(run, done))
     st.caption(f"Details are written to `{run['log_path']}`.")
+    if st.button(
+        REBUILD_STOP_LABEL,
+        key="rebuild_stop",
+        help=REBUILD_STOP_HELP,
+        disabled=rebuild_client.is_stopping(run),
+    ):
+        rebuild_client.request_stop(run)
+    if rebuild_client.is_stopping(run):
+        st.warning(REBUILD_STOPPING_NOTE)
+    else:
+        st.caption(REBUILD_STOP_NOTE)
 
 
 def render_rebuild_result(result: dict | None) -> None:
     """Say how the last rebuild ended, with the end of its log."""
     if not result:
         return
-    if result["ok"]:
+    index = result.get("index")
+    if result.get("stopped") and index and index["usable"] and not index["indexed"]:
+        st.success(REBUILD_STOPPED_EMPTY_NOTICE)
+    elif result.get("stopped") and index and index["usable"]:
+        st.success(REBUILD_STOPPED_USABLE_NOTICE.format(count=index["indexed"]))
+    elif result.get("stopped"):
+        st.error(f"{REBUILD_STOPPED_UNUSABLE_NOTICE} See `{result['log_path']}`.")
+    elif result["ok"]:
         st.success(REBUILD_FINISHED_NOTICE)
     else:
         st.error(f"{REBUILD_FAILED_NOTICE} See `{result['log_path']}`.")
+        if index and index["usable"]:
+            st.info(REBUILD_INDEX_STATE_USABLE.format(count=index["indexed"]))
+        elif index:
+            st.error(REBUILD_INDEX_STATE_UNUSABLE)
     if result["lines"]:
         with st.expander(REBUILD_LOG_TITLE):
             st.code("\n".join(result["lines"]))

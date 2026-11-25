@@ -446,6 +446,18 @@ def describe_asked_at(asked_at: str | None) -> str | None:
     return when.strftime("%d %b %Y, %H:%M")
 
 
+def format_cost(amount: float | None) -> str:
+    """Show a cost in dollars to four places, or say it is less than $0.0001 when it would round to zero.
+
+    A question answered by a local model costs only the OpenAI embeddings that find its passages, a
+    fraction of a hundredth of a cent, which would otherwise show as $0.0000 as if it were free.
+    """
+    amount = amount or 0.0
+    if 0 < amount < 0.00005:
+        return "less than $0.0001"
+    return f"${amount:.4f}"
+
+
 def describe_found_answer(answer: dict, names: dict) -> str:
     """Return the line under a found answer's question: when it was asked, on which index, and its cost."""
     parts = []
@@ -455,7 +467,7 @@ def describe_found_answer(answer: dict, names: dict) -> str:
     index = (answer.get("settings") or {}).get("index")
     if index:
         parts.append(f"Index: {describe_index_name(index, names.get(index))}")
-    parts.append(f"Cost: ${answer.get('cost') or 0.0:.4f}")
+    parts.append(f"Cost: {format_cost(answer.get('cost'))}")
     return " · ".join(parts)
 
 
@@ -1377,7 +1389,7 @@ def render_usage(app_state: dict) -> None:
     with st.sidebar:
         st.header("Usage")
         st.metric("Queries this session", st.session_state.query_count)
-        st.metric("Total cost this session", f"${st.session_state.total_cost:.4f}")
+        st.metric("Total cost this session", format_cost(st.session_state.total_cost))
         if st.button("Clear chat"):
             st.session_state.history = []
             st.session_state.total_cost = 0.0
@@ -1726,7 +1738,7 @@ def render_history(history: list[dict]) -> None:
                 render_answer_settings(item.get("settings"))
                 if "report_path" in item:
                     render_exhaustive_report(item["report_path"])
-                st.caption(f"Cost: ${item['cost']:.4f}")
+                st.caption(f"Cost: {format_cost(item['cost'])}")
                 if item.get("save_error"):
                     st.caption(f"{ANSWER_NOT_SAVED_NOTE} {escape_markdown(item['save_error'])}")
 
@@ -1778,7 +1790,7 @@ def answer_question(
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
         render_answer_settings(recorded_settings)
-        st.caption(f"Cost: ${cost:.4f}")
+        st.caption(f"Cost: {format_cost(cost)}")
         return answer, cost, contexts, recorded_settings, save_error
 
 

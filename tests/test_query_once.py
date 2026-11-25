@@ -354,6 +354,52 @@ def test_run_query_payload_still_answers_and_says_why_when_the_answer_could_not_
     assert result["save_error"] == "OSError: disk full"
 
 
+def test_question_cost_takes_the_larger_of_the_session_and_tracked_costs(query_once_module):
+    # A local model: the session counts nothing, the tracker counts the OpenAI embeddings.
+    assert query_once_module.question_cost(0.0, 0.00002) == 0.00002
+    # The tracker saw nothing (for example in a test): the session's own figure is kept.
+    assert query_once_module.question_cost(0.0123, 0.0) == 0.0123
+    assert query_once_module.question_cost(None, None) == 0.0
+
+
+def _run_with_tracked_cost(query_once_module, session_cost, tracked_cost):
+    """Run a question whose PaperQA run adds tracked_cost to a fake cost tracker."""
+    tracker = SimpleNamespace(lifetime_cost_usd=1.5)
+    response = SimpleNamespace(
+        session=SimpleNamespace(formatted_answer="A", answer="A", cost=session_cost, contexts=[])
+    )
+
+    def run(coro):
+        tracker.lifetime_cost_usd += tracked_cost
+        return response
+
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.run_or_ensure = mock.Mock(side_effect=run)
+    with mock.patch.object(query_once_module, "GLOBAL_COST_TRACKER", tracker), \
+            mock.patch.object(query_once_module, "enable_cost_tracking") as enable, \
+            mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=None):
+        result = query_once_module.run_query_payload("Q")
+    return result, response, enable
+
+
+def test_run_query_payload_counts_the_embedding_cost_paperqa_leaves_out(query_once_module):
+    result, response, enable = _run_with_tracked_cost(query_once_module, session_cost=0.0, tracked_cost=0.00002)
+
+    enable.assert_called_once_with()
+    assert result["cost"] == pytest.approx(0.00002)
+    # The saved answer reads the session's cost, so it shows the same figure as the chat.
+    assert response.session.cost == pytest.approx(0.00002)
+    query_once_module.saved_answers.save_answer.assert_called_once()
+    assert query_once_module.saved_answers.save_answer.call_args.args[1] is response
+
+
+def test_run_query_payload_keeps_the_session_cost_when_the_tracker_saw_nothing(query_once_module):
+    result, response, _ = _run_with_tracked_cost(query_once_module, session_cost=0.0123, tracked_cost=0.0)
+
+    assert result["cost"] == 0.0123
+    assert response.session.cost == 0.0123
+
+
 def test_answer_text_shows_the_answer_when_paperqa_wrote_one(query_once_module):
     session = SimpleNamespace(formatted_answer="Question: Q\n\nAn answer (Moon2004 pages 1-2).", answer="An answer")
 

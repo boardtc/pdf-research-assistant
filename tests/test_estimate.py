@@ -126,10 +126,18 @@ def test_paperqa_defaults_come_out_balanced():
     assert estimate.label_for(result) == estimate.BALANCED
 
 
-def test_fewer_passages_and_short_answers_come_out_fast():
+def test_fewer_passages_and_short_answers_in_fixed_steps_come_out_fast():
     settings = _paperqa_settings(evidence_k=5, answer_length="50 to 100 words")
+    settings.agent.agent_type = estimate.FIXED_STEPS_AGENT_TYPE
 
     assert estimate.label_for(estimate.estimate_question(settings)) == estimate.FAST
+
+
+def test_fewer_passages_and_short_answers_are_not_fast_while_the_model_plans_the_search():
+    # The model's own planning calls and its repeated evidence gathering take most of a minute by themselves.
+    settings = _paperqa_settings(evidence_k=5, answer_length="50 to 100 words")
+
+    assert estimate.label_for(estimate.estimate_question(settings)) == estimate.BALANCED
 
 
 def test_thirty_passages_come_out_higher_cost():
@@ -174,16 +182,83 @@ def test_passages_go_out_in_batches_of_the_requests_sent_at_once():
         estimate.AGENT_OUTPUT_TOKENS
     )
 
-    # Without a profile there is no token rate limit, so only the calls set the time.
-    assert estimate.estimate_question(settings).seconds == pytest.approx(2 * summary_seconds + rest)
+    # Without a profile there is no token rate limit, so only the start-up and the calls set the time. The
+    # model gathers evidence a few times, and each time the passages go out in two batches.
+    assert estimate.estimate_question(settings).seconds == pytest.approx(
+        estimate.START_SECONDS + estimate.EVIDENCE_ROUNDS * 2 * summary_seconds + rest
+    )
 
 
 def test_the_token_rate_limit_can_set_the_time():
     settings = _paperqa_settings(profile="Low limits")
+    settings.summary_llm_config["rate_limit"][MODEL] = "5000 per 1 minute"
     result = estimate.estimate_question(settings)
-    limited = (result.input_tokens * estimate.LIMITER_TOKEN_FACTOR + result.output_tokens) / 30000 * 60
+    limited = (result.input_tokens * estimate.LIMITER_TOKEN_FACTOR + result.output_tokens) / 5000 * 60
 
-    assert result.seconds == pytest.approx(limited, rel=0.001)
+    # Starting the question and opening the index come before any call the limit can hold back.
+    assert result.seconds == pytest.approx(estimate.START_SECONDS + limited, rel=0.001)
+
+
+def test_the_calls_set_the_time_when_the_token_rate_limit_is_not_reached():
+    limited = _paperqa_settings()
+    unlimited = _paperqa_settings()
+    unlimited.summary_llm_config = None
+
+    # High limits is far above what one question sends, so the time is the same as with no limit at all.
+    assert estimate.estimate_question(limited).seconds == pytest.approx(estimate.estimate_question(unlimited).seconds)
+
+
+def test_a_question_counts_the_time_to_start_and_open_the_index():
+    with mock.patch.object(estimate, "START_SECONDS", 0):
+        without_start = estimate.estimate_question(_paperqa_settings()).seconds
+
+    assert estimate.estimate_question(_paperqa_settings()).seconds == pytest.approx(
+        without_start + estimate.START_SECONDS
+    )
+
+
+def _preset_settings(preset: str) -> Settings:
+    from pdf_research_assistant import quality_presets
+
+    settings = _paperqa_settings()
+    quality_presets.apply_preset(settings, preset)
+    return settings
+
+
+def _pre_prompt_settings() -> Settings:
+    settings = _paperqa_settings()
+    settings.prompts.pre = "List the scientific terms in this question: {question}"
+    return settings
+
+
+# Real questions on a library of 119 PDFs with High limits (24 and 25 Nov 2026), timed from asking to the
+# answer appearing. Where a setting was timed more than once, this is a typical time.
+MEASURED_QUESTIONS = [
+    ("Balanced", lambda: _paperqa_settings(), 80),
+    ("Fast", lambda: _preset_settings("Fast"), 35),
+    ("Debug", lambda: _preset_settings("Debug"), 60),
+    ("High quality", lambda: _preset_settings("High quality"), 55),
+    ("Long answer", lambda: _paperqa_settings(answer_length="about 400 words, but can be longer"), 74),
+    ("30 passages", lambda: _paperqa_settings(evidence_k=30, answer_max_sources=15), 68),
+    ("Before-answer prompt", _pre_prompt_settings, 85),
+    ("Low limits", lambda: _paperqa_settings(profile="Low limits"), 93),
+    ("Cut-out pictures", lambda: _paperqa_settings(media=True), 204),
+    ("Whole-page pictures", lambda: _paperqa_settings(media=True, whole_page=True), 198),
+]
+
+
+@pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
+def test_the_time_is_close_to_measured_questions(name, settings, seconds):
+    result = estimate.estimate_question(settings())
+
+    # One question can run a minute longer or shorter than the next, depending on how many searches the
+    # model makes, so close means within about half again either way.
+    assert seconds * 0.75 <= result.seconds <= seconds * 1.6
+
+
+@pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
+def test_no_measured_question_is_shown_as_under_half_a_minute(name, settings, seconds):
+    assert estimate.describe_time(estimate.estimate_question(settings()).seconds) != "under half a minute"
 
 
 # Pictures, sent with each passage when images and tables are on.
@@ -401,11 +476,16 @@ def test_describe_estimate_explains_what_is_counted():
 
     assert lines == [
         "PaperQA reads 10 passages with the model, then writes an answer of up to about 200 words from at most 5 "
-        "of them, plus a few short calls to plan the search.",
+        f"of them, plus about {estimate.AGENT_CALLS} short calls to plan the search.",
         "Cost: less than 1 cent.",
-        "Time: under half a minute.",
+        f"Time: under half a minute. {estimate.START_NOTE} {estimate.EVIDENCE_ROUNDS_NOTE}",
         estimate.ROUGH_NOTE,
     ]
+
+
+def test_start_note_and_evidence_rounds_note_give_the_figures_used():
+    assert f"about {estimate.START_SECONDS} seconds" in estimate.START_NOTE
+    assert f"about {estimate.EVIDENCE_ROUNDS} times" in estimate.EVIDENCE_ROUNDS_NOTE
 
 
 def test_describe_estimate_explains_cut_out_pictures():
@@ -461,7 +541,9 @@ def test_describe_estimate_explains_a_local_model():
     lines = estimate.describe_estimate(replace(_estimate(), cost_usd=None, local=True))
 
     assert lines[1] == estimate.LOCAL_COST_NOTE
-    assert lines[2] == f"Time: under half a minute. {estimate.LOCAL_TIME_NOTE}"
+    assert lines[2] == (
+        f"Time: under half a minute. {estimate.START_NOTE} {estimate.EVIDENCE_ROUNDS_NOTE} {estimate.LOCAL_TIME_NOTE}"
+    )
 
 
 @pytest.mark.parametrize("label", [estimate.FAST, estimate.BALANCED, estimate.SLOWER, estimate.HIGHER_COST])
@@ -480,7 +562,12 @@ def test_fixed_search_steps_make_two_short_calls_instead_of_the_agent_s_planning
     assert result.fixed_steps
     assert result.cost_usd < usual.cost_usd
     saved_calls = estimate.AGENT_CALLS - estimate.FIXED_STEPS_CALLS
-    assert result.seconds == pytest.approx(usual.seconds - saved_calls * estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS))
+    # Fixed steps also gather evidence only once, so the passages are read once instead of a few times.
+    summary_seconds = estimate.call_seconds(estimate.count_words("about 100 words") * estimate.TOKENS_PER_WORD)
+    saved_reads = (estimate.EVIDENCE_ROUNDS - 1) * summary_seconds
+    assert result.seconds == pytest.approx(
+        usual.seconds - saved_calls * estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS) - saved_reads
+    )
     assert result.input_tokens == usual.input_tokens - (
         estimate.AGENT_CALLS * estimate.AGENT_INPUT_TOKENS - estimate.FIXED_STEPS_INPUT_TOKENS
     )
@@ -499,6 +586,8 @@ def test_describe_estimate_explains_fixed_search_steps():
     lines = estimate.describe_estimate(_estimate(fixed_steps=True))
 
     assert lines[0].endswith("plus two short calls to suggest searches and finish.")
+    # Fixed steps gather evidence once, so only the start-up is mentioned.
+    assert lines[-2] == f"Time: under half a minute. {estimate.START_NOTE}"
 
 
 @pytest.mark.parametrize(
@@ -506,7 +595,8 @@ def test_describe_estimate_explains_fixed_search_steps():
     [
         ("Fast", estimate.FAST),
         ("Balanced", estimate.BALANCED),
-        ("Debug", estimate.FAST),
+        # The smallest run, but the model still plans its searches, which takes about a minute.
+        ("Debug", estimate.BALANCED),
     ],
 )
 def test_quality_presets_come_out_with_the_label_their_name_suggests(preset, label):

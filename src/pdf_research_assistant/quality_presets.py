@@ -50,7 +50,8 @@ PRESETS = (
         name="Fast",
         description=(
             "Reads 5 passages, cites up to 3 and writes a short answer. PaperQA searches in fixed steps "
-            "instead of having the model plan each search, which saves a couple of model calls."
+            "instead of having the model plan each search, which saves several model calls and reads the "
+            "passages only once."
         ),
         based_on="fast.json",
         evidence_k=5,

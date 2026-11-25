@@ -8,9 +8,16 @@ answer, summary and agent models, so a choice fits the limits of the user's Open
 If a profile allows more than the account does, OpenAI turns requests away and PaperQA waits and
 tries again, which is slower than a profile that fits. If it allows less, nothing breaks, but
 long runs such as exhaustive search take far longer than they need to.
+
+The limiter weighs a request by its length in characters / 4, and a picture goes as base64 text, so a
+passage sent with whole-page pictures can weigh several hundred thousand tokens. lmi lets a request
+wait only 60 seconds for its turn, after which it fails; allow_limiter_wait lets it wait longer.
 """
 
+import functools
 from dataclasses import dataclass
+
+from lmi import rate_limiter
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,20 @@ def apply_profile(settings: object, name: str) -> None:
         config["request_limit"] = {model: _limit(profile.requests_per_minute)}
         setattr(owner, config_attribute, config)
     settings.answer.max_concurrent_requests = profile.requests_at_once
+
+
+def allow_limiter_wait(settings: object) -> None:
+    """Let each request wait for the rate limiter for as long as the question may run (`agent.timeout`).
+
+    lmi fixes its wait when it is imported (60 seconds, or the RATE_LIMITER_TIMEOUT environment variable),
+    so the wait is given to its shared limiter here instead. Without this, passages sent with whole-page
+    pictures queue behind each other for more than a minute, fail, and leave no evidence to answer from.
+    """
+    limiter = rate_limiter.GLOBAL_LIMITER
+    # Built from the class's method each time, so a second call replaces the wait rather than wrapping it.
+    limiter.try_acquire = functools.partial(
+        type(limiter).try_acquire, limiter, acquire_timeout=settings.agent.timeout
+    )
 
 
 def find_profile(settings: object) -> RateProfile | None:

@@ -208,3 +208,52 @@ def test_a_recorded_answer_names_the_profile():
 
     values = {item["key"]: item["value"] for item in record["values"]}
     assert values["rate_profile"] == "Standard"
+
+
+@pytest.fixture
+def limiter():
+    """PaperQA's shared rate limiter, put back to lmi's own wait after the test."""
+    from lmi.rate_limiter import GLOBAL_LIMITER
+
+    yield GLOBAL_LIMITER
+    vars(GLOBAL_LIMITER).pop("try_acquire", None)
+
+
+def _acquire_twice(limiter, key: str) -> None:
+    """Ask the limiter for its whole allowance twice, so the second request must wait about a second."""
+    import asyncio
+
+    async def run():
+        for _ in range(2):
+            await limiter.try_acquire(("test", key), "10 per 1 second", weight=10)
+
+    asyncio.run(run())
+
+
+def test_requests_wait_for_the_rate_limiter_as_long_as_the_question_may_run(limiter):
+    settings = _settings()
+    settings.agent.timeout = 5
+
+    rate_profiles.allow_limiter_wait(settings)
+
+    _acquire_twice(limiter, "long-wait")
+
+
+def test_a_request_still_stops_waiting_when_the_question_would_have_ended(limiter):
+    settings = _settings()
+    settings.agent.timeout = 5
+    rate_profiles.allow_limiter_wait(settings)
+    # A later question with a shorter time allowed replaces the wait instead of keeping the longer one.
+    settings.agent.timeout = 0.2
+
+    rate_profiles.allow_limiter_wait(settings)
+
+    with pytest.raises(TimeoutError):
+        _acquire_twice(limiter, "short-wait")
+
+
+def test_the_rate_limiter_waits_only_a_minute_without_this(limiter):
+    from lmi.rate_limiter import GLOBAL_RATE_LIMITER_TIMEOUT
+
+    # lmi's own wait, which page pictures counted as base64 text can far outlast (#96).
+    assert GLOBAL_RATE_LIMITER_TIMEOUT == 60

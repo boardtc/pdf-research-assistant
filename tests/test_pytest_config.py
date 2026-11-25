@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -31,3 +32,9 @@ def test_a_bare_pytest_run_collects_only_the_projects_own_tests(tmp_path):
 
     assert "test_own.py::test_own" in output
     assert "test_stray" not in output
+
+
+def test_the_tests_use_litellms_own_copy_of_its_price_list():
+    # Without this, importing LiteLLM downloads its price list first, which added 30 seconds or more to
+    # every test run, and made the run depend on the network.
+    assert os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP") == "True"

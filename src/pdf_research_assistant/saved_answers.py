@@ -20,6 +20,14 @@ INDEX_NAME = "answers"
 INDEX_FIELDS = ["file_location", "body", "question"]
 APP_FIELD = "app"
 MAX_RESULTS = 10
+# How often to try a save that fails, and how long to pause before the second try; the pause doubles after
+# each try, so five tries pause three seconds in all. Failures on Windows tend to come a few in a row.
+SAVE_ATTEMPTS = 5
+RETRY_PAUSE_SECONDS = 0.2
+# How often PaperQA tries for the writer lock when another writer holds it. Its own default of 1000 tries,
+# each waiting up to a minute, would leave a question waiting for hours on a lock that never comes free;
+# 8 tries wait a minute at most, about half a minute on average.
+LOCK_ATTEMPTS = 8
 
 
 class StoredAnswer(BaseModel):
@@ -56,15 +64,57 @@ def build_record(contexts: list[dict], recorded_settings: dict | None, asked_at:
     }
 
 
+def release_writer(index) -> None:
+    """Let go of the index's writer, and with it the folder's writer lock, after a failed save.
+
+    A writer whose save failed keeps the lock for as long as the process runs, even once nothing refers to
+    it, so every later save in the folder waits for a lock that never comes free. Waiting for its merging
+    threads ends the writer and frees the lock; anything it had not committed is dropped.
+    """
+    writer, index._writer = index._writer, None
+    if writer is not None:
+        try:
+            writer.wait_merging_threads()
+        except Exception:
+            pass
+
+
 async def add_answer(index_directory, response, record: dict) -> None:
-    """Add one answer to the index the way PaperQA's agent_query does, with the app's record beside it."""
-    index = open_index(index_directory)
+    """Add one answer to the index the way PaperQA's agent_query does, with the app's record beside it.
+
+    On Windows a save now and then fails with "Access is denied" on one of the index's own files, so a
+    failed save is tried again, after its writer has been let go.
+    """
     session = response.session
-    await index.add_document(
-        {"file_location": str(session.id), "body": session.answer, "question": session.question},
-        document=StoredAnswer(**response.model_dump(mode="json"), **{APP_FIELD: record}),
-    )
+    fields = {"file_location": str(session.id), "body": session.answer, "question": session.question}
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        index = open_index(index_directory)
+        kept_before = await index.count
+        try:
+            await index.add_document(
+                fields,
+                document=StoredAnswer(**response.model_dump(mode="json"), **{APP_FIELD: record}),
+                lock_acquisition_max_retries=LOCK_ATTEMPTS,
+            )
+            await index.save_index()
+            return
+        except Exception:
+            release_writer(index)
+            if await _finish_if_committed(index_directory, fields, kept_before):
+                return
+            if attempt == SAVE_ATTEMPTS:
+                raise
+        await asyncio.sleep(RETRY_PAUSE_SECONDS * 2 ** (attempt - 1))
+
+
+async def _finish_if_committed(index_directory, fields: dict, kept_before: int) -> bool:
+    """Finish a save that failed only after its answer was committed, so a retry does not add it twice."""
+    index = open_index(index_directory)
+    if await index.count <= kept_before:
+        return False
+    (await index.index_files)[fields["file_location"]] = index.filehash(fields["body"])
     await index.save_index()
+    return True
 
 
 def save_answer(index_directory, response, record: dict) -> str | None:

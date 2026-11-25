@@ -4,10 +4,14 @@ set -eu
 
 echo "Running test suite before push..."
 
-if ! python -m pytest; then
-  status=$?
+# The tests end any single test that runs longer than their time limit (tests/conftest.py), so a stuck
+# test fails the push after minutes instead of holding it for hours.
+status=0
+python -m pytest || status=$?
+
+if [ "$status" -ne 0 ]; then
   echo
-  echo "Push blocked because the test suite failed."
+  echo "Push blocked because the test suite failed (exit status $status)."
   echo "Install test dependencies with: python -m pip install -e .[dev]"
   exit "$status"
 fi

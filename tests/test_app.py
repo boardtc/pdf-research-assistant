@@ -2491,7 +2491,7 @@ def test_controls_get_new_keys_after_going_back_to_the_defaults(pdf_research_ass
     module.st.session_state.answer_settings_round = 1
 
     draw_quality_preset(module)
-    assert module.st.selectbox.call_args.kwargs["key"] == "setting_quality_preset_1"
+    assert module.st.selectbox.call_args.kwargs["key"] == "setting_quality_preset_1_Balanced"
     draw_source_settings(module)
     draw_answer_length(module)
 
@@ -2548,7 +2548,7 @@ def test_quality_preset_offers_the_presets_starting_at_the_one_in_use(pdf_resear
     assert call.args == ("Quality preset", PRESET_NAMES)
     assert call.kwargs["index"] == 2
     assert call.kwargs["help"] == module.settings_groups.get_setting("quality_preset").help
-    assert call.kwargs["key"] == "setting_quality_preset_0"
+    assert call.kwargs["key"] == "setting_quality_preset_0_High quality"
     module.st.caption.assert_called_once_with(quality_presets.get_preset("High quality").description)
     patched["save_value"].assert_not_called()
     patched["forget"].assert_not_called()
@@ -2567,6 +2567,26 @@ def test_picking_a_preset_saves_it_forgets_the_numbers_it_covers_and_redraws_the
     # The number boxes and answer length were drawn with the old values, so they get new keys.
     assert module.st.session_state.answer_settings_round == 1
     module.st.rerun.assert_called_once_with()
+
+
+def test_the_preset_control_gets_a_new_key_when_the_preset_in_use_changes(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_quality_preset(module)
+    balanced = module.st.selectbox.call_args.kwargs["key"]
+    draw_quality_preset(module, settings=_fake_settings(evidence_k=7))
+    custom = module.st.selectbox.call_args.kwargs["key"]
+
+    # The browser keeps the old pick under the old key, which would otherwise undo the changed number.
+    assert balanced == "setting_quality_preset_0_Balanced"
+    assert custom == "setting_quality_preset_0_Custom"
+
+
+def test_the_preset_control_key_follows_the_defaults_round(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.answer_settings_round = 2
+
+    assert module.quality_preset_widget_key("Fast") == "setting_quality_preset_2_Fast"
 
 
 def test_numbers_that_match_no_preset_show_as_custom_until_a_preset_is_picked(pdf_research_assistant_module):

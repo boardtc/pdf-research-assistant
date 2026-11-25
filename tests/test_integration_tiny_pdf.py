@@ -241,3 +241,62 @@ def test_an_answered_question_is_kept_beside_the_index_and_found_again(tiny_inde
     assert saved_answers.answers_folder(settings.agent.index.index_directory).parent == tiny_index.index_dir.parent
     # The kept answers sit beside the PDF index and are not counted as PDFs.
     assert bootstrap.get_indexed_doc_count(tiny_index.index_dir.parent) == 1
+
+
+# The sidebar in real Streamlit, which keeps each control's value between runs as a browser does.
+
+APP_PATH = PROJECT_ROOT / "src" / "pdf_research_assistant" / "app.py"
+
+
+@pytest.fixture
+def sidebar(tiny_index):
+    """Load the real page against the tiny index, with no saved sidebar settings, and return its runner."""
+    from streamlit.testing.v1 import AppTest
+
+    from pdf_research_assistant import saved_settings
+
+    saved_settings.SETTINGS_PATH.unlink(missing_ok=True)
+    page = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    page.run()
+    assert not page.exception
+    yield page
+    saved_settings.SETTINGS_PATH.unlink(missing_ok=True)
+
+
+def control(controls, label: str):
+    return next(item for item in controls if item.label == label)
+
+
+def test_a_changed_number_of_passages_is_kept_and_shows_the_preset_as_custom(sidebar):
+    from pdf_research_assistant import quality_presets, saved_settings
+
+    control(sidebar.number_input, "Passages gathered").set_value(7).run()
+
+    assert control(sidebar.number_input, "Passages gathered").value == 7
+    assert control(sidebar.selectbox, "Quality preset").value == quality_presets.NO_PRESET
+    assert saved_settings.load()["evidence_k"] == 7
+
+
+def test_a_changed_answer_length_is_kept_after_picking_a_preset(sidebar):
+    from pdf_research_assistant import quality_presets, saved_settings
+
+    control(sidebar.selectbox, "Quality preset").set_value("Fast").run()
+    long_answer = control(sidebar.selectbox, "Answer length").options[2]
+    control(sidebar.selectbox, "Answer length").set_value(long_answer).run()
+
+    assert "400 words" in long_answer
+    assert "400 words" in control(sidebar.selectbox, "Answer length").value
+    assert control(sidebar.selectbox, "Quality preset").value == quality_presets.NO_PRESET
+    assert saved_settings.load()["quality_preset"] == "Fast"
+    assert "400 words" in saved_settings.load()["answer_length"]
+
+
+def test_a_preset_picked_after_changing_a_number_still_replaces_it(sidebar):
+    from pdf_research_assistant import saved_settings
+
+    control(sidebar.number_input, "Passages gathered").set_value(7).run()
+    control(sidebar.selectbox, "Quality preset").set_value("High quality").run()
+
+    assert control(sidebar.number_input, "Passages gathered").value == 20
+    assert control(sidebar.selectbox, "Quality preset").value == "High quality"
+    assert "evidence_k" not in saved_settings.load()

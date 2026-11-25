@@ -976,6 +976,16 @@ def pick_whole_number(setting: settings_groups.Setting, current: int, high: int)
     return chosen
 
 
+def quality_preset_widget_key(current: str) -> str:
+    """Return the quality preset control's key, which also changes with the preset in use.
+
+    Changing a number or the answer length turns the preset in use into Custom. The browser would keep
+    showing the preset picked before, and that old pick would be taken as a new one and undo the change,
+    so the control is drawn again under a new key, starting at the preset in use.
+    """
+    return f"{setting_widget_key('quality_preset')}_{current}"
+
+
 def render_quality_preset(settings) -> None:
     """Let the user pick a quality preset, and say what it does or that the settings are their own mix.
 
@@ -985,7 +995,7 @@ def render_quality_preset(settings) -> None:
     """
     setting = settings_groups.get_setting("quality_preset")
     current = setting.read(settings)
-    chosen = draw_named_choice(setting, current, setting_widget_key(setting.key))
+    chosen = draw_named_choice(setting, current, quality_preset_widget_key(current))
     if chosen != current:
         saved_settings.save_value(setting.key, chosen)
         saved_settings.forget(quality_presets.KEYS_WITH_CONTROLS)

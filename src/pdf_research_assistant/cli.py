@@ -50,17 +50,18 @@ def run_exhaustive_question(question: str) -> None:
 def main() -> int:
     """Run the interactive CLI loop that forwards questions to the one-shot query helper."""
     exhaustive_mode = "--exhaustive" in sys.argv[1:]
-    answered = 0
+    asked = 0
     total_cost = 0.0
     while True:
         q = input("\nQuestion (or quit): ").strip()
         if q.lower() == "quit":
-            if answered:
-                print(f"\nQuestions answered this session: {answered}. Total cost: {format_cost(total_cost)}")
+            if asked:
+                print(f"\nQuestions asked this session: {asked}. Total cost: {format_cost(total_cost)}")
             return 0
         if exhaustive_mode:
             run_exhaustive_question(q)
             continue
+        asked += 1
         helper = Path(__file__).with_name("query_once.py")
         result = subprocess.run(
             [sys.executable, str(helper), q],
@@ -84,16 +85,17 @@ def main() -> int:
             elif result.stdout.strip():
                 print(result.stdout.strip())
             continue
+        # A failed question also says what it spent before failing.
+        cost = payload.get("cost") or 0.0
+        total_cost += cost
         if payload.get("ok"):
-            cost = payload.get("cost") or 0.0
-            answered += 1
-            total_cost += cost
             print("\n" + payload["answer"])
             print(f"Cost: {format_cost(cost)}")
             if payload.get("save_error"):
                 print(f"\n{ANSWER_NOT_SAVED_NOTE} {payload['save_error']}")
         else:
             print(f"\n{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
+            print(f"Cost: {format_cost(cost)}")
 
 
 if __name__ == "__main__":

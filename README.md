@@ -344,7 +344,7 @@ pdf-research
 
 Type a question at the prompt to search your indexed PDFs and return a cited answer with page references. Type `quit` to exit.
 
-After each answer the CLI prints what the question cost, in the same format as the app: `Cost: $0.0012`, or `Cost: less than $0.0001` when a local model answered and only the embeddings were paid for. When you type `quit`, it prints how many questions were answered and their total cost:
+After each answer the CLI prints what the question cost, in the same format as the app: `Cost: $0.0012`, or `Cost: less than $0.0001` when a local model answered and only the embeddings were paid for. When you type `quit`, it prints how many questions you asked and their total cost:
 
 ```text
 Question (or quit): What do the papers say about sleep and memory?
@@ -354,10 +354,10 @@ Cost: $0.0124
 
 Question (or quit): quit
 
-Questions answered this session: 1. Total cost: $0.0124
+Questions asked this session: 1. Total cost: $0.0124
 ```
 
-A question that fails prints its error instead and is left out of the total. If the answer could not be kept for searching later, a note under the cost line says why. With `--exhaustive`, each run reports its own actual cost instead, as described under [Exhaustive Search](#exhaustive-search), and there is no session total.
+A question that fails prints its error, then a cost line with what it spent before failing, and that cost is added to the total. If the query helper crashes without reporting anything, there is no cost line and the question adds nothing to the total. If the answer could not be kept for searching later, a note under the cost line says why. With `--exhaustive`, each run reports its own actual cost instead, as described under [Exhaustive Search](#exhaustive-search), and there is no session total.
 
 The CLI uses the settings saved in the sidebar and the local LLM setup. Like the Streamlit app, it runs each question in a fresh helper process so repeated questions start with clean query state. Each answer is kept for **Search previous answers** in the app.
 

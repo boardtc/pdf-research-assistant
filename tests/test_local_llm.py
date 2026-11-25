@@ -205,8 +205,21 @@ def test_litellm_model_gives_local_requests_longer_than_paperqas_60_second_defau
         model = LiteLLMModel(name=name, config=model_config)
 
         assert model.config["router_kwargs"]["timeout"] == local_llm.REQUEST_TIMEOUT_SECONDS > 60
-        # PaperQA's retries are kept.
-        assert model.config["router_kwargs"]["num_retries"] == 3
+
+
+def test_litellm_model_timeout_reaches_each_request_and_keeps_paperqas_retries():
+    # fhlmi 1.x turns the config into one ModelSpec per model, defaulting to 60 seconds and 3 retries.
+    # Older fhlmi (0.x) has no ModelSpec and passes router_kwargs straight to LiteLLM's Router instead.
+    model_spec = pytest.importorskip("lmi.config").ModelSpec
+
+    for config in (OLLAMA_CONFIG, COMPATIBLE_CONFIG):
+        _, model_config = local_llm.litellm_model(config)
+        spec = model_spec.from_legacy_params(
+            model_config["model_list"][0]["litellm_params"], model_config["router_kwargs"]
+        )
+
+        assert spec.timeout == local_llm.REQUEST_TIMEOUT_SECONDS
+        assert spec.max_retries == 3
 
 
 def test_litellm_model_for_an_openai_compatible_server_adds_a_placeholder_key():

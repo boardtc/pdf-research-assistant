@@ -11,6 +11,7 @@ import sys
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
+from lmi.cost_tracker import GLOBAL_COST_TRACKER, enable_cost_tracking
 from paperqa import Docs
 from paperqa.agents.main import run_agent
 from paperqa.utils import run_or_ensure
@@ -85,6 +86,17 @@ def answer_text(session) -> str:
     return NO_ANSWER_NOTE.format(reason=reason)
 
 
+def question_cost(session_cost: float | None, tracked_cost: float | None) -> float:
+    """Return what the question cost, embeddings included.
+
+    PaperQA's session cost adds up only the model's calls, so it leaves out the embeddings that find
+    passages; with a local model it is always zero. PaperQA's model client tracks the cost of every call
+    it makes, embeddings included. The larger of the two is used, so a tracker that saw nothing never
+    hides the session's own figure.
+    """
+    return max(session_cost or 0.0, tracked_cost or 0.0)
+
+
 def run_query_payload(question: str, one_off: dict | None = None) -> dict:
     """Run one PaperQA query, keep its answer for searching later, and return a serializable payload.
 
@@ -98,6 +110,9 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         rate_profiles.allow_limiter_wait(settings)
         # PaperQA adds every chunk the question reads to this Docs object, text, images and tables included.
         docs = Docs()
+        # Off by default; switched on so the embedding calls' cost is counted too.
+        enable_cost_tracking()
+        tracked_before = GLOBAL_COST_TRACKER.lifetime_cost_usd
         response = run_or_ensure(
             coro=run_agent(
                 docs,
@@ -106,6 +121,9 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
                 agent_type=settings.agent.agent_type,
             )
         )
+        cost = question_cost(response.session.cost, GLOBAL_COST_TRACKER.lifetime_cost_usd - tracked_before)
+        # The saved answer takes its cost from the session, so it shows the same figure as the chat.
+        response.session.cost = cost
         contexts = serialize_contexts(
             getattr(response.session, "contexts", []),
             cited_ids=getattr(response.session, "used_contexts", ()),
@@ -115,7 +133,7 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         payload = {
             "ok": True,
             "answer": answer_text(response.session),
-            "cost": response.session.cost,
+            "cost": cost,
             "contexts": contexts,
             "settings": recorded,
         }

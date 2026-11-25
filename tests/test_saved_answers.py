@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 from paperqa.agents.main import index_search
 from paperqa.agents.models import AgentStatus, AnswerResponse
+from paperqa.agents.search import SearchIndex
 from paperqa.types import PQASession
 
 from pdf_research_assistant import saved_answers
@@ -16,6 +17,34 @@ def _response(question="Why is the sky blue?", answer="Rayleigh scattering of li
 
 def _record(name="Paper p1"):
     return saved_answers.build_record([{"name": name}], {"index": "pqa_index_x", "values": []}, "2026-11-24T14:05:00+00:00")
+
+
+def _save(directory, response, record=None):
+    """Keep one answer, failing the test with the reason if it could not be kept."""
+    assert saved_answers.save_answer(directory, response, record or _record()) is None
+
+
+@pytest.fixture
+def failing_saves(monkeypatch):
+    """Make the next given number of PaperQA saves fail the way Windows now and then fails them.
+
+    With after_commit, each failing save commits the answer first and fails afterwards.
+    """
+    real_save = SearchIndex.save_index
+    plan = {"left": 0, "after_commit": False, "tried": 0}
+
+    async def save_index(self):
+        plan["tried"] += 1
+        if plan["left"] > 0:
+            plan["left"] -= 1
+            if plan["after_commit"]:
+                await real_save(self)
+            raise ValueError("An IO error occurred: 'Access is denied. (os error 5)'")
+        await real_save(self)
+
+    monkeypatch.setattr(SearchIndex, "save_index", save_index)
+    monkeypatch.setattr(saved_answers, "RETRY_PAUSE_SECONDS", 0)
+    return plan
 
 
 def test_build_record_keeps_the_passages_settings_and_time_given():
@@ -61,9 +90,9 @@ def test_a_saved_answer_is_found_again_with_the_apps_record(tmp_path):
 
 
 def test_search_looks_through_answers_as_well_as_questions_best_match_first(tmp_path):
-    saved_answers.save_answer(tmp_path, _response("What is photosynthesis?", "Plants turn light into sugar."), _record())
-    saved_answers.save_answer(tmp_path, _response("Why is the sky blue?", "Scattering of light by air."), _record())
-    saved_answers.save_answer(tmp_path, _response("Who wrote it?", "Nobody knows."), _record())
+    _save(tmp_path, _response("What is photosynthesis?", "Plants turn light into sugar."))
+    _save(tmp_path, _response("Why is the sky blue?", "Scattering of light by air."))
+    _save(tmp_path, _response("Who wrote it?", "Nobody knows."))
 
     found = saved_answers.search(tmp_path, "light sugar")
 
@@ -77,16 +106,16 @@ def test_search_finds_nothing_when_no_answer_has_been_kept(tmp_path):
 
 def test_search_shows_the_best_matches_only(tmp_path):
     for number in range(3):
-        saved_answers.save_answer(tmp_path, _response(f"Question {number} about light?", f"Answer {number}."), _record())
+        _save(tmp_path, _response(f"Question {number} about light?", f"Answer {number}."))
 
     assert len(saved_answers.search(tmp_path, "light", top_n=2)["answers"]) == 2
 
 
 def test_two_answers_with_the_same_text_come_back_once(tmp_path):
     # PaperQA names each stored file after the answer text, so the later answer replaces the earlier one's file.
-    saved_answers.save_answer(tmp_path, _response("First?", "I cannot answer."), _record())
+    _save(tmp_path, _response("First?", "I cannot answer."))
     second = _response("Second?", "I cannot answer.")
-    saved_answers.save_answer(tmp_path, second, _record())
+    _save(tmp_path, second)
 
     found = saved_answers.search(tmp_path, "cannot")
 
@@ -94,7 +123,7 @@ def test_two_answers_with_the_same_text_come_back_once(tmp_path):
 
 
 def test_search_raises_when_paperqa_cannot_read_the_search(tmp_path):
-    saved_answers.save_answer(tmp_path, _response(), _record())
+    _save(tmp_path, _response())
 
     with pytest.raises(ValueError):
         saved_answers.search(tmp_path, "sky AND")
@@ -102,7 +131,7 @@ def test_search_raises_when_paperqa_cannot_read_the_search(tmp_path):
 
 def test_paperqas_own_search_still_reads_the_answers_kept_here(tmp_path):
     response = _response()
-    saved_answers.save_answer(tmp_path, response, _record())
+    _save(tmp_path, response)
 
     results = asyncio.run(index_search("sky", index_name="answers", index_directory=tmp_path))
 
@@ -114,16 +143,9 @@ def test_paperqas_own_search_still_reads_the_answers_kept_here(tmp_path):
 def test_answers_kept_by_paperqa_itself_are_found_without_the_apps_record(tmp_path):
     response = _response()
 
-    async def add_like_paperqa():
-        index = saved_answers.open_index(tmp_path)
-        session = response.session
-        await index.add_document(
-            {"file_location": str(session.id), "body": session.answer, "question": session.question},
-            document=response,
-        )
-        await index.save_index()
-
-    asyncio.run(add_like_paperqa())
+    # PaperQA stores the answer alone. Saving through the app keeps its retry for Windows' failed saves.
+    with mock.patch.object(saved_answers, "StoredAnswer", lambda **_data: response):
+        _save(tmp_path, response)
     [answer] = saved_answers.search(tmp_path, "sky")["answers"]
 
     assert (answer["question"], answer["asked_at"], answer["contexts"], answer["settings"]) == (
@@ -132,6 +154,50 @@ def test_answers_kept_by_paperqa_itself_are_found_without_the_apps_record(tmp_pa
         [],
         None,
     )
+
+
+def test_a_save_that_fails_is_tried_again_and_the_answer_kept(tmp_path, failing_saves):
+    failing_saves["left"] = 1
+
+    _save(tmp_path, _response())
+
+    # At least twice: a real failure on Windows can come on top of the one made here.
+    assert failing_saves["tried"] >= 2
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+
+
+def test_a_failed_save_lets_go_of_the_folders_writer_lock(tmp_path, failing_saves, monkeypatch):
+    # A writer whose save failed kept the lock, so the next save in the folder waited on it for hours.
+    # With one try for the lock, a lock still held fails the next save at once instead.
+    monkeypatch.setattr(saved_answers, "LOCK_ATTEMPTS", 1)
+    _save(tmp_path, _response("First?", "First answer."))
+    failing_saves["left"] = saved_answers.SAVE_ATTEMPTS
+    assert saved_answers.save_answer(tmp_path, _response("Second?", "Second answer."), _record()) is not None
+
+    _save(tmp_path, _response("Third?", "Third answer."))
+
+    assert saved_answers.search(tmp_path, "answer")["searched"] == 2
+
+
+def test_a_save_that_fails_after_committing_keeps_the_answer_once(tmp_path, failing_saves):
+    failing_saves.update(left=1, after_commit=True)
+    response = _response()
+
+    _save(tmp_path, response)
+
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+    # PaperQA's list of kept files names the answer, so PaperQA would not add it again.
+    assert str(response.session.id) in asyncio.run(saved_answers.open_index(tmp_path).index_files)
+
+
+def test_a_save_that_keeps_failing_gives_up_and_says_why(tmp_path, failing_saves):
+    failing_saves["left"] = saved_answers.SAVE_ATTEMPTS
+
+    error = saved_answers.save_answer(tmp_path, _response(), _record())
+
+    assert error == "ValueError: An IO error occurred: 'Access is denied. (os error 5)'"
+    assert failing_saves["tried"] == saved_answers.SAVE_ATTEMPTS
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 0
 
 
 def test_save_answer_says_why_an_answer_could_not_be_kept_without_raising(tmp_path):

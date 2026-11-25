@@ -15,6 +15,7 @@ import csv
 import html
 import json
 import logging
+import math
 import pickle
 import re
 import string
@@ -80,6 +81,11 @@ REPORT_NOTICE = (
 
 EVIDENCE_SUMMARY_LENGTH = "about 200 words"
 MAX_CONSECUTIVE_FAILED_CHUNKS = 20
+# How long a request may wait for the shared rate limiter. lmi's own 60 seconds is far too short when
+# passages carry whole-page pictures, each weighing hundreds of thousands of tokens against the limit,
+# and dozens are sent at once. A run has no time limit, and the limiter always lets a request through
+# once earlier ones have used their share of the minute, so a request waits as long as it takes.
+LIMITER_WAIT_SECONDS = math.inf
 ABANDONED_CHUNK_REASON = "PaperQA abandoned this chunk after a timeout, bad request, or unreadable reply."
 SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_*-]+")
 
@@ -662,6 +668,7 @@ async def run_exhaustive(
     active_index_dir = index_dir or bootstrap.get_active_index_dir(current_settings)
     model = summary_llm_model or current_settings.get_summary_llm()
     semaphore = asyncio.Semaphore(current_settings.answer.max_concurrent_requests)
+    rate_profiles.allow_limiter_wait(LIMITER_WAIT_SECONDS)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     state = RunState()

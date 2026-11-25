@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from paperqa import Settings
 from paperqa.settings import AgentSettings
@@ -230,23 +232,22 @@ def _acquire_twice(limiter, key: str) -> None:
     asyncio.run(run())
 
 
-def test_requests_wait_for_the_rate_limiter_as_long_as_the_question_may_run(limiter):
-    settings = _settings()
-    settings.agent.timeout = 5
-
-    rate_profiles.allow_limiter_wait(settings)
+def test_requests_wait_for_the_rate_limiter_as_long_as_allowed(limiter):
+    rate_profiles.allow_limiter_wait(5)
 
     _acquire_twice(limiter, "long-wait")
 
 
-def test_a_request_still_stops_waiting_when_the_question_would_have_ended(limiter):
-    settings = _settings()
-    settings.agent.timeout = 5
-    rate_profiles.allow_limiter_wait(settings)
-    # A later question with a shorter time allowed replaces the wait instead of keeping the longer one.
-    settings.agent.timeout = 0.2
+def test_requests_can_wait_for_the_rate_limiter_with_no_time_limit(limiter):
+    rate_profiles.allow_limiter_wait(math.inf)
 
-    rate_profiles.allow_limiter_wait(settings)
+    _acquire_twice(limiter, "no-limit")
+
+
+def test_a_request_still_stops_waiting_when_its_time_is_up(limiter):
+    rate_profiles.allow_limiter_wait(5)
+    # A later call with a shorter wait replaces the wait instead of keeping the longer one.
+    rate_profiles.allow_limiter_wait(0.2)
 
     with pytest.raises(TimeoutError):
         _acquire_twice(limiter, "short-wait")

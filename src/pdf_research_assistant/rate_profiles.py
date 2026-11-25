@@ -11,7 +11,8 @@ long runs such as exhaustive search take far longer than they need to.
 
 The limiter weighs a request by its length in characters / 4, and a picture goes as base64 text, so a
 passage sent with whole-page pictures can weigh several hundred thousand tokens. lmi lets a request
-wait only 60 seconds for its turn, after which it fails; allow_limiter_wait lets it wait longer.
+wait only 60 seconds for its turn, after which it fails; allow_limiter_wait lets it wait longer, for
+as long as a question may run, or with no limit for exhaustive search.
 """
 
 import functools
@@ -108,8 +109,8 @@ def apply_profile(settings: object, name: str) -> None:
     settings.answer.max_concurrent_requests = profile.requests_at_once
 
 
-def allow_limiter_wait(settings: object) -> None:
-    """Let each request wait for the rate limiter for as long as the question may run (`agent.timeout`).
+def allow_limiter_wait(seconds: float) -> None:
+    """Let each request wait for the rate limiter for up to `seconds` (math.inf for no limit).
 
     lmi fixes its wait when it is imported (60 seconds, or the RATE_LIMITER_TIMEOUT environment variable),
     so the wait is given to its shared limiter here instead. Without this, passages sent with whole-page
@@ -117,9 +118,7 @@ def allow_limiter_wait(settings: object) -> None:
     """
     limiter = rate_limiter.GLOBAL_LIMITER
     # Built from the class's method each time, so a second call replaces the wait rather than wrapping it.
-    limiter.try_acquire = functools.partial(
-        type(limiter).try_acquire, limiter, acquire_timeout=settings.agent.timeout
-    )
+    limiter.try_acquire = functools.partial(type(limiter).try_acquire, limiter, acquire_timeout=seconds)
 
 
 def find_profile(settings: object) -> RateProfile | None:

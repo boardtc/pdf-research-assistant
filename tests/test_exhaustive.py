@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import json
+import math
 import os
 import pickle
 import shutil
@@ -13,7 +14,8 @@ from unittest import mock
 
 import litellm
 import pytest
-from lmi import LLMResult
+from lmi import LiteLLMModel, LLMResult
+from lmi.rate_limiter import GLOBAL_LIMITER
 from paperqa import Docs
 from paperqa.types import Doc, Text
 
@@ -47,6 +49,21 @@ class FakeSummaryLLM:
         if isinstance(reply, BaseException):
             raise reply
         return LLMResult(model="fake", date="", text=reply, cost=self.cost)
+
+
+class LimitedSummaryLLM(FakeSummaryLLM):
+    """A fake summary model that waits for lmi's shared rate limiter first, through lmi's own check.
+
+    Each request weighs the limiter's whole allowance for a second, as a passage with whole-page
+    pictures can weigh most of a minute's allowance at High limits.
+    """
+
+    name = "limited-fake"
+    config = {"rate_limit": {name: "10 per 1 second"}}
+
+    async def call_single(self, messages, callbacks=None, name=None, **kwargs):
+        await LiteLLMModel.check_rate_limit(self, 10)
+        return await super().call_single(messages, callbacks=callbacks, name=name, **kwargs)
 
 
 def _litellm_error(error_type):
@@ -131,6 +148,8 @@ def exhaustive_module(workspace_tmp_path):
         module = importlib.import_module("pdf_research_assistant.exhaustive")
         yield module
     forget_modules()
+    # A run changes how long the shared rate limiter lets requests wait; put back lmi's own wait.
+    vars(GLOBAL_LIMITER).pop("try_acquire", None)
 
 
 @pytest.fixture
@@ -1098,6 +1117,28 @@ def test_run_keeps_evidence_from_a_paper_with_one_failed_chunk(exhaustive_module
     assert paper["status"] == exhaustive_module.RESULT_RELEVANT
     assert (len(paper["evidence"]), paper["chunks_failed"]) == (1, 1)
     assert "RateLimitError" in paper["failures"][0]["reason"]
+
+
+def test_run_lets_requests_wait_for_the_rate_limiter_with_no_time_limit(
+    exhaustive_module, shard_dir, manifest_path, output_dir
+):
+    _seed_papers(exhaustive_module, shard_dir, manifest_path, {"p.pdf": ["a", "b"]})
+    # A short wait stands in for lmi's fixed 60 seconds, which a queue of picture passages outlasts.
+    exhaustive_module.rate_profiles.allow_limiter_wait(0.2)
+
+    summary = _run(exhaustive_module, shard_dir, output_dir, LimitedSummaryLLM())
+
+    assert summary["failed_chunks"] == 0
+    assert len(summary["papers"][0]["evidence"]) == 2
+
+
+def test_run_waits_for_the_rate_limiter_with_no_time_limit(exhaustive_module, shard_dir, manifest_path, output_dir):
+    _seed_papers(exhaustive_module, shard_dir, manifest_path, {"p.pdf": ["a"]})
+
+    with mock.patch.object(exhaustive_module.rate_profiles, "allow_limiter_wait") as allow_wait:
+        _run(exhaustive_module, shard_dir, output_dir, FakeSummaryLLM())
+
+    allow_wait.assert_called_once_with(math.inf)
 
 
 def test_run_redacts_key_like_text_from_failure_reasons(exhaustive_module, shard_dir, manifest_path, output_dir):

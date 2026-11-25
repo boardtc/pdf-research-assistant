@@ -33,12 +33,20 @@ print(len(indexed))
 '@ | python -
 ```
 
-Use the active shard folder name printed by your most recent rebuild or visible under `<repo-root>\index`, for example `pqa_index_cc6c1744115a46e85b221f1f29f61f2d`.
+Use the active shard folder name shown in the app under **Active index details**, printed by your most recent rebuild, or visible under `<repo-root>\index`, for example `pqa_index_cc6c1744115a46e85b221f1f29f61f2d`.
 
 ## Check Whether Rebuild Is Still Running
 
+A rebuild started with `pdf-research-rebuild` shows that name; one started from the app runs `rebuild.py`.
+
 ```powershell
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*pdf-research-rebuild*' } | Select-Object ProcessId, Name, CommandLine
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'pdf-research-rebuild|rebuild\.py' } | Select-Object ProcessId, Name, CommandLine
+```
+
+## Follow A Rebuild Started From The App
+
+```powershell
+Get-Content <repo-root>\index\rebuild.log -Tail 20 -Wait
 ```
 
 ## Check Recent Index File Activity

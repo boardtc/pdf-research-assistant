@@ -3300,6 +3300,18 @@ def test_local_llm_guide_says_how_a_local_model_differs_from_openai(pdf_research
     assert "plans the searches" in guide
 
 
+def test_local_llm_guide_suggests_fast_and_low_limits_for_small_models(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    guide = module.LOCAL_LLM_GUIDE
+
+    assert "**Fast**" in guide
+    assert "**Low limits**" in guide
+    assert "no papers" in guide
+    # The names in the tip must match the options the sidebar offers.
+    assert "Fast" in [preset.name for preset in module.quality_presets.PRESETS]
+    assert "Low limits" in [profile.name for profile in module.rate_profiles.PROFILES]
+
+
 def test_local_llm_panel_explains_each_input(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 

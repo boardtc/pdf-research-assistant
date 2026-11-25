@@ -191,9 +191,22 @@ def test_litellm_model_for_ollama_points_litellm_at_the_local_server():
                     "model_name": "ollama/llama3.2",
                     "litellm_params": {"model": "ollama/llama3.2", "api_base": "http://localhost:11434"},
                 }
-            ]
+            ],
+            "router_kwargs": {"timeout": local_llm.REQUEST_TIMEOUT_SECONDS},
         },
     )
+
+
+def test_litellm_model_gives_local_requests_longer_than_paperqas_60_second_default():
+    from lmi.llms import LiteLLMModel
+
+    for config in (OLLAMA_CONFIG, COMPATIBLE_CONFIG):
+        name, model_config = local_llm.litellm_model(config)
+        model = LiteLLMModel(name=name, config=model_config)
+
+        assert model.config["router_kwargs"]["timeout"] == local_llm.REQUEST_TIMEOUT_SECONDS > 60
+        # PaperQA's retries are kept.
+        assert model.config["router_kwargs"]["num_retries"] == 3
 
 
 def test_litellm_model_for_an_openai_compatible_server_adds_a_placeholder_key():

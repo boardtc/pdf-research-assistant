@@ -14,6 +14,9 @@ from urllib.parse import urlparse
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "local_llm.json"
 CHECK_TIMEOUT_SECONDS = 5
+# PaperQA's model client gives up on a request after 60 seconds unless told otherwise. A local model
+# without a graphics card answers one request at a time, so requests waiting their turn need much longer.
+REQUEST_TIMEOUT_SECONDS = 600
 # OpenAI-compatible servers ignore the key, but the client library refuses to send a request without one.
 PLACEHOLDER_API_KEY = "not-needed"
 
@@ -137,7 +140,10 @@ def litellm_model(config: dict) -> tuple[str, dict]:
     params = {"model": name, "api_base": config["address"]}
     if config["provider"] == OPENAI_COMPATIBLE:
         params["api_key"] = PLACEHOLDER_API_KEY
-    return name, {"model_list": [{"model_name": name, "litellm_params": params}]}
+    return name, {
+        "model_list": [{"model_name": name, "litellm_params": params}],
+        "router_kwargs": {"timeout": REQUEST_TIMEOUT_SECONDS},
+    }
 
 
 def describe_answer_model(config: dict | None, hosted_model: str) -> str:

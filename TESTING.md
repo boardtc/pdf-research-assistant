@@ -26,7 +26,7 @@ After that, every `git push` from that clone will run:
 python -m pytest
 ```
 
-If the tests fail, Git blocks the push. The full suite takes over two minutes, so expect `git push` to sit at "Running test suite before push..." for that long.
+If the tests fail, Git blocks the push. The full suite takes about two to three minutes on a Windows laptop (1 minute 48 seconds and 2 minutes 54 seconds in two runs of about 1,250 tests), so expect `git push` to sit at "Running test suite before push..." for that long. pytest prints the time on its last line.
 
 Important:
 

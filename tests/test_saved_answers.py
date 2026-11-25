@@ -43,7 +43,6 @@ def failing_saves(monkeypatch):
         await real_save(self)
 
     monkeypatch.setattr(SearchIndex, "save_index", save_index)
-    monkeypatch.setattr(saved_answers, "RETRY_PAUSE_SECONDS", 0)
     return plan
 
 
@@ -170,6 +169,7 @@ def test_a_failed_save_lets_go_of_the_folders_writer_lock(tmp_path, failing_save
     # A writer whose save failed kept the lock, so the next save in the folder waited on it for hours.
     # With one try for the lock, a lock still held fails the next save at once instead.
     monkeypatch.setattr(saved_answers, "LOCK_ATTEMPTS", 1)
+    monkeypatch.setattr(saved_answers, "RETRY_PAUSE_SECONDS", 0)
     _save(tmp_path, _response("First?", "First answer."))
     failing_saves["left"] = saved_answers.SAVE_ATTEMPTS
     assert saved_answers.save_answer(tmp_path, _response("Second?", "Second answer."), _record()) is not None
@@ -190,7 +190,8 @@ def test_a_save_that_fails_after_committing_keeps_the_answer_once(tmp_path, fail
     assert str(response.session.id) in asyncio.run(saved_answers.open_index(tmp_path).index_files)
 
 
-def test_a_save_that_keeps_failing_gives_up_and_says_why(tmp_path, failing_saves):
+def test_a_save_that_keeps_failing_gives_up_and_says_why(tmp_path, failing_saves, monkeypatch):
+    monkeypatch.setattr(saved_answers, "RETRY_PAUSE_SECONDS", 0)
     failing_saves["left"] = saved_answers.SAVE_ATTEMPTS
 
     error = saved_answers.save_answer(tmp_path, _response(), _record())

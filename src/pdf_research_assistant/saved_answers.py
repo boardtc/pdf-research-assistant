@@ -20,8 +20,9 @@ INDEX_NAME = "answers"
 INDEX_FIELDS = ["file_location", "body", "question"]
 APP_FIELD = "app"
 MAX_RESULTS = 10
-# How often to try a save that fails, and how long to pause between tries.
-SAVE_ATTEMPTS = 3
+# How often to try a save that fails, and how long to pause before the second try; the pause doubles after
+# each try, so five tries pause three seconds in all. Failures on Windows tend to come a few in a row.
+SAVE_ATTEMPTS = 5
 RETRY_PAUSE_SECONDS = 0.2
 # How often PaperQA tries for the writer lock when another writer holds it. Its own default of 1000 tries,
 # each waiting up to a minute, would leave a question waiting for hours on a lock that never comes free;
@@ -103,7 +104,7 @@ async def add_answer(index_directory, response, record: dict) -> None:
                 return
             if attempt == SAVE_ATTEMPTS:
                 raise
-        await asyncio.sleep(RETRY_PAUSE_SECONDS * attempt)
+        await asyncio.sleep(RETRY_PAUSE_SECONDS * 2 ** (attempt - 1))
 
 
 async def _finish_if_committed(index_directory, fields: dict, kept_before: int) -> bool:

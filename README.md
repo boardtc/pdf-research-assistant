@@ -309,6 +309,9 @@ The settings are saved in `local_llm.json` in the project folder, which Git igno
 > **Note**
 > Only the model that reads passages and writes answers changes. Finding passages still uses OpenAI embeddings, so `OPENAI_API_KEY` is still needed, and switching does not rebuild your index. Local models are usually slower than OpenAI, and exhaustive search shows no cost estimate for them.
 
+> **Tip**
+> Small models, such as the 3B `llama3.2`, often lose their way when they plan their own searches: the answer says there are no papers, or no answer is written. If that happens, choose the **Fast** quality preset, which runs PaperQA's steps in a fixed order, and **Low limits**, which sends fewer requests at once. On a laptop without a graphics card, `llama3.2` gave a cited answer this way in about ten minutes, while the model-planned **Balanced** preset did not.
+
 ### Rebuild Index
 
 From the app, click **Rebuild the index**. The button appears at the top of the page whenever the index is out of date: it is empty, which includes having just saved new index settings, it is missing PDFs from the paper list, or some PDFs failed to index. It is always under **Library and index settings** in the sidebar as well, for when you have added PDFs.

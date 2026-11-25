@@ -69,6 +69,20 @@ def serialize_contexts(contexts, cited_ids=(), passages=()):
 
 
 USAGE_ERROR = "Expected a question, optionally followed by one-off settings as a JSON object."
+# Shown in place of the answer when PaperQA stops without writing one, so the reply is never blank.
+NO_ANSWER_NOTE = (
+    "No answer was written: PaperQA stopped before writing one (it said \"{reason}\"). "
+    "Try the question again, ask it another way, or gather more passages."
+)
+
+
+def answer_text(session) -> str:
+    """Return the answer to show, or a note saying why there is none when PaperQA wrote no answer."""
+    formatted = (getattr(session, "formatted_answer", "") or "").strip()
+    if formatted:
+        return formatted
+    reason = (getattr(session, "answer", "") or "").strip() or "No answer generated."
+    return NO_ANSWER_NOTE.format(reason=reason)
 
 
 def run_query_payload(question: str, one_off: dict | None = None) -> dict:
@@ -98,7 +112,7 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         recorded = settings_groups.record_answer_settings(settings, one_off=applied)
         payload = {
             "ok": True,
-            "answer": response.session.formatted_answer,
+            "answer": answer_text(response.session),
             "cost": response.session.cost,
             "contexts": contexts,
             "settings": recorded,

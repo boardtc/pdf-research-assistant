@@ -354,6 +354,43 @@ def test_run_query_payload_still_answers_and_says_why_when_the_answer_could_not_
     assert result["save_error"] == "OSError: disk full"
 
 
+def test_answer_text_shows_the_answer_when_paperqa_wrote_one(query_once_module):
+    session = SimpleNamespace(formatted_answer="Question: Q\n\nAn answer (Moon2004 pages 1-2).", answer="An answer")
+
+    assert query_once_module.answer_text(session) == "Question: Q\n\nAn answer (Moon2004 pages 1-2)."
+
+
+def test_answer_text_explains_a_missing_answer_instead_of_showing_nothing(query_once_module):
+    # What PaperQA 2026.3.18 leaves when the agent stops before gen_answer, for example after timeouts.
+    session = SimpleNamespace(formatted_answer="", answer="No answer generated.")
+
+    text = query_once_module.answer_text(session)
+
+    assert text.startswith("No answer was written")
+    assert '"No answer generated."' in text
+    assert "ask it another way" in text
+
+
+def test_answer_text_still_explains_when_paperqa_gives_no_reason(query_once_module):
+    session = SimpleNamespace(formatted_answer="   ", answer=None)
+
+    assert '"No answer generated."' in query_once_module.answer_text(session)
+
+
+def test_run_query_payload_never_returns_a_blank_answer(query_once_module):
+    response = SimpleNamespace(
+        session=SimpleNamespace(formatted_answer="", answer="No answer generated.", cost=0.0, contexts=[])
+    )
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=None):
+        result = query_once_module.run_query_payload("Q")
+
+    assert result["ok"] is True
+    assert result["answer"].startswith("No answer was written")
+
+
 def test_run_query_payload_keeps_nothing_when_the_question_fails(query_once_module):
     query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
     query_once_module.run_or_ensure = mock.Mock(side_effect=RuntimeError("boom"))

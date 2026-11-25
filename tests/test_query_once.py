@@ -489,3 +489,37 @@ def test_main_returns_exit_code_0_and_prints_serialized_payload_for_single_quest
     assert exit_code == 0
     payload_mock.assert_called_once_with("What is new?", None)
     print_mock.assert_called_once_with(json.dumps(payload, ensure_ascii=False))
+
+
+def test_main_writes_utf8_even_when_stdout_uses_a_windows_code_page(query_once_module):
+    """A piped stdout on Windows uses the console code page, but the app and the CLI read UTF-8."""
+    import io
+
+    # A curly apostrophe is in cp1252 but as a different byte; a non-breaking hyphen is not in it at all.
+    payload = {"ok": True, "answer": "A teacher’s passion is long‑lasting.", "cost": 0.1, "contexts": []}
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="cp1252")
+    with mock.patch.object(query_once_module.sys, "argv", ["query_once.py", "What is new?"]):
+        with mock.patch.object(query_once_module, "run_query_payload", return_value=payload):
+            with mock.patch.object(query_once_module.sys, "stdout", stdout):
+                exit_code = query_once_module.main()
+    stdout.flush()
+
+    assert exit_code == 0
+    assert json.loads(raw.getvalue().decode("utf-8")) == payload
+
+
+def test_utf8_output_is_left_alone_on_a_stream_that_cannot_be_reconfigured(query_once_module):
+    stream = SimpleNamespace()
+
+    query_once_module.use_utf8_output(stream)
+
+    assert vars(stream) == {}
+
+
+def test_utf8_output_switches_a_stream_to_utf8(query_once_module):
+    stream = mock.Mock()
+
+    query_once_module.use_utf8_output(stream)
+
+    stream.reconfigure.assert_called_once_with(encoding="utf-8")

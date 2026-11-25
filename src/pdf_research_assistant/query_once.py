@@ -118,8 +118,20 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         }
 
 
+def use_utf8_output(stream) -> None:
+    """Make a stream write UTF-8, which is what the app and the CLI read.
+
+    A piped stdout on Windows uses the console code page instead, which garbles curly quotes and cannot
+    write some characters at all, so an answer that had already been paid for would be lost.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure:
+        reconfigure(encoding="utf-8")
+
+
 def main() -> int:
     """Execute the one-shot query CLI contract expected by the app and shell wrapper."""
+    use_utf8_output(sys.stdout)
     if len(sys.argv) not in (2, 3):
         print(json.dumps({"ok": False, "error": USAGE_ERROR}))
         return 1

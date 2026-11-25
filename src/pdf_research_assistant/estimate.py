@@ -4,11 +4,13 @@ Exhaustive search plans one summary call per passage in scope (exhaustive.estima
 question is smaller and its size is known from the settings alone, so it can be estimated on every
 page load without reading the index:
 
-- PaperQA's agent makes a few calls to choose its tools (search, gather evidence, answer). With fixed
-  search steps (`agent.agent_type` "fake") the answer model is instead asked once for a few searches and
-  once more to finish, after the steps have run.
+- Starting the query process and opening the index take a fixed time before the first call.
+- PaperQA's agent makes a call to choose each step (search, gather evidence, answer, finish), usually
+  about eight. With fixed search steps (`agent.agent_type` "fake") the answer model is instead asked once
+  for a few searches and once more to finish, after the steps have run.
 - Gathering evidence sends `answer.evidence_k` passages to the summary model, at most
-  `answer.max_concurrent_requests` at a time, and asks for `answer.evidence_summary_length` each.
+  `answer.max_concurrent_requests` at a time, and asks for `answer.evidence_summary_length` each. The agent
+  usually gathers evidence a few times, so the time counts the passages being read more than once.
 - With a before-answer prompt (`prompts.pre`), the answer model is first sent that prompt with the
   question, and its reply goes on to the answer as background.
 - The answer model then writes `answer.answer_length` from up to `answer.answer_max_sources` summaries.
@@ -39,11 +41,19 @@ TOKENS_PER_WORD = 4 / 3
 LIMITER_TOKEN_FACTOR = 1.1
 # Used when a length phrase names no number of words.
 FALLBACK_WORDS = 200
-# PaperQA's agent usually searches, gathers evidence, answers and finishes: about four short calls, each
-# sent its tool descriptions and the conversation so far. A guess, not a measurement.
-AGENT_CALLS = 4
-AGENT_INPUT_TOKENS = 2000
+# PaperQA's agent chooses each step with a short call: searching, gathering evidence, answering and
+# finishing. Kept answers on a library of about 120 PDFs took 4 to 14 steps, most often 6 to 8, and sent
+# about 1,100 tokens to the agent model per step.
+AGENT_CALLS = 8
+AGENT_INPUT_TOKENS = 1100
 AGENT_OUTPUT_TOKENS = 50
+# Each time the agent gathers evidence, all the passages are read again; the same kept answers gathered
+# evidence 1 to 7 times, most often 3. Counted for the time only, since the cost estimate was already
+# within about twice the real cost without it.
+EVIDENCE_ROUNDS = 3
+# Starting the query process and opening the index, before the first call. Fitted with the figures above to
+# real questions timed from asking to the answer appearing (25 Nov 2026).
+START_SECONDS = 25
 # With fixed search steps, the answer model is asked for a few searches (a short prompt and reply), then
 # sent the conversation once more to finish, like one of the agent's own calls.
 FIXED_STEPS_AGENT_TYPE = "fake"
@@ -78,20 +88,21 @@ DEFAULT_PICTURE_TOKENS = (85, 170)
 # for every 3 bytes of a PNG, which measured about 0.165 bytes per pixel.
 PNG_BYTES_PER_PIXEL = 0.165
 BASE64_CHARACTERS_PER_BYTE = 4 / 3
-# Fitted to one measured question: 10 passages sent at once with 14 pictures, up to 5 in one passage, took
-# about 90 seconds against an estimate of under 30 without pictures. A batch waits for its slowest passage,
-# which has more pictures than the average, so this is well above the time to read one picture.
-SECONDS_PER_PICTURE = 40
+# Fitted to two real questions on a library of about 120 PDFs, with 10 passages sent at once: cut-out pictures
+# took 204 seconds and whole-page pictures 198. A batch waits for its slowest passage, which has more pictures
+# than the average, so this is well above the time to read one picture. It is counted once per batch, not
+# for every round of evidence gathering, because it was fitted to whole questions.
+SECONDS_PER_PICTURE = 50
 
 FAST = "Fast"
 BALANCED = "Balanced"
 SLOWER = "Slower"
 HIGHER_COST = "Higher cost"
-# Chosen so PaperQA's defaults with gpt-4o-mini come out Balanced, its fast preset's numbers (5 passages,
-# short answers) Fast, and 30 passages Higher cost.
-FAST_SECONDS = 22
+# Chosen so PaperQA's defaults with gpt-4o-mini come out Balanced, the Fast preset (5 passages, short answers,
+# fixed steps, about 35 seconds) Fast, Low limits Slower, and 30 passages Higher cost.
+FAST_SECONDS = 50
 FAST_COST_USD = 0.004
-SLOWER_SECONDS = 45
+SLOWER_SECONDS = 90
 HIGHER_COST_USD = 0.008
 
 BADGE_COLOURS = {FAST: "green", BALANCED: "blue", SLOWER: "orange", HIGHER_COST: "orange"}
@@ -108,6 +119,10 @@ PRE_PROMPT_NOTE = (
     "A before-answer prompt is set, so the answer model is called once more, before it writes the answer."
 )
 PICTURE_NOTE = "Pictures often cost more than the text and make each passage slower to read."
+START_NOTE = f"That includes about {START_SECONDS} seconds to start the question and open the index."
+EVIDENCE_ROUNDS_NOTE = (
+    f"The model usually gathers evidence about {EVIDENCE_ROUNDS} times, reading the passages again each time."
+)
 
 
 @dataclass(frozen=True)
@@ -250,9 +265,12 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     fixed_steps = settings.agent.agent_type == FIXED_STEPS_AGENT_TYPE
     if fixed_steps:
         agent_calls, agent_model, agent_input = FIXED_STEPS_CALLS, settings.llm, FIXED_STEPS_INPUT_TOKENS
+        # Fixed steps gather evidence once.
+        evidence_rounds = 1
     else:
         agent_calls, agent_model = AGENT_CALLS, settings.agent.agent_llm
         agent_input = AGENT_CALLS * AGENT_INPUT_TOKENS
+        evidence_rounds = EVIDENCE_ROUNDS
 
     calls = (
         (settings.summary_llm, passages * summary_input + picture_tokens, passages * summary_output),
@@ -265,10 +283,11 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
     costs = [call_cost(*call) for call in calls]
     cost_usd = None if local or None in costs else sum(costs)
 
-    # Summaries go out a batch at a time; the answer and the agent's calls go one after another.
+    # Summaries go out a batch at a time, each time evidence is gathered; the answer and the agent's calls go
+    # one after another.
     batches = math.ceil(passages / answer.max_concurrent_requests)
     seconds = (
-        batches * (call_seconds(summary_output) + pictures_per_passage * SECONDS_PER_PICTURE)
+        batches * (evidence_rounds * call_seconds(summary_output) + pictures_per_passage * SECONDS_PER_PICTURE)
         + call_seconds(answer_output)
         + (call_seconds(pre_output) if pre_prompt else 0)
         + agent_calls * call_seconds(AGENT_OUTPUT_TOKENS)
@@ -281,6 +300,8 @@ def estimate_question(settings: object, local: bool = False) -> Estimate:
             width, height
         )
         seconds = max(seconds, (limiter_tokens + output_tokens) / tokens_per_minute * 60)
+    # Starting the question and opening the index come before any call.
+    seconds += START_SECONDS
 
     return Estimate(
         passages=passages,
@@ -342,7 +363,11 @@ def summarize(estimate: Estimate) -> str:
 
 def describe_estimate(estimate: Estimate) -> list[str]:
     """Explain what the estimate is based on, in plain words."""
-    planning = "two short calls to suggest searches and finish" if estimate.fixed_steps else "a few short calls to plan the search"
+    planning = (
+        "two short calls to suggest searches and finish"
+        if estimate.fixed_steps
+        else f"about {AGENT_CALLS} short calls to plan the search"
+    )
     lines = [
         f"PaperQA reads {estimate.passages} passage{'' if estimate.passages == 1 else 's'} with the model, "
         f"then writes an answer of up to about {estimate.answer_words} words from at most {estimate.sources} "
@@ -366,7 +391,9 @@ def describe_estimate(estimate: Estimate) -> list[str]:
         lines.append(f"Cost: not known for {estimate.model}.")
     else:
         lines.append(f"Cost: {describe_cost(estimate.cost_usd)}.")
-    time_line = f"Time: {describe_time(estimate.seconds)}."
+    time_line = f"Time: {describe_time(estimate.seconds)}. {START_NOTE}"
+    if not estimate.fixed_steps:
+        time_line += f" {EVIDENCE_ROUNDS_NOTE}"
     if estimate.local:
         time_line += f" {LOCAL_TIME_NOTE}"
     lines.append(time_line)

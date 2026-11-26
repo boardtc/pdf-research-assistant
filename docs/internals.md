@@ -60,6 +60,7 @@ The modules in `src/pdf_research_assistant/`:
 | `local_llm.py` | The local LLM settings in `local_llm.json` |
 | `index_names.py` | Friendly names for index folders |
 | `index_record.py` | Remembers the settings of the last built index, for the changed-settings warning |
+| `scope_change.py` | Works out which PDFs a change to the paper list or **Search subfolders** would add to or remove from the index, for the warning before the scope is saved |
 | `saved_answers.py` | Keeps each answer for **Search previous answers**, and searches them |
 
 `query_once.py`, `exhaustive.py` and the `*_client.py` modules are internal helpers used by the app and CLI; they are not intended as separate user entry points.

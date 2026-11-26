@@ -156,6 +156,7 @@ python -m pytest --cov=pdf_research_assistant --cov-branch --cov-report=term-mis
 
 - It points `saved_settings.SETTINGS_PATH` and `local_llm.CONFIG_PATH` at files in a temporary folder for the whole run, so your own `saved_settings.json` and `local_llm.json` never change what the tests see, and the tests never write over them.
 - It ends the whole run if any single test takes longer than 10 minutes, printing where every thread was, so a stuck test fails the pre-push hook or CI instead of holding it for hours. The limit covers each test's whole turn, including setting up the module and session fixtures the first test of a module waits for, such as the tiny-PDF index build. Set `PDF_RESEARCH_ASSISTANT_TEST_TIME_LIMIT` to a number of seconds to change the limit, or to `0` to turn it off (for example while stepping through a test in a debugger). The hooks live in `tests/stuck_test_guard.py`, which `conftest.py` loads.
+- It sets `LITELLM_LOCAL_MODEL_COST_MAP=True` before anything imports LiteLLM, so the tests use the price list that comes with LiteLLM instead of downloading it. That keeps the run off the network and makes collecting the tests about 15 seconds quicker. Set it to `False` first to test against the latest list.
 
 ### The app test harness
 

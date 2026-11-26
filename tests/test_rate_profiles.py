@@ -221,13 +221,13 @@ def limiter():
     vars(GLOBAL_LIMITER).pop("try_acquire", None)
 
 
-def _acquire_twice(limiter, key: str) -> None:
-    """Ask the limiter for its whole allowance twice, so the second request must wait about a second."""
+def _acquire_twice(limiter, key: str, period: str = "1 second") -> None:
+    """Ask the limiter for its whole allowance twice, so the second request must wait for the period to pass."""
     import asyncio
 
     async def run():
         for _ in range(2):
-            await limiter.try_acquire(("test", key), "10 per 1 second", weight=10)
+            await limiter.try_acquire(("test", key), f"10 per {period}", weight=10)
 
     asyncio.run(run())
 
@@ -244,13 +244,28 @@ def test_requests_can_wait_for_the_rate_limiter_with_no_time_limit(limiter):
     _acquire_twice(limiter, "no-limit")
 
 
-def test_a_request_still_stops_waiting_when_its_time_is_up(limiter):
+@pytest.fixture
+def busy_machine(monkeypatch):
+    """Make each of the limiter's short sleeps take five times as long, as on a busy machine.
+
+    lmi counts its wait by adding up its sleeps, not by the clock, so a slow sleep stretches the real wait (#125).
+    """
+    import asyncio
+
+    from lmi import rate_limiter
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(rate_limiter.asyncio, "sleep", lambda seconds: real_sleep(seconds * 5))
+
+
+def test_a_request_still_stops_waiting_when_its_time_is_up(limiter, busy_machine):
     rate_profiles.allow_limiter_wait(5)
     # A later call with a shorter wait replaces the wait instead of keeping the longer one.
     rate_profiles.allow_limiter_wait(0.2)
 
+    # The second request needs a whole minute, far longer than even a slow 0.2 second wait takes.
     with pytest.raises(TimeoutError):
-        _acquire_twice(limiter, "short-wait")
+        _acquire_twice(limiter, "short-wait", period="1 minute")
 
 
 def test_the_rate_limiter_waits_only_a_minute_without_this(limiter):

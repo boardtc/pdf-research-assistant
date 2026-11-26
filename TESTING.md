@@ -63,7 +63,7 @@ python -m pytest
 
 ## Integration tests
 
-`tests\test_integration_tiny_pdf.py` indexes a real one-page PDF (`tests\fixtures\tiny-enthusiasm.pdf`) through the rebuild entry point, then runs exhaustive search and a Fast-preset question on it, checks the answer is kept for **Search previous answers**, and loads the real Streamlit page with Streamlit's `AppTest` to check that sidebar changes stick between runs as they do in a browser. It makes no API calls and needs no key: PaperQA's local `sparse` embedding replaces OpenAI embeddings, and the model returns a fixed reply through LiteLLM's `mock_response`.
+`tests\test_integration_tiny_pdf.py` indexes a real one-page PDF (`tests\fixtures\tiny-enthusiasm.pdf`) through the rebuild entry point, then runs exhaustive search and a Fast-preset question on it, checks the answer is kept for **Search previous answers**, checks that a rebuild after one whose index write failed with "Access is denied" still finishes instead of waiting on the index's writer lock, and loads the real Streamlit page with Streamlit's `AppTest` to check that sidebar changes stick between runs as they do in a browser. It makes no API calls and needs no key: PaperQA's local `sparse` embedding replaces OpenAI embeddings, and the model returns a fixed reply through LiteLLM's `mock_response`.
 
 These tests are marked `integration` and run with the rest of the suite, including in the pre-push hook and CI. They take a minute or so, mostly loading PaperQA. For a quicker run, skip them:
 
@@ -148,13 +148,14 @@ python -m pytest --cov=pdf_research_assistant --cov-branch --cov-report=term-mis
 | `tests/test_index_record.py` | The record of the last built index's settings |
 | `tests/test_saved_answers.py` | Keeping and searching previous answers, in a real PaperQA answers index |
 | `tests/test_integration_tiny_pdf.py` | The integration tests above |
+| `tests/test_stuck_test_guard.py` | The time limit on each test, fixtures included |
 
 ### Shared setup in `conftest.py`
 
 `tests/conftest.py` applies to every test:
 
 - It points `saved_settings.SETTINGS_PATH` and `local_llm.CONFIG_PATH` at files in a temporary folder for the whole run, so your own `saved_settings.json` and `local_llm.json` never change what the tests see, and the tests never write over them.
-- It ends the whole run if any single test takes longer than 10 minutes, printing where every thread was, so a stuck test fails the pre-push hook or CI instead of holding it for hours. Set `PDF_RESEARCH_ASSISTANT_TEST_TIME_LIMIT` to a number of seconds to change the limit, or to `0` to turn it off (for example while stepping through a test in a debugger).
+- It ends the whole run if any single test takes longer than 10 minutes, printing where every thread was, so a stuck test fails the pre-push hook or CI instead of holding it for hours. The limit covers each test's whole turn, including setting up the module and session fixtures the first test of a module waits for, such as the tiny-PDF index build. Set `PDF_RESEARCH_ASSISTANT_TEST_TIME_LIMIT` to a number of seconds to change the limit, or to `0` to turn it off (for example while stepping through a test in a debugger). The hooks live in `tests/stuck_test_guard.py`, which `conftest.py` loads.
 
 ### The app test harness
 

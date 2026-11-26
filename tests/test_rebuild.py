@@ -30,6 +30,8 @@ def workspace_tmp_path():
 
 @pytest.fixture
 def rebuild_index_module():
+    from paperqa.agents.search import SearchIndex
+
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
     search_module = ModuleType("paperqa.agents.search")
     settings_object = mock.Mock()
@@ -44,6 +46,7 @@ def rebuild_index_module():
 
     search_module.get_directory_index = mock.AsyncMock(name="get_directory_index")
     search_module.process_file = mock.AsyncMock(name="process_file")
+    search_module.SearchIndex = SearchIndex
 
     with mock.patch.dict(
         sys.modules,
@@ -465,3 +468,188 @@ def test_main_exits_with_the_stopped_code_when_pdfs_were_skipped(rebuild_index_m
 
     with mock.patch.object(rebuild_index_module, "async_main", side_effect=stopped_run):
         assert rebuild_index_module.main() == 3
+
+
+# A rebuild must not wait for hours on the index folder's writer lock (#134).
+
+
+def test_main_swaps_in_the_lock_capped_index_only_while_the_directory_index_is_built(rebuild_index_module):
+    search_module = sys.modules["paperqa.agents.search"]
+    original = search_module.SearchIndex
+    seen = []
+
+    async def build(settings, build):
+        seen.append(search_module.SearchIndex)
+
+    rebuild_index_module.get_directory_index = mock.AsyncMock(side_effect=build)
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    assert seen[0] is not original
+    assert issubclass(seen[0], original)
+    assert search_module.SearchIndex is original
+
+
+def test_main_puts_the_original_index_class_back_when_the_build_fails(rebuild_index_module):
+    search_module = sys.modules["paperqa.agents.search"]
+    original = search_module.SearchIndex
+    rebuild_index_module.get_directory_index = mock.AsyncMock(side_effect=ExceptionGroup("x", [ValueError("bad")]))
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    assert search_module.SearchIndex is original
+
+
+def _build_that_leaves_a_writer(rebuild_index_module, writers, error=None):
+    """Return a stand-in for PaperQA's build that opens an index, gives it a writer, and maybe fails."""
+    search_module = sys.modules["paperqa.agents.search"]
+
+    async def build(settings, build):
+        index = search_module.SearchIndex(index_directory="unused")
+        index._writer = mock.Mock(name="writer")
+        writers.append((index, index._writer))
+        if error:
+            raise error
+
+    return build
+
+
+def test_main_lets_go_of_the_writer_a_failed_build_left_holding_the_lock(rebuild_index_module):
+    writers = []
+    rebuild_index_module.get_directory_index = mock.AsyncMock(
+        side_effect=_build_that_leaves_a_writer(
+            rebuild_index_module, writers, ExceptionGroup("x", [PermissionError(13, "Access is denied")])
+        )
+    )
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    index, writer = writers[0]
+    writer.wait_merging_threads.assert_called_once_with()
+    assert index._writer is None
+
+
+def test_main_lets_go_of_any_writer_left_after_a_build_that_finished(rebuild_index_module):
+    writers = []
+    rebuild_index_module.get_directory_index = mock.AsyncMock(
+        side_effect=_build_that_leaves_a_writer(rebuild_index_module, writers)
+    )
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    index, writer = writers[0]
+    writer.wait_merging_threads.assert_called_once_with()
+    assert index._writer is None
+
+
+def test_main_forgets_the_indexes_of_earlier_rebuilds(rebuild_index_module):
+    rebuild_index_module.get_indexed_doc_count = mock.Mock(return_value=1)
+    writers = []
+    rebuild_index_module.get_directory_index = mock.AsyncMock(
+        side_effect=_build_that_leaves_a_writer(rebuild_index_module, writers)
+    )
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+        first_index, _writer = writers[0]
+        first_index._writer = later_writer = mock.Mock(name="later writer")
+        asyncio.run(rebuild_index_module.async_main())
+
+    later_writer.wait_merging_threads.assert_not_called()
+
+
+@pytest.fixture
+def locked_index_folder(workspace_tmp_path):
+    """Yield a folder whose index writer lock another index holds, as a failed write leaves it."""
+    from paperqa.agents.search import SearchIndex
+
+    holder = SearchIndex(index_name="locked", index_directory=workspace_tmp_path)
+
+    async def take_lock():
+        async with holder.writer():
+            pass
+
+    asyncio.run(take_lock())
+    yield workspace_tmp_path
+    holder._writer.wait_merging_threads()
+
+
+@pytest.fixture
+def counted_lock_waits(monkeypatch):
+    """Count the pauses between tries for the lock, and skip them."""
+    real_sleep = asyncio.sleep
+    pauses = []
+
+    async def no_pause(seconds, *args, **kwargs):
+        pauses.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_pause)
+    return pauses
+
+
+def _capped_index(rebuild_index_module, folder):
+    from paperqa.agents.search import SearchIndex
+
+    return rebuild_index_module.lock_capped_index(SearchIndex)(index_name="locked", index_directory=folder)
+
+
+def test_adding_a_pdf_gives_up_on_a_held_lock_after_the_capped_tries(
+    rebuild_index_module, locked_index_folder, counted_lock_waits
+):
+    from tenacity import RetryError
+
+    index = _capped_index(rebuild_index_module, locked_index_folder)
+    document = {"file_location": "a.pdf", "body": "text", "title": "A", "year": "2026"}
+
+    with pytest.raises(RetryError):
+        asyncio.run(index.add_document(document))
+
+    assert len(counted_lock_waits) == rebuild_index_module.LOCK_ATTEMPTS - 1
+
+
+def test_adding_a_pdf_never_tries_for_the_lock_more_than_the_cap(
+    rebuild_index_module, locked_index_folder, counted_lock_waits
+):
+    from tenacity import RetryError
+
+    index = _capped_index(rebuild_index_module, locked_index_folder)
+    document = {"file_location": "a.pdf", "body": "text", "title": "A", "year": "2026"}
+
+    with pytest.raises(RetryError):
+        asyncio.run(index.add_document(document, lock_acquisition_max_retries=1000))
+
+    assert len(counted_lock_waits) == rebuild_index_module.LOCK_ATTEMPTS - 1
+
+
+def test_saving_the_index_gives_up_on_a_held_lock_after_the_capped_tries(
+    rebuild_index_module, locked_index_folder, counted_lock_waits
+):
+    index = _capped_index(rebuild_index_module, locked_index_folder)
+
+    with pytest.raises(Exception, match="Failed to acquire lock"):
+        asyncio.run(index.save_index())
+
+    assert len(counted_lock_waits) == rebuild_index_module.LOCK_ATTEMPTS - 1
+
+
+def test_removing_a_pdf_gives_up_on_a_held_lock_after_the_capped_tries(
+    rebuild_index_module, locked_index_folder, counted_lock_waits
+):
+    index = _capped_index(rebuild_index_module, locked_index_folder)
+
+    with pytest.raises(Exception, match="Failed to acquire lock"):
+        asyncio.run(index.delete_document("a.pdf"))
+
+    assert len(counted_lock_waits) == rebuild_index_module.LOCK_ATTEMPTS - 1
+
+
+def test_the_lock_cap_is_the_one_saved_answers_uses(rebuild_index_module):
+    from pdf_research_assistant import saved_answers
+
+    assert rebuild_index_module.LOCK_ATTEMPTS == saved_answers.LOCK_ATTEMPTS
+    assert rebuild_index_module.release_writer is saved_answers.release_writer

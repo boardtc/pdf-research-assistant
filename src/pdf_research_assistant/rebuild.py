@@ -7,6 +7,7 @@ import zlib
 from pathlib import Path
 
 from paperqa.agents.search import get_directory_index
+from tenacity import stop_after_attempt
 
 from pdf_research_assistant import index_record, rebuild_client
 from pdf_research_assistant.bootstrap import (
@@ -16,6 +17,7 @@ from pdf_research_assistant.bootstrap import (
     get_failed_files,
     get_indexed_doc_count,
 )
+from pdf_research_assistant.saved_answers import LOCK_ATTEMPTS, release_writer
 
 settings = build_settings()
 
@@ -72,6 +74,38 @@ def stop_between_pdfs(process_file):
     return stoppable_process_file
 
 
+def lock_capped_index(search_index_class):
+    """Return PaperQA's index class, changed so that a rebuild cannot wait hours for the writer lock.
+
+    PaperQA tries for the index folder's writer lock up to 1000 times, waiting up to a minute between tries.
+    On Windows a write that fails with "Access is denied" leaves its writer holding that lock, so the next
+    build in the same process waited for it for hours. The class tries LOCK_ATTEMPTS times instead, and
+    remembers each index it opens in `opened`, so the rebuild can let go of their writers afterwards.
+    """
+    save_index = search_index_class.save_index.retry_with(stop=stop_after_attempt(LOCK_ATTEMPTS))
+    delete_document = search_index_class.delete_document.retry_with(stop=stop_after_attempt(LOCK_ATTEMPTS))
+
+    class LockCappedSearchIndex(search_index_class):
+        opened = []
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.opened.append(self)
+
+        async def add_document(self, index_doc, document=None, lock_acquisition_max_retries=LOCK_ATTEMPTS):
+            await super().add_document(
+                index_doc, document, lock_acquisition_max_retries=min(lock_acquisition_max_retries, LOCK_ATTEMPTS)
+            )
+
+        async def save_index(self):
+            await save_index(self)
+
+        async def delete_document(self, file_location):
+            await delete_document(self, file_location)
+
+    return LockCappedSearchIndex
+
+
 def summarize_exception_messages(error: BaseException) -> list[str]:
     """Flatten nested exception groups into a stable list of leaf messages."""
     if isinstance(error, BaseExceptionGroup):
@@ -124,13 +158,19 @@ async def async_main():
     stop_state["skipped"] = 0
     paperqa_search = importlib.import_module("paperqa.agents.search")
     original_process_file = paperqa_search.process_file
+    original_search_index = paperqa_search.SearchIndex
     paperqa_search.process_file = stop_between_pdfs(original_process_file)
+    paperqa_search.SearchIndex = capped_search_index = lock_capped_index(original_search_index)
     try:
         await get_directory_index(settings=settings, build=True)
     except* Exception as exc_group:
         rebuild_error = exc_group
     finally:
         paperqa_search.process_file = original_process_file
+        paperqa_search.SearchIndex = original_search_index
+        # A writer left by a failed write keeps the folder's writer lock until the process ends.
+        for search_index in capped_search_index.opened:
+            release_writer(search_index)
     if stop_state["skipped"]:
         print(
             f"Stopped at your request: {stop_state['skipped']} PDFs were not started. "

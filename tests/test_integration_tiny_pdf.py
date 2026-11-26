@@ -34,6 +34,8 @@ QUESTION = "Does teacher enthusiasm help students learn?"
 QUOTE = "Enthusiasm is contagious in a classroom."
 FAKE_API_KEY = "sk-test-not-a-real-key"
 REBUILD_ATTEMPTS = 3
+# Longest one rebuild of the fixture PDF may take; it takes a few seconds.
+REBUILD_SECONDS = 120
 PROJECT_MODULES = (
     "pdf_research_assistant.bootstrap",
     "pdf_research_assistant.rebuild",
@@ -46,9 +48,9 @@ def forget_project_modules():
         sys.modules.pop(name, None)
 
 
-@pytest.fixture(scope="module")
-def tiny_index():
-    """Index the fixture PDF through the real rebuild entry point, in a throwaway folder."""
+@contextlib.contextmanager
+def tiny_workspace():
+    """Set up a throwaway folder with the fixture PDF and its manifest, and load the project against it."""
     root = PROJECT_ROOT / "tests" / ".tmp" / str(uuid.uuid4())
     papers = root / "papers"
     papers.mkdir(parents=True)
@@ -67,28 +69,41 @@ def tiny_index():
         forget_project_modules()
         try:
             rebuild = importlib.import_module("pdf_research_assistant.rebuild")
-            exhaustive = importlib.import_module("pdf_research_assistant.exhaustive")
             rebuild.settings.embedding = "sparse"
-            # On Windows another program can briefly lock a new index file ("Access is denied").
-            # The rebuild reports that and carries on when run again, as a user would run it again.
-            for _attempt in range(REBUILD_ATTEMPTS):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    asyncio.run(rebuild.async_main())
-                if "Indexed after run: 1" in output.getvalue():
-                    break
-            settings = exhaustive.build_exhaustive_settings()
-            settings.embedding = "sparse"
-            yield SimpleNamespace(
-                root=root,
-                rebuild_output=output.getvalue(),
-                index_dir=rebuild.get_active_index_dir(),
-                exhaustive=exhaustive,
-                settings=settings,
-            )
+            yield root, rebuild
         finally:
             forget_project_modules()
             shutil.rmtree(root, ignore_errors=True)
+
+
+async def rebuild_once(rebuild, seconds: float = REBUILD_SECONDS) -> str:
+    """Run the real rebuild and return what it printed; fail instead of waiting past `seconds`."""
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        await asyncio.wait_for(rebuild.async_main(), seconds)
+    return output.getvalue()
+
+
+@pytest.fixture(scope="module")
+def tiny_index():
+    """Index the fixture PDF through the real rebuild entry point, in a throwaway folder."""
+    with tiny_workspace() as (root, rebuild):
+        exhaustive = importlib.import_module("pdf_research_assistant.exhaustive")
+        # On Windows another program can briefly lock a new index file ("Access is denied").
+        # The rebuild reports that and carries on when run again, as a user would run it again.
+        for _attempt in range(REBUILD_ATTEMPTS):
+            output = asyncio.run(rebuild_once(rebuild))
+            if "Indexed after run: 1" in output:
+                break
+        settings = exhaustive.build_exhaustive_settings()
+        settings.embedding = "sparse"
+        yield SimpleNamespace(
+            root=root,
+            rebuild_output=output,
+            index_dir=rebuild.get_active_index_dir(),
+            exhaustive=exhaustive,
+            settings=settings,
+        )
 
 
 def canned_model(reply: dict):
@@ -123,6 +138,35 @@ def test_rebuild_indexes_the_tiny_pdf_with_its_text(tiny_index):
     saved = pickle.loads(zlib.decompress((tiny_index.index_dir / "docs" / f"{index_files[PDF_NAME]}.zip").read_bytes()))
     saved_text = " ".join(" ".join(text.text.split()) for text in saved.texts)
     assert "shows genuine enthusiasm for the subject." in saved_text
+
+
+def test_a_rebuild_after_one_whose_index_write_failed_finishes(monkeypatch):
+    """A failed write leaves PaperQA's index writer holding the folder's writer lock, which the next rebuild
+    in the same process waited for, hours on end, until the rebuild let go of the writer (#134)."""
+    from paperqa.agents.search import SearchDocumentStorage
+
+    write_to_string = SearchDocumentStorage.write_to_string
+    failures = {"left": 1}
+
+    def denied_once(self, data):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise PermissionError(13, "Access is denied")
+        return write_to_string(self, data)
+
+    monkeypatch.setattr(SearchDocumentStorage, "write_to_string", denied_once)
+    with tiny_workspace() as (_root, rebuild):
+        first = asyncio.run(rebuild_once(rebuild))
+        # Windows can deny a write of its own now and then; each try must still finish, not wait on the lock.
+        for _attempt in range(REBUILD_ATTEMPTS):
+            later = asyncio.run(rebuild_once(rebuild))
+            if "Indexed after run: 1" in later:
+                break
+
+    assert "ERROR: [Errno 13] Access is denied" in first
+    assert "Indexed after run: 0" in first
+    assert "Indexed after run: 1" in later
+    assert "Failed PDFs: 0" in later
 
 
 def test_exhaustive_plan_finds_the_indexed_pdf_without_api_calls(tiny_index):

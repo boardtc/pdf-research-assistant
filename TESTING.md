@@ -175,7 +175,7 @@ The same harness also points `saved_settings.SETTINGS_PATH` and `research_preset
 ### Other notes
 
 - Exhaustive search tests make no real API calls. `tests/test_exhaustive.py` runs PaperQA's real `map_fxn_summary` with a fake summary model, so failure handling goes through the real code. They include a test that every in-scope paper appears in the results, and tests that each failure type is never reported as "no relevant evidence".
-- `tests/test_saved_answers.py` writes to a real PaperQA answers index in a temporary folder. On Windows, saving to that index now and then fails with `Access is denied` while another process seems to hold one of its new files for a moment. The app tries a failed save again a few times, so this is normally invisible, but if a test in this file fails on a save, run the file again before looking further.
+- `tests/test_saved_answers.py` writes to a real PaperQA answers index in a temporary folder. On Windows, saving to that index now and then fails with `Access is denied` while another process seems to hold one of its new files for a moment. The app tries a failed save again a few times, including a save that failed only after its answer was committed, so this should not fail a test. A test in this file that fails on a save with `Access is denied` points to a save path that is not retried, not to bad luck; run the file in a loop to catch it. Before #116 the save that finishes a committed answer had no retry; in 100 runs of `test_a_save_that_fails_after_committing_keeps_the_answer_once` it failed once.
 
 ## Checking exhaustive search quality
 

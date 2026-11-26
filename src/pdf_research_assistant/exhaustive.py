@@ -128,13 +128,18 @@ STRICT_SUMMARY_SYSTEM_PROMPT = (
 
 # Words too common in these papers to show that a rejected chunk is on topic.
 GENERIC_QUESTION_WORDS = {
-    "about", "does", "from", "have", "idea", "ideas", "improve", "improved", "improving", "paper", "papers",
-    "propose", "proposed", "research", "student", "students", "studies", "study", "their", "what", "when",
-    "where", "which", "with",
+    "about", "does", "from", "have", "idea", "ideas", "improve", "improved", "improving", "literature",
+    "paper", "papers", "propose", "proposed", "research", "student", "students", "studies", "study", "their",
+    "what", "when", "where", "which", "with",
 }  # fmt: skip
 KEY_TERM_LENGTH = 6
 # Tuned on 200 scored chunks: flags the wrongly rejected ones without flagging most rejections.
 POSSIBLE_MISS_MENTIONS = 5
+# A key term in more of the run's chunks than this is the collection's subject, not the question's topic
+# (#141: "learning" was in 81% of one collection's chunks, "enthusiasm" in 4%).
+COMMON_TERM_SHARE = 0.25
+# Below this many chunks there is too little text to tell which words are common.
+MIN_CHUNKS_FOR_COMMON_TERMS = 20
 # Citations per 100 words; above this a chunk is treated as a reference list.
 REFERENCE_LIST_DENSITY = 3
 CITATION_PATTERN = re.compile(r"\(\d{4}[a-z]?\)|\b(?:19|20)\d{2}[a-z]?[.,;)]|doi|https?://", re.IGNORECASE)
@@ -380,6 +385,29 @@ def extract_key_terms(question: str) -> set[str]:
     return {word[:KEY_TERM_LENGTH] for word in words if word not in GENERIC_QUESTION_WORDS}
 
 
+def load_chunk_texts(index_dir: Path, scope: list[PaperScope]) -> list[str]:
+    """Return the text of every chunk the run will search, skipping papers whose chunks cannot be loaded."""
+    texts = []
+    for paper in scope:
+        if paper.status != STATUS_LOADABLE:
+            continue
+        try:
+            docs = load_saved_docs(index_dir, paper.filehash)
+        except Exception:
+            continue
+        texts.extend(text.text for text in docs.texts)
+    return texts
+
+
+def drop_common_terms(key_terms: set[str], texts: list[str]) -> set[str]:
+    """Keep the key terms that pick out the question's topic, dropping words found in most of the run's chunks."""
+    if len(texts) < MIN_CHUNKS_FOR_COMMON_TERMS:
+        return set(key_terms)
+    lowered = [text.lower() for text in texts]
+    limit = len(lowered) * COMMON_TERM_SHARE
+    return {term for term in key_terms if sum(term in text for text in lowered) <= limit}
+
+
 def citation_density(text: str) -> float:
     """Return citations per 100 words, which is high in reference lists."""
     word_count = len(text.split())
@@ -440,7 +468,9 @@ class RunState:
             self.stop_reason = f"Stopped early after {self.streak} failed requests in a row."
 
 
-async def score_chunk(text: object, question: str, settings: Settings, summary_llm_model: object) -> dict:
+async def score_chunk(
+    text: object, question: str, settings: Settings, summary_llm_model: object, topic_terms: set[str]
+) -> dict:
     """Score one chunk with PaperQA's evidence prompts, turning any failure into a result."""
     try:
         context, llm_results = await map_fxn_summary(
@@ -469,7 +499,7 @@ async def score_chunk(text: object, question: str, settings: Settings, summary_l
         "summary": context.context,
         "quote": quote,
         "quote_verified": verify_quote(quote, text.text),
-        "possible_miss": context.score == 0 and is_possible_miss(text.text, extract_key_terms(question)),
+        "possible_miss": context.score == 0 and is_possible_miss(text.text, topic_terms),
         "raw_text": text.text,
         "cost_usd": cost,
     }
@@ -482,12 +512,13 @@ async def summarize_chunk(
     summary_llm_model: object,
     semaphore: asyncio.Semaphore,
     state: RunState,
+    topic_terms: set[str],
 ) -> dict:
     """Score one chunk within the request limit, or skip it if the run has stopped."""
     async with semaphore:
         if state.stop_reason:
             return {**failed_chunk(text, state.stop_reason, 0.0), "skipped": True}
-        chunk = await score_chunk(text, question, settings, summary_llm_model)
+        chunk = await score_chunk(text, question, settings, summary_llm_model, topic_terms)
         state.record(chunk["failed"])
     return chunk
 
@@ -515,6 +546,7 @@ async def search_paper(
     semaphore: asyncio.Semaphore,
     index_dir: Path,
     state: RunState,
+    topic_terms: set[str],
 ) -> dict:
     """Check every chunk of one paper and return its result."""
     try:
@@ -523,7 +555,10 @@ async def search_paper(
         detail = f"Could not load saved chunks: {type(exc).__name__}: {exc}"
         return unsearched_paper(paper.file_location, STATUS_UNREADABLE, detail)
     chunks = await asyncio.gather(
-        *(summarize_chunk(text, question, settings, summary_llm_model, semaphore, state) for text in docs.texts)
+        *(
+            summarize_chunk(text, question, settings, summary_llm_model, semaphore, state, topic_terms)
+            for text in docs.texts
+        )
     )
     if all(chunk.get("skipped") for chunk in chunks):
         return unsearched_paper(paper.file_location, RESULT_NOT_PROCESSED, state.stop_reason)
@@ -731,7 +766,7 @@ async def run_exhaustive(
     async def process_paper(paper: PaperScope) -> dict:
         if paper.status == STATUS_LOADABLE:
             result = await search_paper(
-                paper, question, current_settings, model, semaphore, active_index_dir, state
+                paper, question, current_settings, model, semaphore, active_index_dir, state, topic_terms
             )
         else:
             result = unsearched_paper(paper.file_location, paper.status, paper.detail)
@@ -741,6 +776,7 @@ async def run_exhaustive(
 
     started = time.monotonic()
     scope = build_scope(active_index_dir, lambda _text: 0)
+    topic_terms = drop_common_terms(extract_key_terms(question), load_chunk_texts(active_index_dir, scope))
     # Papers run together so short papers still fill the request limit; the semaphore caps calls.
     papers = await asyncio.gather(*(process_paper(paper) for paper in scope))
 

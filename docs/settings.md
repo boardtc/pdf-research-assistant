@@ -410,6 +410,8 @@ Every paper in scope appears in the report with a status:
 
 A failed request or rate limit is never reported as "no relevant evidence".
 
+A possible miss is a chunk scored 0 that names one of the question's topic words at least 5 times and is not a reference list. Words found in more than a quarter of the run's chunks don't count, because they are the subject of the whole collection rather than of the question: in a teaching collection, "teacher enthusiasm and student learning" checks only "enthusiasm". Runs of fewer than 20 chunks count every topic word. General question words such as "study", "research" and "literature" never count.
+
 > **Important**
 > Exhaustive search is more thorough than a normal query, but it can still misjudge relevance. A model scores each chunk, so it can reject something relevant or accept something that is not. On an index built without images and tables, scanned pages and figures are not searched; with them on, each chunk is sent with the pictures and tables from its pages, which the model may read less reliably than text. Quotes are marked verified or not verified, and a quote marked not verified may still be genuine, so check it against the PDF. Treat the report as a list to review, not a conclusion.
 

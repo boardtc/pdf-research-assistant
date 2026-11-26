@@ -717,6 +717,51 @@ def test_is_possible_miss_is_false_without_key_terms(exhaustive_module):
     assert exhaustive_module.is_possible_miss("feedback " * 20, set()) is False
 
 
+def test_extract_key_terms_treats_literature_as_a_question_word(exhaustive_module):
+    terms = exhaustive_module.extract_key_terms("What does the literature say about teacher enthusiasm?")
+
+    assert terms == {"teache", "enthus"}
+
+
+def test_drop_common_terms_drops_words_found_in_most_chunks(exhaustive_module):
+    texts = ["Learning and enthusiasm."] + ["Learning in class."] * 19
+
+    assert exhaustive_module.drop_common_terms({"learni", "enthus"}, texts) == {"enthus"}
+
+
+@pytest.mark.parametrize(("chunks_with_term", "kept"), [(5, True), (6, False)])
+def test_drop_common_terms_keeps_words_in_up_to_a_quarter_of_chunks(exhaustive_module, chunks_with_term, kept):
+    texts = ["Teacher talk."] * chunks_with_term + ["Nothing here."] * (20 - chunks_with_term)
+
+    assert exhaustive_module.drop_common_terms({"teache"}, texts) == ({"teache"} if kept else set())
+
+
+def test_drop_common_terms_keeps_every_term_in_a_small_run(exhaustive_module):
+    texts = ["Learning in class."] * (exhaustive_module.MIN_CHUNKS_FOR_COMMON_TERMS - 1)
+
+    assert exhaustive_module.drop_common_terms({"learni"}, texts) == {"learni"}
+
+
+def test_load_chunk_texts_reads_every_searchable_paper(exhaustive_module, shard_dir):
+    _write_saved_docs(shard_dir, "hash-a", _make_docs("a", ["First.", "Second."]))
+    scope = [
+        exhaustive_module.PaperScope("a.pdf", exhaustive_module.STATUS_LOADABLE, filehash="hash-a"),
+        exhaustive_module.PaperScope("b.pdf", exhaustive_module.STATUS_NOT_INDEXED),
+    ]
+
+    assert exhaustive_module.load_chunk_texts(shard_dir, scope) == ["First.", "Second."]
+
+
+def test_load_chunk_texts_skips_a_paper_that_cannot_be_loaded(exhaustive_module, shard_dir):
+    _write_saved_docs(shard_dir, "hash-a", _make_docs("a", ["First."]))
+    scope = [
+        exhaustive_module.PaperScope("gone.pdf", exhaustive_module.STATUS_LOADABLE, filehash="hash-gone"),
+        exhaustive_module.PaperScope("a.pdf", exhaustive_module.STATUS_LOADABLE, filehash="hash-a"),
+    ]
+
+    assert exhaustive_module.load_chunk_texts(shard_dir, scope) == ["First."]
+
+
 @pytest.mark.parametrize(
     ("quote", "expected"),
     [
@@ -802,6 +847,24 @@ def test_run_keeps_rejected_chunks_that_keep_mentioning_the_topic(exhaustive_mod
     assert [item["raw_text"] for item in paper["possible_misses"]] == [chunk]
     assert paper["possible_misses"][0]["pages"] == "1"
     assert summary["possible_miss_count"] == 1
+
+
+def test_run_ignores_words_found_in_most_chunks_when_looking_for_misses(
+    exhaustive_module, shard_dir, manifest_path, output_dir
+):
+    on_topic = "Enthusiasm matters. " * 5 + "It helps learning."
+    common_word_only = "learning " * 5
+    chunks = [on_topic, common_word_only] + ["Learning is discussed here."] * 18
+    _seed_papers(exhaustive_module, shard_dir, manifest_path, {"p.pdf": chunks})
+    model = FakeSummaryLLM(default=IRRELEVANT_REPLY)
+
+    summary = _run(
+        exhaustive_module, shard_dir, output_dir, model, question="How does teacher enthusiasm affect learning?"
+    )
+
+    paper = summary["papers"][0]
+    assert [item["raw_text"] for item in paper["possible_misses"]] == [on_topic]
+    assert paper["status"] == exhaustive_module.RESULT_POSSIBLE_MISSES
 
 
 def test_run_reports_no_possible_misses_for_papers_that_were_not_searched(
@@ -1367,7 +1430,8 @@ def test_run_marks_a_paper_unreadable_when_its_chunks_vanish_after_scoping(
 ):
     _seed_papers(exhaustive_module, shard_dir, manifest_path, {"a.pdf": ["x"]})
     real_load = exhaustive_module.load_saved_docs
-    outcomes = iter([real_load(shard_dir, "hash-a.pdf"), OSError("gone")])
+    # Loaded for the scope, then to find common words, then gone when the paper is searched.
+    outcomes = iter([real_load(shard_dir, "hash-a.pdf"), real_load(shard_dir, "hash-a.pdf"), OSError("gone")])
 
     with mock.patch.object(exhaustive_module, "load_saved_docs", side_effect=outcomes):
         summary = _run(exhaustive_module, shard_dir, output_dir, FakeSummaryLLM())

@@ -1765,7 +1765,7 @@ def test_index_settings_that_can_change_get_a_control_starting_at_the_value_in_u
     draw_index_settings(module, settings=_fake_settings(reader_config={"chunk_chars": 7000, "overlap": 300}))
 
     chunk = _control(st.number_input, "Chunk size (characters)")
-    assert chunk.args[0] == f"Chunk size (characters) {module.REBUILD_BADGE}"
+    assert chunk.args[0] == "Chunk size (characters)"
     assert chunk.kwargs == {
         "min_value": 2000,
         "max_value": 20000,
@@ -1783,7 +1783,7 @@ def test_index_settings_that_can_change_get_a_control_starting_at_the_value_in_u
     assert embedding.kwargs["key"] == "index_setting_embedding_0"
     assert embedding.kwargs["help"] == get_setting("embedding").help
     media = _control(st.selectbox, "Images and tables")
-    assert media.args[0] == f"Images and tables {module.REBUILD_BADGE}"
+    assert media.args[0] == "Images and tables"
     assert media.args[1] == ["off", "on_without_enrichment", "on_with_enrichment"]
     assert media.kwargs["index"] == 0
     assert [media.kwargs["format_func"](value) for value in media.args[1]] == [
@@ -1797,6 +1797,40 @@ def test_index_settings_that_can_change_get_a_control_starting_at_the_value_in_u
         "help": get_setting("full_page").help,
         "key": "index_setting_full_page_0",
     }
+
+
+@pytest.mark.parametrize(
+    ("setting_key", "widget_name", "value"),
+    [("chunk_chars", "number_input", 3000), ("embedding", "selectbox", "text-embedding-3-large"), ("full_page", "checkbox", True)],
+)
+def test_each_index_control_has_a_plain_label_and_shows_the_rebuild_badge_below_it(
+    pdf_research_assistant_module, setting_key, widget_name, value
+):
+    # Streamlit reads the label out as the control's accessible name, badge directive and all (#143).
+    module = pdf_research_assistant_module
+    st = module.st
+    setting = module.settings_groups.get_setting(setting_key)
+    page = mock.Mock()
+    page.attach_mock(mock.Mock(return_value=value), widget_name)
+    page.attach_mock(mock.Mock(), "caption")
+    with mock.patch.object(st, widget_name, getattr(page, widget_name)), mock.patch.object(st, "caption", page.caption):
+        assert module.draw_index_setting(setting, _fake_settings()) == value
+
+    assert [name for name, _args, _kwargs in page.mock_calls] == [widget_name, "caption"]
+    assert getattr(page, widget_name).call_args.args[0] == setting.label
+    assert "badge" not in getattr(page, widget_name).call_args.args[0]
+    page.caption.assert_called_once_with(module.REBUILD_BADGE)
+
+
+def test_every_index_control_is_marked_as_needing_a_rebuild(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    draw_index_settings(module)
+
+    controls = [setting for setting in module.settings_groups.REINDEX_SETTINGS if setting.write is not None]
+    assert len(controls) == 5
+    badges = [call for call in module.st.caption.call_args_list if call.args == (module.REBUILD_BADGE,)]
+    assert len(badges) == len(controls)
 
 
 def test_index_controls_sit_in_one_form_so_nothing_changes_until_it_is_saved(pdf_research_assistant_module):
@@ -1836,8 +1870,8 @@ def test_saving_index_settings_saves_only_what_changed_and_draws_the_page_again(
     patched = draw_index_settings(
         module,
         chosen={
-            f"Chunk size (characters) {module.REBUILD_BADGE}": 3000,
-            f"Whole-page pictures {module.REBUILD_BADGE}": True,
+            "Chunk size (characters)": 3000,
+            "Whole-page pictures": True,
         },
         submitted=True,
     )
@@ -1861,8 +1895,8 @@ def test_saving_index_settings_without_a_change_saves_nothing(pdf_research_assis
 def test_images_and_tables_cannot_be_turned_on_without_the_package_that_reads_them(pdf_research_assistant_module):
     module = pdf_research_assistant_module
     chosen = {
-        f"Images and tables {module.REBUILD_BADGE}": "on_without_enrichment",
-        f"Chunk size (characters) {module.REBUILD_BADGE}": 3000,
+        "Images and tables": "on_without_enrichment",
+        "Chunk size (characters)": 3000,
     }
 
     with mock.patch.object(module, "media_reading_available", return_value=False):
@@ -1875,7 +1909,7 @@ def test_images_and_tables_cannot_be_turned_on_without_the_package_that_reads_th
 
 def test_images_and_tables_can_be_turned_on_when_the_package_is_installed(pdf_research_assistant_module):
     module = pdf_research_assistant_module
-    chosen = {f"Images and tables {module.REBUILD_BADGE}": "on_with_enrichment"}
+    chosen = {"Images and tables": "on_with_enrichment"}
 
     with mock.patch.object(module, "media_reading_available", return_value=True):
         patched = draw_index_settings(module, chosen=chosen, submitted=True)
@@ -1890,7 +1924,7 @@ def test_turning_images_and_tables_off_never_needs_the_package(pdf_research_assi
 
     with mock.patch.object(module, "media_reading_available", return_value=False):
         patched = draw_index_settings(
-            module, settings=settings, chosen={f"Images and tables {module.REBUILD_BADGE}": "off"}, submitted=True
+            module, settings=settings, chosen={"Images and tables": "off"}, submitted=True
         )
 
     patched["save_value"].assert_called_once_with("multimodal", "off")

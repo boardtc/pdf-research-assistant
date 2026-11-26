@@ -222,3 +222,194 @@ def test_parse_pdf_with_fallback_reraises_non_lookup_errors_from_primary_parser(
     with mock.patch.dict(sys.modules, {"paperqa_pypdf": paperqa_pypdf_module}):
         with pytest.raises(RuntimeError, match="parser exploded"):
             pdf_parser_module.parse_pdf_with_fallback("example.pdf")
+
+
+# Issue 142: pypdf's default text mode moves italic words and citation years to the end of the line in some
+# PDFs (ProQuest Ebook Central chapters). Layout mode reads those lines in the right order.
+# A page of ordinary lines, so the few words split differently ("). " vs "2020).") are a small share as on real pages.
+BODY = "\n".join(f"line {n} of the ordinary text on this page reads the same in both modes" for n in range(6))
+MOVED_PLAIN = f"of student motivation (Blum ). I see a role for grades to 2020\n{BODY}"
+MOVED_LAYOUT = "   of student motivation (Blum 2020). I see a role for grades to   \n\n" + BODY.replace("\n", "   \n  ")
+FIXED_TEXT = f"of student motivation (Blum 2020). I see a role for grades to\n{BODY}"
+
+
+CHAPTERMAKER = {"/Producer": "ProQuest Ebook Central™ (ChapterMaker)"}
+
+
+def test_from_moved_word_producer_is_true_for_proquest_ebook_central_chapters(pdf_parser_module):
+    assert pdf_parser_module.from_moved_word_producer(CHAPTERMAKER) is True
+
+
+def test_from_moved_word_producer_is_false_for_other_producers(pdf_parser_module):
+    assert pdf_parser_module.from_moved_word_producer({"/Producer": "Adobe PDF Library 15.0"}) is False
+
+
+def test_from_moved_word_producer_is_false_without_a_producer(pdf_parser_module):
+    assert pdf_parser_module.from_moved_word_producer({"/Creator": "Word"}) is False
+
+
+def test_from_moved_word_producer_is_false_without_document_information(pdf_parser_module):
+    assert pdf_parser_module.from_moved_word_producer(None) is False
+
+
+def test_collapse_layout_text_squeezes_spaces_and_drops_blank_lines(pdf_parser_module):
+    assert pdf_parser_module.collapse_layout_text("  a    b  \n\n   \n c  d ") == "a b\nc d"
+
+
+def test_moved_word_lines_returns_lines_whose_words_layout_mode_orders_differently(pdf_parser_module):
+    assert pdf_parser_module.moved_word_lines(MOVED_PLAIN, FIXED_TEXT) == [MOVED_PLAIN.splitlines()[0]]
+
+
+def test_moved_word_lines_ignores_lines_with_the_same_order(pdf_parser_module):
+    assert pdf_parser_module.moved_word_lines(FIXED_TEXT, FIXED_TEXT) == []
+
+
+def test_moved_word_lines_ignores_lines_layout_mode_has_no_match_for(pdf_parser_module):
+    assert pdf_parser_module.moved_word_lines("left column text right column text", "left column text") == []
+
+
+def test_moved_word_lines_ignores_words_layout_mode_only_splits_or_joins(pdf_parser_module):
+    assert pdf_parser_module.moved_word_lines("Short videos are pervasive", "Shor t videos are per vasive") == []
+
+
+def test_moved_word_lines_ignores_short_lines(pdf_parser_module):
+    assert pdf_parser_module.moved_word_lines("b a", "a b") == []
+
+
+def test_holds_same_words_accepts_a_reordering(pdf_parser_module):
+    assert pdf_parser_module.holds_same_words(MOVED_PLAIN, FIXED_TEXT) is True
+
+
+def test_holds_same_words_rejects_text_split_into_letters(pdf_parser_module):
+    assert pdf_parser_module.holds_same_words("Chapter Three Teaching", "C h a p t e r Three Teaching") is False
+
+
+def test_holds_same_words_accepts_empty_text(pdf_parser_module):
+    assert pdf_parser_module.holds_same_words("", "") is True
+
+
+def test_layout_text_if_words_moved_returns_the_layout_text_for_a_moved_word_page(pdf_parser_module):
+    assert pdf_parser_module.layout_text_if_words_moved(MOVED_PLAIN, MOVED_LAYOUT) == FIXED_TEXT
+
+
+def test_layout_text_if_words_moved_returns_none_when_no_line_moved(pdf_parser_module):
+    assert pdf_parser_module.layout_text_if_words_moved(FIXED_TEXT, FIXED_TEXT) is None
+
+
+def test_layout_text_if_words_moved_returns_none_when_layout_mode_changes_the_words(pdf_parser_module):
+    plain = MOVED_PLAIN + "\nChapter Three Teaching"
+    layout = FIXED_TEXT + "\nC h a p t e r T h r e e T e a c h i n g"
+
+    assert pdf_parser_module.layout_text_if_words_moved(plain, layout) is None
+
+
+def _parsed(content):
+    paperqa_types = importlib.import_module("paperqa.types")
+    return paperqa_types.ParsedText(
+        content=content,
+        metadata=paperqa_types.ParsedMetadata(
+            parsing_libraries=["pypdf"],
+            total_parsed_text_length=sum(len(v if isinstance(v, str) else v[0]) for v in content.values()),
+            count_parsed_media=0,
+        ),
+    )
+
+
+def _fake_pypdf(layout_by_page, metadata=CHAPTERMAKER):
+    """A pypdf stand-in whose pages give the layout text in the list (or raise it, if it is an exception)."""
+    pages = []
+    for layout in layout_by_page:
+        page = mock.Mock()
+        if isinstance(layout, Exception):
+            page.extract_text.side_effect = layout
+        else:
+            page.extract_text.return_value = layout
+        pages.append(page)
+    module = ModuleType("pypdf")
+    module.PdfReader = mock.Mock(return_value=mock.Mock(pages=pages, metadata=metadata))
+    return module, pages
+
+
+def test_fix_moved_words_replaces_moved_word_pages_and_keeps_their_media(pdf_parser_module):
+    paperqa_types = importlib.import_module("paperqa.types")
+    media_one = [paperqa_types.ParsedMedia(index=0, data=b"picture one", info={"page_num": 1})]
+    media_two = [paperqa_types.ParsedMedia(index=0, data=b"picture two", info={"page_num": 2})]
+    parsed = _parsed({"1": (FIXED_TEXT, media_one), "2": (MOVED_PLAIN, media_two)})
+    fake_pypdf, pages = _fake_pypdf([FIXED_TEXT, MOVED_LAYOUT])
+
+    with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+        result = pdf_parser_module.fix_moved_words("example.pdf", parsed)
+
+    assert result.content == {"1": (FIXED_TEXT, media_one), "2": (FIXED_TEXT, media_two)}
+    assert result.metadata.parsing_libraries == ["pypdf", "pypdf (layout mode)"]
+    assert result.metadata.total_parsed_text_length == 2 * len(FIXED_TEXT)
+    pages[1].extract_text.assert_called_once_with(extraction_mode="layout")
+
+
+def test_fix_moved_words_replaces_plain_text_pages(pdf_parser_module):
+    parsed = _parsed({"3": MOVED_PLAIN})
+    fake_pypdf, _pages = _fake_pypdf([FIXED_TEXT, FIXED_TEXT, MOVED_LAYOUT])
+
+    with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+        result = pdf_parser_module.fix_moved_words("example.pdf", parsed)
+
+    assert result.content == {"3": FIXED_TEXT}
+
+
+def test_fix_moved_words_leaves_pdfs_from_other_producers_alone(pdf_parser_module):
+    parsed = _parsed({"1": MOVED_PLAIN})
+    fake_pypdf, pages = _fake_pypdf([MOVED_LAYOUT], metadata={"/Producer": "Adobe PDF Library 15.0"})
+
+    with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+        result = pdf_parser_module.fix_moved_words("example.pdf", parsed)
+
+    assert result.content == {"1": MOVED_PLAIN}
+    assert result.metadata.parsing_libraries == ["pypdf"]
+    pages[0].extract_text.assert_not_called()
+
+
+def test_fix_moved_words_keeps_the_default_text_when_nothing_moved(pdf_parser_module):
+    parsed = _parsed({"1": FIXED_TEXT})
+    fake_pypdf, _pages = _fake_pypdf([FIXED_TEXT])
+
+    with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+        result = pdf_parser_module.fix_moved_words("example.pdf", parsed)
+
+    assert result.content == {"1": FIXED_TEXT}
+    assert result.metadata.parsing_libraries == ["pypdf"]
+
+
+def test_fix_moved_words_keeps_the_default_text_when_layout_mode_fails(pdf_parser_module):
+    parsed = _parsed({"1": MOVED_PLAIN})
+    fake_pypdf, _pages = _fake_pypdf([RuntimeError("layout failed")])
+
+    with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+        result = pdf_parser_module.fix_moved_words("example.pdf", parsed)
+
+    assert result.content == {"1": MOVED_PLAIN}
+
+
+def test_fix_moved_words_returns_results_without_page_content_unchanged(pdf_parser_module):
+    assert pdf_parser_module.fix_moved_words("example.pdf", {"1": "text"}) == {"1": "text"}
+
+
+def test_parse_pdf_with_fallback_fixes_moved_words_after_the_primary_parser(pdf_parser_module):
+    paperqa_pypdf_module = ModuleType("paperqa_pypdf")
+    paperqa_pypdf_module.parse_pdf_to_pages = mock.Mock(return_value=mock.sentinel.parsed)
+
+    with mock.patch.dict(sys.modules, {"paperqa_pypdf": paperqa_pypdf_module}):
+        with mock.patch.object(pdf_parser_module, "fix_moved_words", return_value=mock.sentinel.fixed) as fix:
+            parsed_pages = pdf_parser_module.parse_pdf_with_fallback("example.pdf")
+
+    assert parsed_pages is mock.sentinel.fixed
+    fix.assert_called_once_with("example.pdf", mock.sentinel.parsed)
+
+
+def test_parse_pdf_with_fallback_fixes_moved_words_after_the_whole_page_retry(pdf_parser_module):
+    with mock.patch.object(pdf_parser_module, "fix_moved_words", return_value=mock.sentinel.fixed) as fix:
+        parsed_pages, _primary, _fallback = _parse_with_primary_results(
+            pdf_parser_module, [CROP_ERROR, mock.sentinel.whole_pages], parse_media=True
+        )
+
+    assert parsed_pages is mock.sentinel.fixed
+    fix.assert_called_once_with("example.pdf", mock.sentinel.whole_pages)

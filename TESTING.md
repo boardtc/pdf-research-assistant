@@ -126,7 +126,7 @@ python -m pytest --cov=pdf_research_assistant --cov-branch --cov-report=term-mis
 | `tests/test_app.py` | The Streamlit page, with fake Streamlit widgets (see below) |
 | `tests/test_cli.py` | The `pdf-research` command line |
 | `tests/test_bootstrap.py` | `.env` handling, the manifest, the index and building PaperQA settings |
-| `tests/test_pdf_parser.py` | Reading PDFs and the font-encoding fallback |
+| `tests/test_pdf_parser.py` | Reading PDFs, the font-encoding fallback and the moved-word fix |
 | `tests/test_query_once.py` | Answering one question, its cost, the rate limiter wait and the missing-answer note |
 | `tests/test_query_client.py` | Starting the next question's process ahead of time and handing it the question |
 | `tests/test_rebuild.py` | The `pdf-research-rebuild` command |

@@ -42,7 +42,7 @@ The modules in `src/pdf_research_assistant/`:
 | `rebuild.py` | The `pdf-research-rebuild` command, also run by the app's rebuild button |
 | `rebuild_client.py` | Starts a rebuild from the app and follows its progress |
 | `bootstrap.py` | Reads `.env`, finds the PDFs and the index, and builds the PaperQA settings everything else uses |
-| `pdf_parser.py` | Reads PDFs, with a fallback for some PDFs whose fonts the usual reader cannot decode |
+| `pdf_parser.py` | Reads PDFs, with a fallback for some PDFs whose fonts the usual reader cannot decode, and a second reading of ProQuest Ebook Central chapters whose italic words and citation years the usual reader moves to the end of the line |
 | `query_once.py` | Answers one question in its own process, for the app and the CLI |
 | `query_client.py` | Starts the next question's process ahead of time, so PaperQA is already loaded when the question is asked |
 | `exhaustive.py` | Exhaustive search: checks every chunk of every paper in scope, in its own process |

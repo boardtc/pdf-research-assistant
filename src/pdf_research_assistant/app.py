@@ -1379,9 +1379,18 @@ def draw_index_setting(setting: settings_groups.Setting, settings) -> object:
 
     The kind of control follows the setting's check: a number box, a list of choices, or a tick box.
     A value in use that the list does not offer is offered as well, so drawing never changes a setting.
+    The rebuild badge goes in a caption below the control rather than in its label, because Streamlit
+    uses the label text as the control's accessible name and would read the badge out as raw text.
     """
+    value = _draw_index_control(setting, settings)
+    st.caption(REBUILD_BADGE)
+    return value
+
+
+def _draw_index_control(setting: settings_groups.Setting, settings) -> object:
+    """Draw the control itself for draw_index_setting, labelled with the setting's plain name."""
     current = settings_groups.current_choice(setting, settings)
-    label = f"{setting.label} {REBUILD_BADGE}"
+    label = setting.label
     key = index_widget_key(setting.key)
     check = setting.check
     if isinstance(check, settings_groups.WholeNumber):

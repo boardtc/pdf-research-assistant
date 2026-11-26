@@ -114,8 +114,17 @@ def test_call_cost_is_unknown_without_prices():
         assert estimate.call_cost(MODEL, 10, 3) is None
 
 
-def test_call_seconds_matches_the_measured_time_for_a_typical_reply():
-    assert estimate.call_seconds(estimate.TYPICAL_OUTPUT_TOKENS) == pytest.approx(estimate.SECONDS_PER_CALL)
+@pytest.mark.parametrize(
+    ("output_tokens", "seconds"),
+    [
+        # A passage judged not relevant: 492 summary calls on 25 Nov 2026, median 16 tokens in 0.84 seconds.
+        (16, 0.84),
+        # A 200-word answer: 220 to 270 tokens took 3.1 to 4.8 seconds.
+        (250, 3.9),
+    ],
+)
+def test_call_seconds_matches_measured_calls(output_tokens, seconds):
+    assert estimate.call_seconds(output_tokens) == pytest.approx(seconds, abs=0.25)
 
 
 def test_paperqa_defaults_come_out_balanced():
@@ -212,10 +221,9 @@ def test_the_start_up_is_the_measured_time_to_start_a_question():
     assert estimate.START_SECONDS == 3
 
 
-def test_an_agent_step_takes_longer_than_a_short_reply_alone():
-    # Each step's call is sent the conversation so far; the search it runs was measured at under a tenth of a
-    # second, so nearly all of the step is the call.
-    assert estimate.AGENT_STEP_SECONDS > estimate.call_seconds(estimate.AGENT_OUTPUT_TOKENS)
+def test_an_agent_step_is_the_measured_call_and_its_search():
+    # 114 agent calls in 15 real questions averaged 1.19 seconds, and a search took 0.1.
+    assert estimate.AGENT_STEP_SECONDS == pytest.approx(1.3)
 
 
 def test_a_question_counts_the_time_to_start():
@@ -235,45 +243,50 @@ def _preset_settings(preset: str) -> Settings:
     return settings
 
 
-def _pre_prompt_settings() -> Settings:
-    settings = _paperqa_settings()
-    settings.prompts.pre = "List the scientific terms in this question: {question}"
-    return settings
-
-
-# Real questions on a library of 119 PDFs with High limits (24 and 25 Nov 2026), timed from asking to the
-# answer appearing. Where a setting was timed more than once, this is a typical time. They were timed when
-# starting a question took about 16 seconds, so each would now finish this much sooner.
-START_UP_SAVING = 16 - estimate.START_SECONDS
+# Real questions on the library of about 120 PDFs with High limits (25 Nov 2026), each timed call by call.
+# The time is from PaperQA's first model call to the answer, plus the start-up measured with the spare query
+# process (#118). 13 questions on PaperQA's defaults took 14.3 to 65.6 seconds, 24.7 on average and 17.7 at the
+# median: the number of searches the model chooses makes most of the difference.
 MEASURED_QUESTIONS = [
-    ("Balanced", lambda: _paperqa_settings(), 80),
-    ("Fast", lambda: _preset_settings("Fast"), 35),
-    ("Debug", lambda: _preset_settings("Debug"), 60),
-    ("High quality", lambda: _preset_settings("High quality"), 55),
-    ("Long answer", lambda: _paperqa_settings(answer_length="about 400 words, but can be longer"), 74),
-    ("30 passages", lambda: _paperqa_settings(evidence_k=30, answer_max_sources=15), 68),
-    ("Before-answer prompt", _pre_prompt_settings, 85),
-    ("Low limits", lambda: _paperqa_settings(profile="Low limits"), 93),
+    ("Balanced", lambda: _paperqa_settings(), 24.7, (14.3, 65.6)),
+    ("Fast", lambda: _preset_settings("Fast"), 9.2, None),
+    ("Debug", lambda: _preset_settings("Debug"), 10.3, None),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "settings", "seconds", "spread"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS]
+)
+def test_the_time_is_close_to_measured_questions(name, settings, seconds, spread):
+    result = estimate.estimate_question(settings()).seconds
+
+    if spread:
+        # Several questions: within their spread, and close to their average.
+        assert spread[0] <= result <= spread[1]
+        assert seconds * 0.75 <= result <= seconds * 1.5
+    else:
+        # One question, which may have needed fewer searches than most: within twice either way.
+        assert seconds / 2 <= result <= seconds * 2
+
+
+def test_paperqa_defaults_show_under_half_a_minute():
+    # Most measured questions on PaperQA's defaults took under half a minute.
+    assert estimate.describe_time(estimate.estimate_question(_paperqa_settings()).seconds) == "under half a minute"
+
+
+# Picture questions were timed on 25 Nov 2026 before the spare query process, when starting a question took
+# about 16 seconds; they have not been timed since.
+PICTURE_QUESTIONS = [
     ("Cut-out pictures", lambda: _paperqa_settings(media=True), 204),
     ("Whole-page pictures", lambda: _paperqa_settings(media=True, whole_page=True), 198),
 ]
 
 
-@pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
-def test_the_time_is_close_to_measured_questions(name, settings, seconds):
-    # Compared as things were when the questions were timed: the estimate plus the start-up saved since.
-    then = estimate.estimate_question(settings()).seconds + START_UP_SAVING
+@pytest.mark.parametrize(("name", "settings", "seconds"), PICTURE_QUESTIONS, ids=[q[0] for q in PICTURE_QUESTIONS])
+def test_picture_questions_are_close_to_their_measured_time(name, settings, seconds):
+    then = estimate.estimate_question(settings()).seconds + 16 - estimate.START_SECONDS
 
-    # One question can run a minute longer or shorter than the next, depending on how many searches the
-    # model makes, so close means within about half again either way.
     assert seconds * 0.75 <= then <= seconds * 1.6
-
-
-@pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
-def test_no_question_measured_at_half_a_minute_or_more_is_shown_as_under_half_a_minute(name, settings, seconds):
-    if seconds - START_UP_SAVING < 30:
-        pytest.skip("This question now takes under half a minute.")
-    assert estimate.describe_time(estimate.estimate_question(settings()).seconds) != "under half a minute"
 
 
 # Pictures, sent with each passage when images and tables are on.

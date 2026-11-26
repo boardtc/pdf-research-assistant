@@ -10,10 +10,9 @@ from paperqa.agents.search import get_directory_index
 
 from pdf_research_assistant import index_record, rebuild_client
 from pdf_research_assistant.bootstrap import (
-    ALLOWED_PATHS,
     FAILED_DOCUMENT_ADD_ID,
-    USE_MANIFEST,
     build_settings,
+    get_allowed_paths,
     get_failed_files,
     get_indexed_doc_count,
 )
@@ -112,10 +111,11 @@ def clear_failed_documents_from_active_index(index_dir: Path) -> int:
 async def async_main():
     """Rebuild the PaperQA directory index and print a short before/after status summary."""
     active_index_dir = get_active_index_dir()
-    if USE_MANIFEST:
-        print(f"Manifest PDFs: {len(ALLOWED_PATHS)}")
+    allowed_paths = get_allowed_paths()
+    if allowed_paths:
+        print(f"Manifest PDFs: {len(allowed_paths)}")
     else:
-        print("Manifest PDFs: manifest.csv not found; indexing all PDFs under PAPER_DIR")
+        print("Manifest PDFs: no paper list in use; indexing all PDFs under PAPER_DIR")
     print(f"Indexed before run: {get_indexed_doc_count(index_dir=active_index_dir)}")
     cleared_failed_documents = clear_failed_documents_from_active_index(active_index_dir)
     if cleared_failed_documents:

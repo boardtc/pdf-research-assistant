@@ -55,6 +55,8 @@ def _fake_settings(**changes):
         "answer_template": None,
         "grounding": None,
         "pre_prompt": None,
+        "manifest_file": None,
+        "recurse_subdirectories": True,
     } | changes
     settings = SimpleNamespace(
         llm=values["llm"],
@@ -87,6 +89,8 @@ def _fake_settings(**changes):
             index=SimpleNamespace(
                 paper_directory=values["paper_directory"],
                 use_absolute_paper_directory=values["use_absolute_paper_directory"],
+                manifest_file=values["manifest_file"],
+                recurse_subdirectories=values["recurse_subdirectories"],
             ),
             agent_llm=values["llm"],
             agent_llm_config={},
@@ -144,6 +148,9 @@ def imported_pdf_research_assistant(
         # And the button that puts the sidebar settings back to the defaults.
         if str(key or "").startswith("answer_settings_"):
             return False
+        # And the scope settings' confirm and cancel buttons.
+        if str(key or "").startswith("scope_"):
+            return key in clicked_keys
         # And the one that does the same for the library and index settings.
         if str(key or "").startswith("index_settings_"):
             return False
@@ -192,6 +199,10 @@ def imported_pdf_research_assistant(
 
     # Mock bootstrap lookups so each import scenario can model a specific index and manifest state.
     bootstrap_module.get_allowed_paths = mock.Mock(return_value=set() if allowed_paths is None else allowed_paths)
+    bootstrap_module.saved_scope = mock.Mock(return_value=("manifest", True))
+    bootstrap_module.manifest_exists = mock.Mock(return_value=bool(allowed_paths))
+    bootstrap_module.load_allowed_manifest_paths = mock.Mock(return_value=set(allowed_paths or ()))
+    bootstrap_module.get_index_entries = mock.Mock(return_value=set())
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
@@ -1088,7 +1099,7 @@ def test_import_warns_when_non_manifest_index_is_missing():
         module.st.warning.assert_called_once_with(
             "Index not found. The first question will build the PDF index, which may take a long time."
         )
-        module.st.info.assert_called_once_with("No manifest.csv was found, so all PDFs under PAPER_DIR are in scope.")
+        module.st.info.assert_called_once_with("No paper list is in use, so all PDFs under PAPER_DIR are in scope.")
 
 
 def test_import_shows_manifest_index_caption_when_manifest_index_is_available():
@@ -1258,7 +1269,7 @@ def test_import_question_submission_error_renders_diagnostics_and_still_appends_
             0,
             [
                 ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
-                ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
+                ("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."),
             ],
         ),
         (2, 2, [("caption", "Index available for 2 manifest PDFs.")]),
@@ -2015,6 +2026,7 @@ def test_render_sidebar_draws_instant_then_reindex_settings_then_usage_then_rese
         render_research_presets=steps.presets,
         render_instant_settings=steps.instant,
         render_reindex_settings=steps.reindex,
+        render_scope_settings=steps.scope,
         render_usage=steps.usage,
     ):
         assert module.render_sidebar(app_state, settings, CHUNK_CHANGES, True) == ("Exhaustive", {"evidence_k": 3})
@@ -2025,6 +2037,7 @@ def test_render_sidebar_draws_instant_then_reindex_settings_then_usage_then_rese
     assert steps.mock_calls == [
         mock.call.instant(settings),
         mock.call.reindex(settings, CHUNK_CHANGES, True),
+        mock.call.scope(settings),
         mock.call.usage(app_state),
         mock.call.presets(slot),
     ]
@@ -2043,6 +2056,7 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
             module.ONE_OFF_TITLE,
             "Local LLM setup",
             "Library and index settings",
+            module.SCOPE_SETTINGS_PANEL,
             module.RESEARCH_PRESETS_PANEL,
             module.RESEARCH_PRESET_FILES_PANEL,
             # Drawn above the chat, after the sidebar.
@@ -3634,7 +3648,7 @@ def test_confirming_without_a_manifest_counts_the_pdfs_in_the_pdf_folder():
     ):
         pass
 
-    count_pdfs.assert_called_once_with(Path(r"D:\papers"))
+    count_pdfs.assert_called_once_with(Path(r"D:\papers"), True)
     start.assert_called_once_with(Path(r"C:\index\active-shard"), 7)
 
 
@@ -4980,3 +4994,372 @@ def test_submit_question_records_no_save_problem_when_the_answer_was_kept(pdf_re
         module.submit_question("Q", {})
 
     assert "save_error" not in module.st.session_state.history[-1]
+
+
+# The settings that decide which PDFs are searched: the paper list and subfolders.
+
+
+def _scope_files(root, *names):
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+
+def draw_scope_settings(
+    module,
+    tmp_path,
+    *,
+    files=("a.pdf", "b.pdf", "sub/c.pdf"),
+    listed=frozenset(),
+    saved_scope=("manifest", True),
+    indexed=frozenset(),
+    paper_list_found=True,
+    settings=None,
+    chosen=None,
+    submitted=False,
+    clicked=(),
+    pending=None,
+    rebuilding=False,
+):
+    """Draw the scope settings over a real folder of PDFs, with the user choosing values and perhaps clicking.
+
+    chosen maps a control's label to the value the user leaves in it.
+    """
+    st = module.st
+    chosen = chosen or {}
+    _scope_files(tmp_path, *files)
+    for shown in (st.caption, st.expander, st.rerun, st.error, st.info, st.success, st.warning, st.markdown):
+        shown.reset_mock()
+    st.session_state.pop("scope_pending", None)
+    if pending:
+        st.session_state.scope_pending = pending
+    st.selectbox = mock.Mock(side_effect=lambda label, options, index=0, **_kwargs: chosen.get(label, options[index]))
+    st.checkbox = mock.Mock(side_effect=lambda label, value=False, **_kwargs: chosen.get(label, value))
+    st.form = mock.Mock(return_value=_ContextManagerStub())
+    st.form_submit_button = mock.Mock(return_value=submitted)
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    run = {"process": mock.Mock()} if rebuilding else None
+    with mock.patch.multiple(
+        module.bootstrap,
+        PAPER_DIR=tmp_path,
+        MANIFEST_PATH=tmp_path / "manifest.csv",
+        saved_scope=mock.Mock(return_value=saved_scope),
+        manifest_exists=mock.Mock(return_value=paper_list_found),
+        load_allowed_manifest_paths=mock.Mock(return_value=set(listed)),
+        get_index_entries=mock.Mock(return_value=set(indexed)),
+    ), mock.patch.object(module.rebuild_client, "get_run", return_value=run), mock.patch.multiple(
+        module.saved_settings, save_value=mock.DEFAULT
+    ) as patched:
+        module.render_scope_settings(settings or _scope_fake_settings(saved_scope, paper_list_found))
+        return patched
+
+
+def _scope_fake_settings(saved_scope=("manifest", True), paper_list_found=True):
+    settings = _fake_settings()
+    settings.agent.index.manifest_file = Path("manifest.csv") if saved_scope[0] == "manifest" and paper_list_found else None
+    settings.agent.index.recurse_subdirectories = saved_scope[1]
+    return settings
+
+
+def test_the_scope_settings_sit_in_their_own_panel_and_form_so_nothing_changes_until_saved(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path)
+
+    module.st.expander.assert_called_once_with(module.SCOPE_SETTINGS_PANEL)
+    module.st.form.assert_called_once_with("scope_settings_form")
+    module.st.form_submit_button.assert_called_once_with(module.SCOPE_SETTINGS_SAVE_LABEL, disabled=False)
+    module.st.caption.assert_any_call(module.SCOPE_SETTINGS_NOTE)
+    patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_the_scope_controls_start_at_the_values_in_use(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    get_setting = module.settings_groups.get_setting
+
+    draw_scope_settings(module, tmp_path, saved_scope=("all", False))
+
+    paper_list = module.st.selectbox.call_args
+    assert paper_list.args[0] == "Paper list"
+    assert paper_list.args[1] == ["manifest", "all"]
+    assert paper_list.kwargs["index"] == 1
+    assert paper_list.kwargs["key"] == "scope_setting_manifest_scope_0"
+    assert paper_list.kwargs["help"] == get_setting("manifest_scope").help
+    assert paper_list.kwargs["disabled"] is False
+    assert [paper_list.kwargs["format_func"](value) for value in paper_list.args[1]] == [
+        "Only the PDFs in the paper list",
+        "All PDFs in the folder",
+    ]
+    subfolders = module.st.checkbox.call_args
+    assert subfolders.args[0] == "Search subfolders"
+    assert subfolders.kwargs == {
+        "value": False,
+        "help": get_setting("recurse_subdirectories").help,
+        "key": "scope_setting_recurse_subdirectories_0",
+    }
+
+
+def test_the_paper_list_control_is_switched_off_when_there_is_no_paper_list(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(module, tmp_path, paper_list_found=False)
+
+    assert module.st.selectbox.call_args.kwargs["disabled"] is True
+    module.st.caption.assert_any_call(module.SCOPE_NO_PAPER_LIST_NOTE)
+
+
+def test_the_no_paper_list_note_is_left_out_when_there_is_a_paper_list(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(module, tmp_path)
+
+    assert mock.call(module.SCOPE_NO_PAPER_LIST_NOTE) not in module.st.caption.call_args_list
+
+
+def test_saving_scope_without_a_change_saves_nothing(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path, submitted=True, indexed={"a.pdf"})
+
+    patched["save_value"].assert_not_called()
+    module.st.info.assert_called_once_with(module.INDEX_SETTINGS_UNCHANGED_NOTE)
+    assert "scope_pending" not in module.st.session_state or not module.st.session_state.scope_pending
+
+
+def test_turning_subfolders_off_waits_for_confirmation_and_says_how_many_pdfs_leave_the_index(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending == {
+        "values": {"recurse_subdirectories": False},
+        "preview": {"added": [], "removed": ["sub/c.pdf"], "already_indexed": []},
+    }
+    module.st.rerun.assert_called_once_with()
+
+
+def test_turning_subfolders_on_says_how_many_pdfs_would_be_added(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        saved_scope=("manifest", False),
+        chosen={"Search subfolders": True},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending["preview"] == {
+        "added": ["sub/c.pdf"],
+        "removed": [],
+        "already_indexed": [],
+    }
+
+
+def test_leaving_the_paper_list_out_adds_the_unlisted_pdfs(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"a.pdf"},
+        chosen={"Paper list": "all"},
+        submitted=True,
+        indexed={"a.pdf"},
+    )
+
+    assert module.st.session_state.scope_pending == {
+        "values": {"manifest_scope": "all"},
+        "preview": {"added": ["b.pdf", "sub/c.pdf"], "removed": [], "already_indexed": []},
+    }
+
+
+def test_using_the_paper_list_removes_the_unlisted_pdfs_from_the_index(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"a.pdf"},
+        saved_scope=("all", True),
+        chosen={"Paper list": "manifest"},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    assert module.st.session_state.scope_pending["preview"] == {
+        "added": [],
+        "removed": ["b.pdf", "sub/c.pdf"],
+        "already_indexed": [],
+    }
+
+
+def test_a_scope_change_that_adds_or_removes_nothing_is_saved_at_once(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        files=("a.pdf", "b.pdf"),
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf"},
+    )
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", False)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_NO_CHANGE_NOTICE
+    assert module.st.session_state.scope_pending is None
+    module.st.rerun.assert_called_once_with()
+
+
+def test_pdfs_coming_into_scope_that_are_already_indexed_need_no_confirmation(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        saved_scope=("manifest", False),
+        chosen={"Search subfolders": True},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", True)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_NO_CHANGE_NOTICE
+
+
+def test_a_scope_change_is_saved_at_once_when_the_index_holds_no_pdfs_yet(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path, chosen={"Search subfolders": False}, submitted=True)
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", False)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_EMPTY_INDEX_NOTICE
+
+
+def test_a_saved_scope_change_gives_the_controls_fresh_keys(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop("scope_settings_round", None)
+
+    draw_scope_settings(module, tmp_path, chosen={"Search subfolders": False}, submitted=True)
+
+    assert module.st.session_state.scope_settings_round == 1
+
+
+def test_subfolders_cannot_be_turned_off_when_the_paper_list_names_only_pdfs_in_them(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"sub/c.pdf"},
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    module.st.error.assert_called_once_with(module.SCOPE_NOTHING_LEFT_NOTE)
+    module.st.rerun.assert_not_called()
+
+
+def test_a_scope_change_waiting_for_confirmation_shows_the_warning_with_the_counts(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+    pending = {
+        "values": {"recurse_subdirectories": False},
+        "preview": {"added": ["x.pdf"], "removed": ["sub/c.pdf"], "already_indexed": []},
+    }
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending)
+
+    (warning,) = [call.args[0] for call in module.st.warning.call_args_list]
+    assert "This changes the index you are using. It does not start a new one." in warning
+    assert "`active-shard`" in warning
+    assert "1 PDF would be added to the index and read, which costs money: `x.pdf`" in warning
+    assert "1 PDF would be removed from the index: `sub/c.pdf`" in warning
+    assert "Nothing is saved until you confirm." in warning
+    patched["save_value"].assert_not_called()
+
+
+def test_the_scope_warning_names_the_index_the_user_gave_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    preview = {"added": [], "removed": ["a.pdf"], "already_indexed": []}
+
+    text = module.describe_scope_change(preview, Path("index/pqa_index_1"), "My papers")
+
+    assert "**My papers** (`pqa_index_1`)" in text
+
+
+def test_confirming_a_scope_change_saves_every_value_and_draws_the_page_again(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    pending = {
+        "values": {"manifest_scope": "all", "recurse_subdirectories": False},
+        "preview": {"added": [], "removed": ["a.pdf"], "already_indexed": []},
+    }
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending, clicked={"scope_confirm"})
+
+    assert patched["save_value"].call_args_list == [
+        mock.call("manifest_scope", "all"),
+        mock.call("recurse_subdirectories", False),
+    ]
+    assert module.st.session_state.scope_pending is None
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_SAVED_NOTICE
+    module.st.rerun.assert_called_once_with()
+
+
+def test_cancelling_a_scope_change_saves_nothing_and_resets_the_controls(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop("scope_settings_round", None)
+    pending = {"values": {"manifest_scope": "all"}, "preview": {"added": ["a.pdf"], "removed": [], "already_indexed": []}}
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending, clicked={"scope_cancel"})
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending is None
+    assert module.st.session_state.scope_settings_round == 1
+    module.st.rerun.assert_called_once_with()
+
+
+def test_the_scope_settings_cannot_be_saved_while_a_rebuild_runs(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module, tmp_path, chosen={"Search subfolders": False}, submitted=True, indexed={"sub/c.pdf"}, rebuilding=True
+    )
+
+    patched["save_value"].assert_not_called()
+    module.st.form_submit_button.assert_called_once_with(module.SCOPE_SETTINGS_SAVE_LABEL, disabled=True)
+    module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
+    module.st.rerun.assert_not_called()
+
+
+def test_a_scope_notice_is_shown_once(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.scope_settings_notice = module.SCOPE_SAVED_NOTICE
+
+    draw_scope_settings(module, tmp_path)
+    module.st.success.assert_called_once_with(module.SCOPE_SAVED_NOTICE)
+    module.st.success.reset_mock()
+    draw_scope_settings(module, tmp_path)
+
+    module.st.success.assert_not_called()

@@ -36,9 +36,8 @@ def rebuild_index_module():
     settings_object.agent.index.index_directory = Path("index-root")
     settings_object.get_index_name.return_value = "active-index"
 
-    bootstrap_module.ALLOWED_PATHS = {"paper_a.pdf", "paper_b.pdf"}
+    bootstrap_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf", "paper_b.pdf"})
     bootstrap_module.FAILED_DOCUMENT_ADD_ID = "ERROR"
-    bootstrap_module.USE_MANIFEST = True
     bootstrap_module.build_settings = mock.Mock(return_value=settings_object)
     bootstrap_module.get_failed_files = mock.Mock(return_value=[])
     bootstrap_module.get_indexed_doc_count = mock.Mock(side_effect=[1, 2])
@@ -62,8 +61,7 @@ def rebuild_index_module():
 
 
 def test_main_prints_manifest_summary_and_rebuild_counts_when_manifest_is_enabled(rebuild_index_module):
-    rebuild_index_module.USE_MANIFEST = True
-    rebuild_index_module.ALLOWED_PATHS = {"paper_a.pdf", "paper_b.pdf"}
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf", "paper_b.pdf"})
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[1, 2])
     rebuild_index_module.get_failed_files = mock.Mock(return_value=[])
 
@@ -83,8 +81,8 @@ def test_main_prints_manifest_summary_and_rebuild_counts_when_manifest_is_enable
     ]
 
 
-def test_main_prints_non_manifest_summary_when_manifest_file_is_missing(rebuild_index_module):
-    rebuild_index_module.USE_MANIFEST = False
+def test_main_prints_non_manifest_summary_when_no_paper_list_is_in_use(rebuild_index_module):
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value=set())
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[0, 3])
     rebuild_index_module.get_failed_files = mock.Mock(return_value=[])
 
@@ -93,7 +91,7 @@ def test_main_prints_non_manifest_summary_when_manifest_file_is_missing(rebuild_
         asyncio.run(rebuild_index_module.async_main())
 
     assert print_mock.call_args_list == [
-        mock.call("Manifest PDFs: manifest.csv not found; indexing all PDFs under PAPER_DIR"),
+        mock.call("Manifest PDFs: no paper list in use; indexing all PDFs under PAPER_DIR"),
         mock.call("Indexed before run: 0"),
         mock.call("Indexed after run: 3"),
         mock.call("Failed PDFs: 0"),
@@ -101,8 +99,7 @@ def test_main_prints_non_manifest_summary_when_manifest_file_is_missing(rebuild_
 
 
 def test_main_prints_each_failed_file_after_rebuild(rebuild_index_module):
-    rebuild_index_module.USE_MANIFEST = True
-    rebuild_index_module.ALLOWED_PATHS = {"paper_a.pdf"}
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf"})
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[1, 1])
     rebuild_index_module.get_failed_files = mock.Mock(return_value=["bad_a.pdf", "bad_b.pdf"])
 
@@ -125,8 +122,7 @@ def test_main_retries_previously_failed_documents_from_the_active_index_before_r
     rebuild_index_module.settings = mock.Mock()
     rebuild_index_module.settings.agent.index.index_directory = Path("index-root")
     rebuild_index_module.settings.get_index_name.return_value = "active-index"
-    rebuild_index_module.USE_MANIFEST = True
-    rebuild_index_module.ALLOWED_PATHS = {"paper_a.pdf"}
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf"})
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[5, 6])
     rebuild_index_module.get_failed_files = mock.Mock(return_value=[])
 
@@ -155,8 +151,7 @@ def test_main_retries_previously_failed_documents_from_the_active_index_before_r
 def test_main_continues_when_directory_rebuild_raises_exception_group_and_reports_recorded_failed_files(
     rebuild_index_module,
 ):
-    rebuild_index_module.USE_MANIFEST = True
-    rebuild_index_module.ALLOWED_PATHS = {"paper_a.pdf"}
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf"})
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[105, 105])
     rebuild_index_module.get_failed_files = mock.Mock(
         return_value=["Session 7/Sadler 2013 Opening-up-feedback-Teaching-learners-to-see Chapter.pdf"]
@@ -181,8 +176,7 @@ def test_main_continues_when_directory_rebuild_raises_exception_group_and_report
 def test_main_prints_exception_messages_when_directory_rebuild_raises_exception_group_without_recorded_failed_files(
     rebuild_index_module,
 ):
-    rebuild_index_module.USE_MANIFEST = True
-    rebuild_index_module.ALLOWED_PATHS = {"paper_a.pdf"}
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf"})
     rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[3, 3])
     rebuild_index_module.get_failed_files = mock.Mock(return_value=[])
     rebuild_index_module.get_directory_index = mock.AsyncMock(

@@ -229,6 +229,47 @@ def test_resolve_in_scope_paths_combines_disk_and_index_when_no_manifest_exists(
     assert paths == ["indexed/only.pdf", "sub/disk.pdf"]
 
 
+def _save_scope(workspace_tmp_path, **choices):
+    """Return a patch that makes these sidebar scope choices the saved ones for the test."""
+    from pdf_research_assistant import saved_settings
+
+    patch = mock.patch.object(saved_settings, "SETTINGS_PATH", workspace_tmp_path / "scope-saved.json")
+    patch.start()
+    for key, value in choices.items():
+        saved_settings.save_value(key, value)
+    return patch
+
+
+def test_resolve_in_scope_paths_leaves_out_subfolders_when_they_are_not_searched(exhaustive_module, workspace_tmp_path):
+    papers = workspace_tmp_path / "papers"
+    (papers / "sub").mkdir()
+    (papers / "top.pdf").write_bytes(b"x")
+    (papers / "sub" / "disk.pdf").write_bytes(b"x")
+    patch = _save_scope(workspace_tmp_path, recurse_subdirectories=False)
+    try:
+        paths = exhaustive_module.resolve_in_scope_paths({r"sub\indexed.pdf": "hash", "kept.pdf": "hash"})
+    finally:
+        patch.stop()
+
+    assert paths == ["kept.pdf", "top.pdf"]
+
+
+def test_resolve_in_scope_paths_ignores_the_paper_list_when_all_pdfs_are_chosen(
+    exhaustive_module, workspace_tmp_path, manifest_path
+):
+    papers = workspace_tmp_path / "papers"
+    (papers / "listed.pdf").write_bytes(b"x")
+    (papers / "unlisted.pdf").write_bytes(b"x")
+    _write_manifest(manifest_path, ["listed.pdf"])
+    patch = _save_scope(workspace_tmp_path, manifest_scope="all")
+    try:
+        paths = exhaustive_module.resolve_in_scope_paths({})
+    finally:
+        patch.stop()
+
+    assert paths == ["listed.pdf", "unlisted.pdf"]
+
+
 def test_resolve_in_scope_paths_uses_index_alone_when_paper_dir_is_missing(exhaustive_module, workspace_tmp_path):
     shutil.rmtree(workspace_tmp_path / "papers")
 

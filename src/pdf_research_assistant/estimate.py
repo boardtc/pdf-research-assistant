@@ -30,12 +30,15 @@ import limits
 import litellm
 from paperqa.settings import MultimodalOptions
 
-# Median measured for gpt-4o-mini writing 200-word summaries (about 160 output tokens).
+# Median measured for gpt-4o-mini writing 200-word summaries (about 160 output tokens) in an early speed test.
+# Exhaustive search's own estimate uses it; questions use the call times below.
 SECONDS_PER_CALL = 5.5
-TYPICAL_OUTPUT_TOKENS = 160
-# Part of each call's time is spent before the first word comes back; the rest grows with the reply.
-CALL_START_SECONDS = 1.5
-SECONDS_PER_OUTPUT_TOKEN = (SECONDS_PER_CALL - CALL_START_SECONDS) / TYPICAL_OUTPUT_TOKENS
+# Part of each call's time is spent before the first word comes back; the rest grows with the reply. Fitted to
+# 503 summary and answer calls in 15 real questions with gpt-4o-mini on High limits (25 Nov 2026): a passage
+# judged not relevant (16 tokens) took 0.84 seconds at the median, and a 200-word answer (220 to 270 tokens)
+# 3.1 to 4.8.
+CALL_START_SECONDS = 0.6
+SECONDS_PER_OUTPUT_TOKEN = 0.013
 CHARACTERS_PER_TOKEN = 4
 TOKENS_PER_WORD = 4 / 3
 # The rate limiter counts characters / 4, which runs about 10% above real input tokens.
@@ -44,13 +47,14 @@ LIMITER_TOKEN_FACTOR = 1.1
 FALLBACK_WORDS = 200
 # PaperQA's agent chooses each step with a short call: searching, gathering evidence, answering and
 # finishing. Kept answers on a library of about 120 PDFs took 4 to 14 steps, most often 6 to 8, and sent
-# about 1,100 tokens to the agent model per step.
+# about 1,100 tokens to the agent model per step. 15 questions timed on 25 Nov 2026 took 4 to 42 steps, most
+# often 4 but 8.4 on average, which is what the estimate counts.
 AGENT_CALLS = 8
 AGENT_INPUT_TOKENS = 1100
 AGENT_OUTPUT_TOKENS = 50
 # Each time the agent gathers evidence, all the passages are read again; the same kept answers gathered
-# evidence 1 to 7 times, most often 3. Counted for the time only, since the cost estimate was already
-# within about twice the real cost without it.
+# evidence 1 to 7 times, most often 3; the timed questions 1 to 14 times, 3.6 on average. Counted for the
+# time only, since the cost estimate was already within about twice the real cost without it.
 EVIDENCE_ROUNDS = 3
 # From asking a question to PaperQA's first model call, measured on the library of about 120 PDFs with a
 # local stand-in for OpenAI (25 Nov 2026, 10 runs with the CPU at 100%): 0.4 to 2.8 seconds, median about 1.3,
@@ -60,10 +64,9 @@ EVIDENCE_ROUNDS = 3
 # asked before the spare has finished loading waits for the rest of it. Keeping the answer afterwards took
 # about 0.2 seconds.
 START_SECONDS = 3
-# Each agent step is a short call sent the conversation so far, plus the tool it runs. A search measured under
-# a tenth of a second, so the step is nearly all the call. Not measured on its own: fitted, with the figures
-# above, to real questions timed from asking to the answer appearing (24 and 25 Nov 2026).
-AGENT_STEP_SECONDS = 4.0
+# Each agent step is a short call sent the conversation so far, plus the tool it runs. 114 agent calls in the
+# timed questions averaged 1.19 seconds (median 0.95), and a search took 0.1.
+AGENT_STEP_SECONDS = 1.3
 # With fixed search steps, the answer model is asked for a few searches (a short prompt and reply), then
 # sent the conversation once more to finish, like one of the agent's own calls.
 FIXED_STEPS_AGENT_TYPE = "fake"
@@ -99,27 +102,29 @@ DEFAULT_PICTURE_TOKENS = (85, 170)
 PNG_BYTES_PER_PIXEL = 0.165
 BASE64_CHARACTERS_PER_BYTE = 4 / 3
 # Fitted to two real questions on a library of about 120 PDFs, with 10 passages sent at once: cut-out pictures
-# took 204 seconds and whole-page pictures 198. A batch waits for its slowest passage, which has more pictures
-# than the average, so this is well above the time to read one picture. It is counted once per batch, not
-# for every round of evidence gathering, because it was fitted to whole questions.
-SECONDS_PER_PICTURE = 50
+# took 204 seconds and whole-page pictures 198, when starting a question still took about 16 seconds. What is
+# left once the same question without pictures is taken off is the pictures' share. A batch waits for its
+# slowest passage, which has more pictures than the average, so this is well above the time to read one
+# picture. It is counted once per batch, not for every round of evidence gathering, because it was fitted to
+# whole questions.
+SECONDS_PER_PICTURE = 75
 
 FAST = "Fast"
 BALANCED = "Balanced"
 SLOWER = "Slower"
 HIGHER_COST = "Higher cost"
-# Chosen so PaperQA's defaults with gpt-4o-mini come out Balanced, the Fast preset (5 passages, short answers,
-# fixed steps, about 20 seconds) Fast, Low limits Slower, and 30 passages Higher cost. Both times were 13 seconds
-# higher when starting a question took 16 seconds; every question got that much shorter, so they moved with it.
-FAST_SECONDS = 37
+# Chosen so PaperQA's defaults with gpt-4o-mini come out Balanced (about 25 seconds), the Fast preset (5
+# passages, short answers, fixed steps, about 10 seconds) Fast, Low limits Slower, and 30 passages Higher cost.
+FAST_SECONDS = 15
 FAST_COST_USD = 0.004
-SLOWER_SECONDS = 77
+SLOWER_SECONDS = 45
 HIGHER_COST_USD = 0.008
 
 BADGE_COLOURS = {FAST: "green", BALANCED: "blue", SLOWER: "orange", HIGHER_COST: "orange"}
 ROUGH_NOTE = (
     "A rough guide, not a quote: the real figures depend on the question, on how much the model writes, "
-    "and on how many searches PaperQA decides to make."
+    "and on how many searches PaperQA decides to make. A question that needs many searches can take a "
+    "minute or more, and so can any question while the computer is busy."
 )
 LOCAL_COST_NOTE = (
     "Cost: none for the answer model, which runs on your computer. Finding passages still uses OpenAI "

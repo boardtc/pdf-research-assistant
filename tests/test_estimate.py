@@ -12,7 +12,6 @@ from pdf_research_assistant import estimate, rate_profiles
 MODEL = "gpt-4o-mini"
 # A real question on a one-PDF index with images and tables on, at the app's picture resolution.
 MEASURED_MEDIA_COST_USD = 0.0547
-MEASURED_MEDIA_SECONDS = 90
 # bootstrap.PICTURE_DPI; bootstrap is not imported here, since it needs PAPER_DIR.
 PICTURE_DPI = 150
 
@@ -274,19 +273,28 @@ def test_paperqa_defaults_show_under_half_a_minute():
     assert estimate.describe_time(estimate.estimate_question(_paperqa_settings()).seconds) == "under half a minute"
 
 
-# Picture questions were timed on 25 Nov 2026 before the spare query process, when starting a question took
-# about 16 seconds; they have not been timed since.
-PICTURE_QUESTIONS = [
-    ("Cut-out pictures", lambda: _paperqa_settings(media=True), 204),
-    ("Whole-page pictures", lambda: _paperqa_settings(media=True, whole_page=True), 198),
-]
+# One real question on each kind of picture index (26 Nov 2026): three journal articles, on without enrichment,
+# 150 dpi, High limits, timed from PaperQA's first model call to the answer plus the 3-second start-up.
 
 
-@pytest.mark.parametrize(("name", "settings", "seconds"), PICTURE_QUESTIONS, ids=[q[0] for q in PICTURE_QUESTIONS])
-def test_picture_questions_are_close_to_their_measured_time(name, settings, seconds):
-    then = estimate.estimate_question(settings()).seconds + 16 - estimate.START_SECONDS
+def test_a_whole_page_picture_question_is_close_to_its_measured_time():
+    # 137 seconds: 16 pictures, sent in three waves a minute apart while the token limit held them back.
+    result = estimate.estimate_question(_paperqa_settings(media=True, whole_page=True))
 
-    assert seconds * 0.75 <= then <= seconds * 1.6
+    assert 137 * 0.75 <= result.seconds <= 137 * 1.25
+
+
+def test_a_cut_out_picture_question_is_not_shown_as_longer_than_a_minute():
+    # 17 seconds, with only 4 pictures where the estimate guesses 19, so the guess is allowed to be high.
+    result = estimate.estimate_question(_paperqa_settings(media=True))
+
+    assert result.seconds >= 17
+    assert estimate.describe_time(result.seconds) == "under a minute"
+
+
+def test_a_picture_adds_little_to_the_call_that_carries_it():
+    # Summary calls with one or two whole-page pictures took 2.8 to 5.8 seconds, against about 2.3 without.
+    assert estimate.SECONDS_PER_PICTURE == pytest.approx(1.5)
 
 
 # Pictures, sent with each passage when images and tables are on.
@@ -363,11 +371,10 @@ def test_count_limiter_tokens_counts_a_picture_as_base64_text():
     assert estimate.count_limiter_tokens(1000, 500) == pytest.approx(chars / estimate.CHARACTERS_PER_TOKEN)
 
 
-def test_a_question_on_a_media_index_covers_the_measured_cost_and_time():
+def test_a_question_on_a_media_index_covers_the_measured_cost():
     result = estimate.estimate_question(_paperqa_settings(media=True))
 
     assert result.cost_usd >= MEASURED_MEDIA_COST_USD
-    assert result.seconds >= MEASURED_MEDIA_SECONDS
     assert estimate.label_for(result) == estimate.HIGHER_COST
 
 
@@ -479,7 +486,16 @@ def test_describe_cost_rounds_up_to_whole_cents(cost, text):
 
 @pytest.mark.parametrize(
     ("seconds", "text"),
-    [(29, "under half a minute"), (30, "under a minute"), (59, "under a minute"), (61, "up to about 2 minutes")],
+    [
+        (29, "under half a minute"),
+        (30, "under a minute"),
+        (59, "under a minute"),
+        # A whole minute is never "about 1 minutes".
+        (60, "up to about 2 minutes"),
+        (61, "up to about 2 minutes"),
+        (120, "up to about 2 minutes"),
+        (121, "up to about 3 minutes"),
+    ],
 )
 def test_describe_time_gives_a_rough_range(seconds, text):
     assert estimate.describe_time(seconds) == text
@@ -504,7 +520,7 @@ def test_describe_estimate_explains_what_is_counted():
 
     assert lines == [
         "PaperQA reads 10 passages with the model, then writes an answer of up to about 200 words from at most 5 "
-        f"of them, plus about {estimate.AGENT_CALLS} short calls to plan the search.",
+        f"of them, plus short calls to plan the search, about {estimate.AGENT_CALLS} on average.",
         "Cost: less than 1 cent.",
         f"Time: under half a minute. {estimate.START_NOTE} {estimate.EVIDENCE_ROUNDS_NOTE}",
         estimate.ROUGH_NOTE,
@@ -514,6 +530,9 @@ def test_describe_estimate_explains_what_is_counted():
 def test_start_note_and_evidence_rounds_note_give_the_figures_used():
     assert f"about {estimate.START_SECONDS} seconds" in estimate.START_NOTE
     assert f"about {estimate.EVIDENCE_ROUNDS} times" in estimate.EVIDENCE_ROUNDS_NOTE
+    # Most questions gather evidence once; a few gather it many times, so the figure is an average.
+    assert "on average" in estimate.EVIDENCE_ROUNDS_NOTE.lower()
+    assert "usually" not in estimate.EVIDENCE_ROUNDS_NOTE
 
 
 def test_describe_estimate_explains_cut_out_pictures():

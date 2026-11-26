@@ -6,12 +6,12 @@ page load without reading the index:
 
 - Starting the question takes a short fixed time before the first call. PaperQA is loaded beforehand, in a
   spare query process that waits for the question (query_client.py).
-- PaperQA's agent makes a call to choose each step (search, gather evidence, answer, finish), usually
-  about eight. With fixed search steps (`agent.agent_type` "fake") the answer model is instead asked once
+- PaperQA's agent makes a call to choose each step (search, gather evidence, answer, finish), about
+  eight on average. With fixed search steps (`agent.agent_type` "fake") the answer model is instead asked once
   for a few searches and once more to finish, after the steps have run.
 - Gathering evidence sends `answer.evidence_k` passages to the summary model, at most
   `answer.max_concurrent_requests` at a time, and asks for `answer.evidence_summary_length` each. The agent
-  usually gathers evidence a few times, so the time counts the passages being read more than once.
+  gathers evidence about three times on average, so the time counts the passages being read more than once.
 - With a before-answer prompt (`prompts.pre`), the answer model is first sent that prompt with the
   question, and its reply goes on to the answer as background.
 - The answer model then writes `answer.answer_length` from up to `answer.answer_max_sources` summaries.
@@ -101,13 +101,12 @@ DEFAULT_PICTURE_TOKENS = (85, 170)
 # for every 3 bytes of a PNG, which measured about 0.165 bytes per pixel.
 PNG_BYTES_PER_PIXEL = 0.165
 BASE64_CHARACTERS_PER_BYTE = 4 / 3
-# Fitted to two real questions on a library of about 120 PDFs, with 10 passages sent at once: cut-out pictures
-# took 204 seconds and whole-page pictures 198, when starting a question still took about 16 seconds. What is
-# left once the same question without pictures is taken off is the pictures' share. A batch waits for its
-# slowest passage, which has more pictures than the average, so this is well above the time to read one
-# picture. It is counted once per batch, not for every round of evidence gathering, because it was fitted to
-# whole questions.
-SECONDS_PER_PICTURE = 75
+# How much longer a summary call takes for each picture it carries, counted once per batch. Measured on two
+# real questions (26 Nov 2026, 150 dpi, High limits): calls with one or two whole-page pictures took 2.8 to 5.8
+# seconds against about 2.3 without, and a batch waits for its slowest passage. Pictures slow a question far
+# more through the token limit, which counts each one by its size as text: the whole-page question sent its 16
+# pictures in three waves a minute apart.
+SECONDS_PER_PICTURE = 1.5
 
 FAST = "Fast"
 BALANCED = "Balanced"
@@ -137,7 +136,7 @@ PRE_PROMPT_NOTE = (
 PICTURE_NOTE = "Pictures often cost more than the text and make each passage slower to read."
 START_NOTE = f"That includes about {START_SECONDS} seconds to start the question."
 EVIDENCE_ROUNDS_NOTE = (
-    f"The model usually gathers evidence about {EVIDENCE_ROUNDS} times, reading the passages again each time."
+    f"On average the model gathers evidence about {EVIDENCE_ROUNDS} times, reading the passages again each time."
 )
 
 
@@ -362,7 +361,8 @@ def describe_time(seconds: float) -> str:
         return "under half a minute"
     if seconds < 60:
         return "under a minute"
-    minutes = math.ceil(seconds / 60)
+    # Never "about 1 minutes": a minute or more is at least "about 2 minutes".
+    minutes = max(2, math.ceil(seconds / 60))
     return f"up to about {minutes} minutes"
 
 
@@ -382,7 +382,7 @@ def describe_estimate(estimate: Estimate) -> list[str]:
     planning = (
         "two short calls to suggest searches and finish"
         if estimate.fixed_steps
-        else f"about {AGENT_CALLS} short calls to plan the search"
+        else f"short calls to plan the search, about {AGENT_CALLS} on average"
     )
     lines = [
         f"PaperQA reads {estimate.passages} passage{'' if estimate.passages == 1 else 's'} with the model, "

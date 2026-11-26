@@ -193,6 +193,18 @@ def test_a_save_that_fails_after_committing_keeps_the_answer_once(tmp_path, fail
     assert str(response.session.id) in asyncio.run(saved_answers.open_index(tmp_path).index_files)
 
 
+def test_a_save_that_fails_again_while_finishing_after_committing_keeps_the_answer_once(tmp_path, failing_saves):
+    # Windows can fail the save that finishes a committed answer too; it used to give up on the answer then.
+    failing_saves.update(left=2, after_commit=True)
+    response = _response()
+
+    _save(tmp_path, response)
+
+    assert failing_saves["tried"] >= 3
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+    assert str(response.session.id) in asyncio.run(saved_answers.open_index(tmp_path).index_files)
+
+
 def test_a_save_that_keeps_failing_gives_up_and_says_why(tmp_path, failing_saves, monkeypatch):
     monkeypatch.setattr(saved_answers, "RETRY_PAUSE_SECONDS", 0)
     failing_saves["left"] = saved_answers.SAVE_ATTEMPTS

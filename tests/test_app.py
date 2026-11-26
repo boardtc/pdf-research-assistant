@@ -126,6 +126,7 @@ def imported_pdf_research_assistant(
     clicked_keys=(),
     rebuild_patches=None,
     index_names=None,
+    unindexed_files=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -205,6 +206,7 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_index_entries = mock.Mock(return_value=set())
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
+    bootstrap_module.get_unindexed_files = mock.Mock(return_value=[] if unindexed_files is None else unindexed_files)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     # Like the real build_settings, which always applies a rate profile.
     bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(
@@ -227,7 +229,7 @@ def imported_pdf_research_assistant(
         if subprocess_result is None:
             subprocess_result = SimpleNamespace(returncode=0, stdout='{"ok": true, "answer": "", "cost": 0.0, "contexts": []}', stderr="")
 
-        # Mock subprocess.run before import so question-submission scenarios never hit the real helper process.
+        # Mock subprocess.run before import so nothing on the page ever starts a real process.
         # Point the saved sidebar choices at a file that does not exist, so a real saved file never leaks in.
         with mock.patch("subprocess.run", return_value=subprocess_result), mock.patch("time.sleep"), \
                 mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")),                 mock.patch("pdf_research_assistant.research_presets.PRESETS_PATH", Path("tests/.tmp/no-presets.json")), \
@@ -253,6 +255,12 @@ def imported_pdf_research_assistant(
                     "pdf_research_assistant.index_record",
                     remember=mock.Mock(return_value=False),
                     find_changes=mock.Mock(return_value=index_changes),
+                ), \
+                mock.patch.multiple(
+                    # Questions get the result a test gives, and no real query process is ever started.
+                    "pdf_research_assistant.query_client",
+                    run=mock.Mock(return_value=subprocess_result),
+                    prepare=mock.Mock(),
                 ), \
                 mock.patch.multiple(
                     # Read only the index names a test gives, and never save one for real.
@@ -923,28 +931,27 @@ def test_run_query_subprocess_returns_answer_cost_contexts_and_settings_for_succ
         stderr="",
     )
 
-    # Mock subprocess.run so the test can supply the exact helper output contract.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
+    # Mock the query client so the test can supply the exact helper output contract.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result) as run_mock:
         answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert (answer, cost, contexts, settings, save_error) == ("Answer", 0.25, [{"name": "Source"}], recorded, None)
-    assert run_mock.call_args.args[0][0] == pdf_research_assistant_module.sys.executable
-    assert run_mock.call_args.args[0][-1] == "What is new?"
+    run_mock.assert_called_once_with("What is new?", None)
 
 
 def test_run_query_subprocess_sends_one_off_settings_after_the_question(pdf_research_assistant_module):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result) as run_mock:
         pdf_research_assistant_module.run_query_subprocess("What is new?", {"evidence_k": 3})
 
-    assert run_mock.call_args.args[0][-2:] == ["What is new?", json.dumps({"evidence_k": 3})]
+    run_mock.assert_called_once_with("What is new?", {"evidence_k": 3})
 
 
 def test_run_query_subprocess_returns_no_settings_when_the_payload_has_none(pdf_research_assistant_module):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert (contexts, settings, save_error) == ([], None, None)
@@ -954,7 +961,7 @@ def test_run_query_subprocess_passes_on_why_the_answer_could_not_be_kept(pdf_res
     payload = {"ok": True, "answer": "Answer", "cost": 0.0, "save_error": "OSError: disk full"}
     result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         returned = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert returned[-1] == "OSError: disk full"
@@ -965,8 +972,8 @@ def test_run_query_subprocess_raises_subprocess_error_message_when_process_fails
 ):
     result = SimpleNamespace(returncode=1, stdout="   ", stderr="subprocess failed")
 
-    # Mock subprocess.run so the function follows the non-zero-returncode branch with empty stdout.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function follows the non-zero-returncode branch with empty stdout.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="subprocess failed"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -976,8 +983,8 @@ def test_run_query_subprocess_raises_invalid_query_response_when_stdout_is_not_j
 ):
     result = SimpleNamespace(returncode=0, stdout="not json", stderr="")
 
-    # Mock subprocess.run so the function reaches the JSON parsing error branch.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function reaches the JSON parsing error branch.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="not json"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -987,8 +994,8 @@ def test_run_query_subprocess_raises_stderr_message_when_stdout_is_not_json_but_
 ):
     result = SimpleNamespace(returncode=0, stdout="not json", stderr="better error")
 
-    # Mock subprocess.run so stderr takes precedence after JSON decoding fails.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so stderr takes precedence after JSON decoding fails.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="better error"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -998,8 +1005,8 @@ def test_run_query_subprocess_raises_stdout_message_when_stdout_is_not_json_but_
 ):
     result = SimpleNamespace(returncode=0, stdout="plain text failure", stderr="   ")
 
-    # Mock subprocess.run so stdout becomes the fallback error message after JSON decoding fails.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so stdout becomes the fallback error message after JSON decoding fails.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="plain text failure"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -1013,8 +1020,8 @@ def test_run_query_subprocess_raises_payload_error_type_and_message_when_query_p
         stderr="",
     )
 
-    # Mock subprocess.run so the function reaches the application-level error payload branch.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function reaches the application-level error payload branch.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(pdf_research_assistant_module.QueryFailedError, match="ValueError: bad payload") as caught:
             pdf_research_assistant_module.run_query_subprocess("What is new?")
     # A payload from before failed questions carried a cost counts as spending nothing.
@@ -1025,7 +1032,7 @@ def test_run_query_subprocess_passes_on_what_a_failed_question_spent(pdf_researc
     payload = {"ok": False, "error_type": "RateLimitError", "error": "slow down", "cost": 0.0042}
     result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="RateLimitError: slow down") as caught:
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -1037,8 +1044,8 @@ def test_run_query_subprocess_defaults_unknown_error_type_and_message_when_error
 ):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": False}), stderr="")
 
-    # Mock subprocess.run so the function exercises the default error-type and error-message fallbacks.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function exercises the default error-type and error-message fallbacks.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="Error: Unknown error"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -1074,20 +1081,21 @@ def test_import_warns_when_manifest_index_is_missing():
         indexed_count=0,
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will rebuild the index for 2 manifest PDFs, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+            "for 2 manifest PDFs before asking one. It may take a long time."
         )
-        module.st.info.assert_called_once_with(
-            "A rebuild starts only when you click **Rebuild the index** or submit a question below."
-        )
+        module.st.info.assert_not_called()
 
 
-def test_import_warns_when_manifest_index_is_incomplete():
+def test_import_warns_when_manifest_pdfs_in_the_folder_are_not_indexed_yet():
     with imported_pdf_research_assistant(
         allowed_paths={"paper_a.pdf", "paper_b.pdf", "paper_c.pdf"},
         indexed_count=2,
+        unindexed_files=["paper_c.pdf"],
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index is incomplete: 2 of 3 manifest PDFs appear indexed. The next question should continue or trigger indexing work."
+            "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+            "Click **Rebuild the index** to add it."
         )
 
 
@@ -1097,7 +1105,7 @@ def test_import_warns_when_non_manifest_index_is_missing():
         indexed_count=0,
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will build the PDF index, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."
         )
         module.st.info.assert_called_once_with("No paper list is in use, so all PDFs under PAPER_DIR are in scope.")
 
@@ -1239,48 +1247,100 @@ def test_import_question_submission_error_renders_diagnostics_and_still_appends_
 
 
 @pytest.mark.parametrize(
-    ("indexed_count", "manifest_count", "expected"),
+    ("indexed_count", "manifest_count", "unindexed_count", "expected"),
     [
         (
             0,
             2,
+            2,
             [
                 (
                     "warning",
-                    "Index not found. The first question will rebuild the index for 2 manifest PDFs, "
-                    "which may take a long time.",
+                    "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+                    "for 2 manifest PDFs before asking one. It may take a long time.",
                 ),
-                ("info", "A rebuild starts only when you click **Rebuild the index** or submit a question below."),
             ],
         ),
         (
-            2,
+            0,
+            0,
             3,
             [
                 (
                     "warning",
-                    "Index is incomplete: 2 of 3 manifest PDFs appear indexed. "
-                    "The next question should continue or trigger indexing work.",
-                )
-            ],
-        ),
-        (
-            0,
-            0,
-            [
-                ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
+                    "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+                    "before asking one. It may take a long time.",
+                ),
                 ("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."),
             ],
         ),
-        (2, 2, [("caption", "Index available for 2 manifest PDFs.")]),
-        (4, 0, [("caption", "Index available for 4 PDFs under PAPER_DIR.")]),
+        (2, 3, 0, [("caption", "Index available for 2 manifest PDFs.")]),
+        (4, 0, 0, [("caption", "Index available for 4 PDFs under PAPER_DIR.")]),
+        (
+            2,
+            3,
+            1,
+            [
+                ("caption", "Index available for 2 manifest PDFs."),
+                (
+                    "warning",
+                    "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+                    "Click **Rebuild the index** to add it.",
+                ),
+            ],
+        ),
+        (
+            4,
+            0,
+            3,
+            [
+                ("caption", "Index available for 4 PDFs under PAPER_DIR."),
+                (
+                    "warning",
+                    "3 PDFs in the PDF folder are not in the index yet, so questions do not search them. "
+                    "Click **Rebuild the index** to add them.",
+                ),
+            ],
+        ),
     ],
-    ids=["manifest-missing", "manifest-incomplete", "no-manifest-missing", "manifest-ready", "no-manifest-ready"],
+    ids=[
+        "manifest-missing",
+        "no-manifest-missing",
+        "manifest-ready",
+        "no-manifest-ready",
+        "one-pdf-not-indexed",
+        "several-pdfs-not-indexed",
+    ],
 )
 def test_select_index_status_picks_the_banner_for_each_index_state(
-    pdf_research_assistant_module, indexed_count, manifest_count, expected
+    pdf_research_assistant_module, indexed_count, manifest_count, unindexed_count, expected
 ):
-    assert pdf_research_assistant_module.select_index_status(indexed_count, manifest_count) == expected
+    assert (
+        pdf_research_assistant_module.select_index_status(indexed_count, manifest_count, unindexed_count) == expected
+    )
+
+
+def test_the_page_says_when_the_pdf_folder_has_pdfs_not_yet_indexed():
+    with imported_pdf_research_assistant(indexed_count=2, unindexed_files=["new.pdf"]) as module:
+        module.bootstrap.get_unindexed_files.assert_called_once_with(Path(r"C:\index\active-shard"))
+        warnings = [str(call.args[0]) for call in module.st.warning.call_args_list]
+        keys = _button_keys(module)
+
+    assert any("1 PDF in the PDF folder is not in the index yet" in warning for warning in warnings)
+    assert "rebuild_offer_main" in keys
+
+
+def test_the_page_starts_a_spare_query_process_so_the_next_question_starts_quickly():
+    with imported_pdf_research_assistant() as module:
+        module.query_client.prepare.assert_called_once_with()
+
+
+def test_a_question_is_handed_to_the_query_client_with_its_one_off_settings():
+    result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
+
+    with imported_pdf_research_assistant(chat_input_value="What is new?", subprocess_result=result) as module:
+        module.query_client.run.assert_called_once_with("What is new?", {})
+        assert module.st.session_state.history[-1]["content"] == "Answer"
 
 
 def test_render_index_status_shows_each_message_at_its_level(pdf_research_assistant_module):
@@ -1985,7 +2045,7 @@ def test_page_warns_about_changed_index_settings_before_the_missing_index_banner
         module.index_record.find_changes.assert_called_once_with(settings, active_index_dir)
         assert module.st.warning.call_args_list == [
             mock.call(module.describe_index_changes(CHUNK_CHANGES)),
-            mock.call("Index not found. The first question will build the PDF index, which may take a long time."),
+            mock.call("Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."),
         ]
         captions = [call.args[0] for call in module.st.caption.call_args_list]
         assert "Changed. The index `pqa_index_old` was built with `5000`." in captions
@@ -1994,7 +2054,7 @@ def test_page_warns_about_changed_index_settings_before_the_missing_index_banner
 def test_page_shows_only_the_missing_index_banner_when_no_setting_changed():
     with imported_pdf_research_assistant(indexed_count=0, index_changes=None) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will build the PDF index, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."
         )
 
 
@@ -3526,22 +3586,24 @@ def _button_keys(module):
 
 
 @pytest.mark.parametrize(
-    "indexed_count, manifest_count, failed_files, expected",
+    "indexed_count, manifest_count, failed_files, unindexed_count, expected",
     [
-        (0, 0, [], True),
-        (0, 3, [], True),
-        (2, 3, [], True),
-        (3, 3, ["a.pdf"], True),
-        (3, 3, [], False),
-        (5, 0, [], False),
+        (0, 0, [], 0, True),
+        (0, 3, [], 0, True),
+        (2, 3, [], 0, True),
+        (3, 3, ["a.pdf"], 0, True),
+        (3, 3, [], 0, False),
+        (5, 0, [], 0, False),
+        (5, 0, [], 2, True),
+        (3, 3, [], 1, True),
     ],
 )
-def test_index_needs_rebuild_when_it_is_empty_incomplete_or_has_failed_pdfs(
-    pdf_research_assistant_module, indexed_count, manifest_count, failed_files, expected
+def test_index_needs_rebuild_when_it_is_empty_incomplete_has_failed_pdfs_or_misses_new_ones(
+    pdf_research_assistant_module, indexed_count, manifest_count, failed_files, unindexed_count, expected
 ):
     module = pdf_research_assistant_module
 
-    assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files) is expected
+    assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count) is expected
 
 
 def test_a_rebuild_is_offered_on_the_page_when_the_index_is_empty():

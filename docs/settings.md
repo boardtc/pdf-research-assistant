@@ -303,7 +303,9 @@ Under the title, the page names the active index and the paper list in use. Pape
 
 ### Rebuild the index
 
-From the app, click **Rebuild the index**. The button appears at the top of the page whenever the index is out of date: it is empty, which includes having just saved new index settings, it is missing PDFs from the paper list, or some PDFs failed to index. It is always under **Library and index settings** in the sidebar as well, for when you have added PDFs.
+From the app, click **Rebuild the index**. The button appears at the top of the page whenever the index is out of date: it is empty, which includes having just saved new index settings, it is missing PDFs from the paper list, the PDF folder has PDFs it does not list yet, or some PDFs failed to index. It is always under **Library and index settings** in the sidebar as well, for when you have changed a PDF that is already indexed.
+
+Questions never index PDFs themselves: they search the index as it is, so a PDF added to the folder is not searched until the next rebuild. The page says how many PDFs in the folder are not in the index yet, and a question asked before there is any index fails straight away, at no cost.
 
 1. The page lists how many PDFs are in scope, the index that will be built and what is paid for: the embedding model and, with images and tables on with enrichment, a model call for every image and table. It gives no cost figure, because that depends on the text in the PDFs.
 2. Nothing starts until you click **Start paid rebuild**. **Cancel** leaves everything as it was.
@@ -331,7 +333,7 @@ Use the terminal command when:
 
 - running the project for the first time and you want to build the index explicitly
 - you add new PDFs and want to rebuild the index before querying again
-- you want a terminal-only indexing run instead of letting the first query build the index
+- you want a terminal-only indexing run instead of using the app's button
 
 On a clean rebuild, it is normal to see `Manifest PDFs: <n>` and `Indexed before run: 0` before indexing starts. At the end it prints `Indexed after run`, `Failed PDFs` and a `FAILED:` line for each PDF that could not be indexed.
 
@@ -348,11 +350,11 @@ Just above the question box, `Next question:` gives a rough sense of what your n
 - the speed limits profile: how many passages are read at once, and whether the token limit holds the question back
 - images and tables, from the index settings: when they are on, each passage is sent with the pictures from its pages, and these often cost more than the text. The number of pictures is a guess from a typical page, since counting them would mean reading the index. Whole-page pictures send one larger picture for every page, and the picture resolution makes each one larger or smaller. With `gpt-4o-mini` and images and tables on, a question usually shows `Higher cost` and takes three or four minutes. With a lower speed limits profile it can take far longer, because each picture counts against the token limit by its size (see [Speed limits](#speed-limits)).
 
-It also counts about 16 seconds to start the question and load PaperQA, and the short calls PaperQA's agent makes to plan the search, usually about eight. When the model plans the search, the agent usually gathers evidence about three times, reading the passages again each time, so that is counted in the time too. With PaperQA's defaults a question usually takes a minute or more; with the **Fast** preset, about half a minute. It is a rough guide, not a quote: the real figures depend on the question and on how many searches PaperQA decides to make. With PaperQA's defaults and `gpt-4o-mini` it shows `Balanced`. With a local model there is no cost for the answer model, and the time, which is based on OpenAI's speed, may be well short. In Exhaustive mode it shows `Higher cost`, and the run's own estimate appears after you ask.
+It also counts about 3 seconds to start the question (PaperQA is loaded beforehand, while you type), and the short calls PaperQA's agent makes to plan the search, usually about eight. When the model plans the search, the agent usually gathers evidence about three times, reading the passages again each time, so that is counted in the time too. With PaperQA's defaults a question usually takes about a minute; with the **Fast** preset, under half a minute. It is a rough guide, not a quote: the real figures depend on the question and on how many searches PaperQA decides to make. With PaperQA's defaults and `gpt-4o-mini` it shows `Balanced`. With a local model there is no cost for the answer model, and the time, which is based on OpenAI's speed, may be well short. In Exhaustive mode it shows `Higher cost`, and the run's own estimate appears after you ask.
 
 ### Answers
 
-Each question runs in a fresh helper process so repeated questions in the same session start with clean query state. Answers cite specific pages from your PDFs when available. Each answer in the chat includes:
+Each question runs in a fresh helper process so repeated questions in the same session start with clean query state. The page starts that process before you ask, so PaperQA is already loaded when the question arrives. Answers cite specific pages from your PDFs when available. Each answer in the chat includes:
 
 - a `Copy answer` button that copies the full answer text to the clipboard (Windows only)
 - a `Show source passages` expander with the retrieved evidence passages used for the answer
@@ -435,4 +437,4 @@ Questions asked this session: 1. Total cost: $0.0124
 
 A question that fails prints its error, then a cost line with what it spent before failing, and that cost is added to the total. If the query helper crashes without reporting anything, there is no cost line and the question adds nothing to the total. If the answer could not be kept for searching later, a note under the cost line says why. With `--exhaustive`, each run reports its own actual cost instead, as described under [Exhaustive search](#exhaustive-search), and there is no session total.
 
-The CLI uses the settings saved in the sidebar and the local LLM setup. Like the Streamlit app, it runs each question in a fresh helper process so repeated questions start with clean query state. Each answer is kept for **Search previous answers** in the app.
+The CLI uses the settings saved in the sidebar and the local LLM setup. Like the Streamlit app, it runs each question in a fresh helper process so repeated questions start with clean query state, started while you type the question. Each answer is kept for **Search previous answers** in the app.

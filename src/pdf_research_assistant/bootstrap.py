@@ -199,6 +199,26 @@ def get_index_entries(index_dir: Path) -> set[str]:
     return entries
 
 
+def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
+    """Return the PDFs in the PDF folder that the index does not list yet, as paths under the folder.
+
+    These are the files PaperQA would index on a rebuild: everything in the folder, and its subfolders when
+    they are searched, that only_manifest lets through. A PDF that failed to index is listed in the index
+    already, so it is not counted here.
+    """
+    if not paper_dir.exists():
+        return []
+    # Read once here, where only_manifest would read the manifest again for every file.
+    allowed_paths = get_allowed_paths()
+    _manifest_scope, recurse = saved_scope()
+    in_scope = set()
+    for path in paper_dir.rglob("*") if recurse else paper_dir.iterdir():
+        relative = normalize_relative_pdf_path(path.relative_to(paper_dir))
+        if relative in allowed_paths if allowed_paths else path.suffix.lower() in PDF_EXTENSIONS:
+            in_scope.add(relative)
+    return sorted(in_scope - get_index_entries(index_dir))
+
+
 def get_failed_files(index_dir: Path = INDEX_DIR) -> list[str]:
     """Return unique file paths that PaperQA recorded as failed during indexing."""
     failed = []

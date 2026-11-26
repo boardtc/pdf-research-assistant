@@ -2,15 +2,21 @@
 
 Runs a single PaperQA query in a fresh process so the Streamlit app and CLI
 can avoid cross-query asyncio/LiteLLM state issues.
+
+The question comes on the command line, or, with --wait, as one JSON line on stdin. The app and the CLI use
+--wait to start the process before the question is asked, so loading PaperQA is already done when it arrives
+(see query_client.py).
 """
 
 import base64
+import importlib
 import json
 import os
 import sys
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
+import litellm
 from lmi.cost_tracker import GLOBAL_COST_TRACKER, enable_cost_tracking
 from paperqa import Docs
 from paperqa.agents.main import run_agent
@@ -70,6 +76,20 @@ def serialize_contexts(contexts, cited_ids=(), passages=()):
 
 
 USAGE_ERROR = "Expected a question, optionally followed by one-off settings as a JSON object."
+# Read the question from stdin instead of the command line; query_client.WAIT_FLAG is the same flag.
+WAIT_FLAG = "--wait"
+# LiteLLM imports the OpenAI client for its first call, which took about a second after PaperQA had loaded.
+# A process waiting for its question imports these first. Local models go through the same OpenAI client.
+MODEL_CLIENT_MODULES = (
+    "openai.resources.chat.completions",
+    "openai.resources.embeddings",
+    "litellm.llms.openai.openai",
+)
+# PaperQA's embedding model (lmi.embeddings) downloads this 5 MB price list from GitHub each time it is set up,
+# to look up the embedding size: 2 to 25 seconds per question on 25 Nov 2026.
+EMBEDDING_PRICE_LIST_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/litellm/model_prices_and_context_window_backup.json"
+)
 # Shown in place of the answer when PaperQA stops without writing one, so the reply is never blank.
 NO_ANSWER_NOTE = (
     "No answer was written: PaperQA stopped before writing one (it said \"{reason}\"). "
@@ -110,6 +130,9 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
     try:
         settings = build_settings()
         applied = settings_groups.apply_usable(settings, one_off or {})
+        # Search the index as it is. Left on, PaperQA scans the PDF folder before every question and indexes
+        # any new PDF there and then; Rebuild the index does that instead, and the page says when it is needed.
+        settings.agent.rebuild_index = False
         # Pictures make each request weigh a lot against the rate limit, so let requests wait their turn
         # for as long as the question may run.
         rate_profiles.allow_limiter_wait(settings.agent.timeout)
@@ -171,23 +194,86 @@ def use_utf8_output(stream) -> None:
         reconfigure(encoding="utf-8")
 
 
+def reuse_model_cost_map() -> None:
+    """Make LiteLLM download each price list once in this process instead of every time it is asked for.
+
+    The process answers one question, so the list is as new as it would have been; only the repeated downloads
+    go. LiteLLM looks the function up when it is called, as PaperQA's embedding model does, so replacing it on
+    the module is enough.
+    """
+    fetch = litellm.get_model_cost_map
+    if getattr(fetch, "reuses_fetched_map", False) is True:
+        return
+    fetched = {}
+
+    def get_model_cost_map(url: str) -> dict:
+        if url not in fetched:
+            fetched[url] = fetch(url)
+        return fetched[url]
+
+    get_model_cost_map.reuses_fetched_map = True
+    litellm.get_model_cost_map = get_model_cost_map
+
+
+def preload_model_clients() -> None:
+    """Load what the question's first calls would otherwise load: LiteLLM's OpenAI client and the price list."""
+    for name in MODEL_CLIENT_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            # A newer library moved it; the first call then imports what it needs, as before.
+            continue
+    litellm.get_model_cost_map(url=EMBEDDING_PRICE_LIST_URL)
+
+
+def read_arguments(arguments: list[str]) -> tuple[str, dict | None] | None:
+    """Return the question and one-off settings given on the command line, or None if they are not usable."""
+    if len(arguments) not in (1, 2):
+        return None
+    if len(arguments) == 1:
+        return arguments[0], None
+    try:
+        one_off = json.loads(arguments[1])
+    except ValueError:
+        return None
+    if not isinstance(one_off, dict):
+        return None
+    return arguments[0], one_off
+
+
+def read_request(line: str) -> tuple[str, dict | None] | None:
+    """Return the question and one-off settings sent as one JSON line, or None if they are not usable."""
+    try:
+        request = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(request, dict):
+        return None
+    question = request.get("question")
+    one_off = request.get("one_off")
+    if not isinstance(question, str) or not (one_off is None or isinstance(one_off, dict)):
+        return None
+    return question, one_off
+
+
 def main() -> int:
     """Execute the one-shot query CLI contract expected by the app and shell wrapper."""
     use_utf8_output(sys.stdout)
-    if len(sys.argv) not in (2, 3):
+    reuse_model_cost_map()
+    if sys.argv[1:] == [WAIT_FLAG]:
+        preload_model_clients()
+        line = sys.stdin.readline()
+        if not line.strip():
+            # The app or the CLI closed before asking a question, so there is nothing to do.
+            return 0
+        request = read_request(line)
+    else:
+        request = read_arguments(sys.argv[1:])
+    if request is None:
         print(json.dumps({"ok": False, "error": USAGE_ERROR}))
         return 1
-    one_off = None
-    if len(sys.argv) == 3:
-        try:
-            one_off = json.loads(sys.argv[2])
-        except ValueError:
-            one_off = None
-        if not isinstance(one_off, dict):
-            print(json.dumps({"ok": False, "error": USAGE_ERROR}))
-            return 1
 
-    question = sys.argv[1]
+    question, one_off = request
     payload = run_query_payload(question, one_off)
     print(json.dumps(payload, ensure_ascii=False))
     return 0

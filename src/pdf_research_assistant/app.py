@@ -27,6 +27,7 @@ from pdf_research_assistant import (
     research_presets,
     saved_answers,
     saved_settings,
+    scope_change,
     settings_groups,
 )
 
@@ -70,6 +71,24 @@ INDEX_SETTINGS_RESET_LABEL = "Go back to the default index settings"
 INDEX_SETTINGS_SAVED_NOTICE = (
     "Index settings saved. PaperQA now looks for an index built with them, so your PDFs have to be indexed "
     "again before they can be searched. Click **Rebuild the index** to do that."
+)
+SCOPE_SETTINGS_PANEL = "Which PDFs are searched"
+SCOPE_SETTINGS_NOTE = (
+    "These do not start a new index. They change which PDFs the index you are using holds: on the next "
+    "question PaperQA adds the PDFs that came into scope, which costs money, and removes the ones that left. "
+    "You are shown how many before anything is saved."
+)
+SCOPE_SETTINGS_SAVE_LABEL = "Save scope"
+SCOPE_CONFIRM_LABEL = "Save and change the index"
+SCOPE_NO_PAPER_LIST_NOTE = "No paper list was found, so every PDF in the folder is in scope."
+SCOPE_SAVED_NOTICE = "Scope saved."
+SCOPE_EMPTY_INDEX_NOTICE = (
+    "Scope saved. The index holds no PDFs yet, so nothing in it changes; the first build uses this scope."
+)
+SCOPE_NO_CHANGE_NOTICE = "Scope saved. No PDF is added to or removed from the index."
+SCOPE_NOTHING_LEFT_NOTE = (
+    "The paper list names PDFs only inside subfolders, so turning subfolders off would leave no PDF to search. "
+    "Nothing was changed."
 )
 REBUILD_LABEL = "Rebuild the index"
 REBUILD_HELP = (
@@ -736,7 +755,7 @@ def select_index_status(indexed_count: int, manifest_count: int) -> list[tuple[s
     if indexed_count == 0:
         return [
             ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
-            ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
+            ("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."),
         ]
     if use_manifest_scope:
         return [("caption", f"Index available for {indexed_count} manifest PDFs.")]
@@ -891,7 +910,7 @@ def request_rebuild() -> None:
 
 def render_rebuild_pending(settings, active_index_dir: Path, manifest_count: int, indexed_count: int) -> None:
     """Show what the rebuild involves and start it only when the user confirms."""
-    pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR)
+    pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR, bootstrap.saved_scope()[1])
     st.markdown(f"**{REBUILD_LABEL}**")
     plan = describe_rebuild_plan(
         settings, active_index_dir, pdf_count, indexed_count, index_names.get_name(active_index_dir)
@@ -1405,6 +1424,145 @@ def render_reindex_settings(settings, index_changes: dict | None = None, busy: b
                     render_changed_note(setting, changed, index_changes)
 
 
+def scope_widget_key(setting_key: str) -> str:
+    """Return a scope control's key, which changes after a scope change is saved or cancelled so it starts afresh."""
+    return f"scope_setting_{setting_key}_{st.session_state.get('scope_settings_round', 0)}"
+
+
+def draw_scope_setting(setting: settings_groups.Setting, settings, paper_list_found: bool) -> object:
+    """Draw the control for a scope setting, starting at the value in use, and return the value left in it."""
+    current = settings_groups.current_choice(setting, settings)
+    key = scope_widget_key(setting.key)
+    check = setting.check
+    if isinstance(check, settings_groups.OneOf):
+        options = list(check.values)
+        return st.selectbox(
+            setting.label,
+            options,
+            index=options.index(current),
+            format_func=lambda value: check.name_for(value) or str(value),
+            help=setting.help,
+            key=key,
+            disabled=not paper_list_found,
+        )
+    return st.checkbox(setting.label, value=bool(current), help=setting.help, key=key)
+
+
+def plan_scope_change(changed: dict, active_index_dir: Path) -> dict:
+    """Work out what saving these scope choices would do to the index in use.
+
+    Returns "preview" (scope_change.preview_change), "indexed" (how many PDFs the index lists) and "error",
+    which is set instead when the choices would leave nothing to search.
+    """
+    now_scope, now_recurse = bootstrap.saved_scope()
+    new_scope = changed.get("manifest_scope", now_scope)
+    new_recurse = changed.get("recurse_subdirectories", now_recurse)
+    listed = bootstrap.load_allowed_manifest_paths(bootstrap.MANIFEST_PATH)
+    use_list = new_scope == settings_groups.MANIFEST_SCOPE_USE
+    if scope_change.leaves_nothing_to_search(listed, use_list, new_recurse):
+        return {"preview": None, "indexed": 0, "error": SCOPE_NOTHING_LEFT_NOTE}
+
+    def in_scope(manifest_scope: str, recurse: bool) -> set[str]:
+        allowed = scope_change.manifest_paths_in_scope(listed, manifest_scope, recurse)
+        return scope_change.pdfs_in_scope(bootstrap.PAPER_DIR, allowed, recurse)
+
+    indexed = bootstrap.get_index_entries(active_index_dir)
+    preview = scope_change.preview_change(in_scope(now_scope, now_recurse), in_scope(new_scope, new_recurse), indexed)
+    return {"preview": preview, "indexed": len(indexed), "error": None}
+
+
+def describe_scope_change(preview: dict, active_index_dir: Path, friendly_name: str | None = None) -> str:
+    """Return the warning shown before a scope change that adds or removes PDFs in the index in use is saved."""
+    index = describe_index_name(active_index_dir.name, friendly_name)
+    parts = [
+        "**This changes the index you are using. It does not start a new one.** These settings are not part of "
+        f"the index's name, so PaperQA keeps {index} and, on the next question, brings it into line with the new "
+        "scope. Nothing is saved until you confirm.",
+        "\n".join(f"- {line}" for line in scope_change.describe_preview(preview)),
+    ]
+    return "\n\n".join(parts)
+
+
+def save_scope_settings(changed: dict, notice: str) -> None:
+    """Save the scope choices, then draw the page again with a notice and fresh controls."""
+    for key, value in changed.items():
+        saved_settings.save_value(key, value)
+    st.session_state.scope_pending = None
+    st.session_state.scope_settings_notice = notice
+    st.session_state.scope_settings_round = st.session_state.get("scope_settings_round", 0) + 1
+    st.rerun()
+
+
+def request_scope_change(chosen: dict, settings, active_index_dir: Path) -> None:
+    """Save the scope choices that differ from the ones in use, or hold them back for confirmation.
+
+    A change that would add or remove PDFs in an index that already holds some waits for the user's
+    confirmation, with the counts; any other change is saved at once.
+    """
+    changed = {
+        key: value
+        for key, value in chosen.items()
+        if value != settings_groups.current_choice(settings_groups.get_setting(key), settings)
+    }
+    if not changed:
+        st.info(INDEX_SETTINGS_UNCHANGED_NOTE)
+        return
+    plan = plan_scope_change(changed, active_index_dir)
+    if plan["error"]:
+        st.error(plan["error"])
+        return
+    if not plan["indexed"]:
+        save_scope_settings(changed, SCOPE_EMPTY_INDEX_NOTICE)
+    elif not scope_change.changes_index(plan["preview"]):
+        save_scope_settings(changed, SCOPE_NO_CHANGE_NOTICE)
+    else:
+        st.session_state.scope_pending = {"values": changed, "preview": plan["preview"]}
+        st.rerun()
+
+
+def render_scope_pending(pending: dict, active_index_dir: Path) -> None:
+    """Show what the scope change would do to the index, and save it only when the user confirms."""
+    st.warning(describe_scope_change(pending["preview"], active_index_dir, index_names.get_name(active_index_dir)))
+    if st.button(SCOPE_CONFIRM_LABEL, key="scope_confirm"):
+        save_scope_settings(pending["values"], SCOPE_SAVED_NOTICE)
+        return
+    if st.button("Cancel", key="scope_cancel"):
+        st.session_state.scope_pending = None
+        st.session_state.scope_settings_round = st.session_state.get("scope_settings_round", 0) + 1
+        st.rerun()
+
+
+def render_scope_settings(settings) -> None:
+    """Show the settings that decide which PDFs are searched, in one form, saved only after a confirmation.
+
+    While a rebuild runs they cannot be saved, because it is using them.
+    """
+    rebuilding = rebuild_client.get_run() is not None
+    paper_list_found = bootstrap.manifest_exists()
+    with st.sidebar:
+        with st.expander(SCOPE_SETTINGS_PANEL):
+            notice = st.session_state.pop("scope_settings_notice", None)
+            if notice:
+                st.success(notice)
+            st.caption(SCOPE_SETTINGS_NOTE)
+            chosen = {}
+            with st.form("scope_settings_form"):
+                for setting in settings_groups.SCOPE_SETTINGS:
+                    chosen[setting.key] = draw_scope_setting(setting, settings, paper_list_found)
+                    if setting.key == "manifest_scope" and not paper_list_found:
+                        st.caption(SCOPE_NO_PAPER_LIST_NOTE)
+                submitted = st.form_submit_button(SCOPE_SETTINGS_SAVE_LABEL, disabled=rebuilding)
+            if rebuilding:
+                st.caption(REBUILD_LOCKED_NOTE)
+                return
+            pending = st.session_state.get("scope_pending")
+            # Looked up only when needed, so drawing the panel alone never reads the index.
+            if submitted:
+                request_scope_change(chosen, settings, bootstrap.get_active_index_dir(settings))
+            if pending:
+                render_scope_pending(pending, bootstrap.get_active_index_dir(settings))
+
+
 def render_usage(app_state: dict) -> None:
     with st.sidebar:
         st.header("Usage")
@@ -1694,6 +1852,7 @@ def render_sidebar(
         presets_slot = st.container()
     search_mode, one_off = render_instant_settings(settings)
     render_reindex_settings(settings, index_changes, busy)
+    render_scope_settings(settings)
     render_usage(app_state)
     # Last, so it reads the choices every control above has saved during this run.
     render_research_presets(presets_slot)

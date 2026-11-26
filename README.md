@@ -257,6 +257,19 @@ Each control's help says what the setting does and what it costs. Nothing change
 
 When you save a change to one of these settings, the page warns that your settings no longer match the index, and lists each changed setting with its old and new value. To do this, the app writes the rebuild settings of the last index that holds PDFs to `last_index.json` in `INDEX_DIR`, whenever the page loads or `pdf-research-rebuild` finishes. The warning stays until you put the settings back, which brings back the old index, or build an index with the new settings, which **Rebuild the index** does from the page. Changing an answer setting never raises it.
 
+### Which PDFs are searched
+
+Open **Which PDFs are searched** in the sidebar to choose the scope of the index in use:
+
+| Setting | What it changes in PaperQA | Affects |
+| --- | --- | --- |
+| Paper list | `manifest_file`: only the PDFs listed in `manifest.csv` (default when the file exists), or all PDFs in the folder. The control is switched off while there is no paper list. | Indexing, questions and exhaustive search |
+| Search subfolders | `recurse_subdirectories`: whether PDFs in folders inside the PDF folder are searched (default on) | Indexing, questions and exhaustive search |
+
+Neither setting is part of PaperQA's index name, so changing one does not start a new index, and the warning above does not apply. PaperQA keeps the index and, on the next question, brings it into line with the new scope: it indexes the PDFs that came into scope, which costs money for embeddings, and removes the ones that left. So these settings have a warning of their own, shown before anything is saved. When you click **Save scope** and the change would add or remove PDFs in an index that already holds some, the page says that it changes the index in use, gives how many PDFs would be added and removed and names the first few, and saves only when you click **Save and change the index**; **Cancel** saves nothing. PDFs that come into scope but are already in the index are listed separately, because they cost nothing. A change that adds or removes nothing, or one made while the index is empty, is saved at once. The new scope is applied the next time a question is asked or **Rebuild the index** is run.
+
+The choices are saved to `saved_settings.json`, so the page's counts, the rebuild, the command line, exhaustive search and the next-question estimate all use the same scope. They cannot be changed while a rebuild is running. Subfolders cannot be turned off while the paper list names PDFs only inside subfolders, because no PDF would be left to search. A paper list that names PDFs inside subfolders ignores those rows while subfolders are off.
+
 ### Images and tables
 
 Turn **Images and tables** on when the answers you need are in charts, diagrams, tables or slides rather than in the text. Leave it off for PDFs that are mostly text: it makes indexing slower and every question that finds a picture cost more, because the pictures are sent to the model with their passages. Enrichment is an extra paid model call (`parsing.enrichment_llm`, `gpt-4o` by default) for every image and table while indexing, so a search can find them by what they show; without it they are found only through the text around them.
@@ -429,7 +442,7 @@ These are created as you use the app. The ones in the project folder are ignored
 
 | File | Where | What it holds |
 | --- | --- | --- |
-| `saved_settings.json` | project folder | The answer settings and the library and index settings chosen in the sidebar |
+| `saved_settings.json` | project folder | The answer settings, the library and index settings and the scope (paper list, subfolders) chosen in the sidebar |
 | `local_llm.json` | project folder | The local LLM setup |
 | `research_presets.json` | project folder | Research presets |
 | `exhaustive_runs/` | project folder | One folder per exhaustive search run |
@@ -441,8 +454,8 @@ These are created as you use the app. The ones in the project folder are ignored
 ## Additional Notes
 
 - The search index is stored in the folder set by `INDEX_DIR`.
-- If `manifest.csv` exists, the app uses it to decide which PDFs are in scope and which metadata to use.
-- If `manifest.csv` does not exist, the app indexes all PDFs under `PAPER_DIR`.
+- If `manifest.csv` exists, the app uses it to decide which PDFs are in scope and which metadata to use, unless you choose **All PDFs in the folder** under [Which PDFs are searched](#which-pdfs-are-searched).
+- If `manifest.csv` does not exist, the app indexes all PDFs under `PAPER_DIR`, subfolders included unless you turn **Search subfolders** off.
 - `windows-helper-commands.example.md` is a safe-to-share template. If you want a version with your own local paths ready to copy and paste, create `windows-helper-commands.md` from it.
 - The app automatically ignores the broken loopback proxy placeholder `127.0.0.1:9` if it appears in `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `query_once.py`, `exhaustive.py` and the `*_client.py` modules are internal helpers used by the app and CLI; they are not intended as separate user entry points.

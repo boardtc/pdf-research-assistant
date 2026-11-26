@@ -24,9 +24,10 @@ _state: dict = {"run": None, "result": None}
 _start_lock = threading.Lock()
 
 
-def count_pdfs(paper_dir: Path) -> int:
-    """Return how many PDFs sit under a folder, subfolders included."""
-    return sum(1 for path in Path(paper_dir).rglob("*") if path.suffix.lower() == PDF_SUFFIX)
+def count_pdfs(paper_dir: Path, recurse: bool = True) -> int:
+    """Return how many PDFs sit in a folder, in its subfolders too unless recurse is off."""
+    paths = Path(paper_dir).rglob("*") if recurse else Path(paper_dir).glob("*")
+    return sum(1 for path in paths if path.suffix.lower() == PDF_SUFFIX)
 
 
 def log_path(index_dir: Path) -> Path:

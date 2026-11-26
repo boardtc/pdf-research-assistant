@@ -113,6 +113,27 @@ def write_media_choice(settings: object, value: str) -> None:
     settings.parsing.multimodal = False if value == MEDIA_OFF else MultimodalOptions[value.upper()]
 
 
+# How the paper list setting is saved: used, or left out so every PDF in the folder is in scope.
+MANIFEST_SCOPE_USE = "manifest"
+MANIFEST_SCOPE_ALL = "all"
+
+
+def read_manifest_scope(settings: object) -> str:
+    """Return whether PaperQA is set to use a paper list, as it is saved."""
+    return MANIFEST_SCOPE_USE if settings.agent.index.manifest_file else MANIFEST_SCOPE_ALL
+
+
+def write_manifest_scope(settings: object, value: str) -> None:
+    """Put a saved paper list choice onto a PaperQA Settings object.
+
+    The app sets the paper list's path when it builds the settings, so choosing the list leaves that path alone
+    and choosing all PDFs takes it out. bootstrap.get_allowed_paths reads the same saved choice, so the PDFs
+    PaperQA lets through follow it too.
+    """
+    if value == MANIFEST_SCOPE_ALL:
+        settings.agent.index.manifest_file = None
+
+
 INSTANT_SETTINGS = (
     Setting(
         key="answer_model",
@@ -376,7 +397,47 @@ REINDEX_SETTINGS = (
     ),
 )
 
-SETTINGS = INSTANT_SETTINGS + REINDEX_SETTINGS
+# PaperQA does not put these in the index name, so changing one keeps the index in use and changes which PDFs
+# it holds: on the next question PaperQA indexes the PDFs that came into scope and removes the ones that left.
+# They are not index settings that need a rebuild, so they have their own group and their own warning.
+SCOPE_SETTINGS = (
+    Setting(
+        key="manifest_scope",
+        label="Paper list",
+        help=(
+            "Whether only the PDFs named in the paper list (`manifest.csv`) are searched, or every PDF in the "
+            "PDF folder. PaperQA keeps the same index either way, so on the next question it indexes the PDFs "
+            "that came into scope, which costs money, and removes the ones that left. Affects indexing and "
+            "questions, and exhaustive search."
+        ),
+        needs_reindex=False,
+        read=lambda settings: settings.agent.index.manifest_file,
+        write=write_manifest_scope,
+        check=OneOf(
+            (
+                ("Only the PDFs in the paper list", MANIFEST_SCOPE_USE),
+                ("All PDFs in the folder", MANIFEST_SCOPE_ALL),
+            )
+        ),
+        choice=read_manifest_scope,
+    ),
+    Setting(
+        key="recurse_subdirectories",
+        label="Search subfolders",
+        help=(
+            "Whether PDFs in folders inside the PDF folder are searched as well as the ones directly in it. "
+            "PaperQA keeps the same index either way, so on the next question it indexes the PDFs that came "
+            "into scope, which costs money, and removes the ones that left. Affects indexing and questions, "
+            "and exhaustive search."
+        ),
+        needs_reindex=False,
+        read=lambda settings: settings.agent.index.recurse_subdirectories,
+        write=lambda settings, value: setattr(settings.agent.index, "recurse_subdirectories", value),
+        check=OnOrOff(),
+    ),
+)
+
+SETTINGS = INSTANT_SETTINGS + REINDEX_SETTINGS + SCOPE_SETTINGS
 
 
 def get_setting(key: str) -> Setting:

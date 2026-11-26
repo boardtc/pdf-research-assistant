@@ -35,6 +35,14 @@ def test_count_pdfs_counts_pdfs_in_the_folder_and_its_subfolders(tmp_path):
     assert rebuild_client.count_pdfs(tmp_path) == 3
 
 
+def test_count_pdfs_leaves_out_subfolders_when_they_are_not_searched(tmp_path):
+    (tmp_path / "sub").mkdir()
+    for name in ("a.pdf", "b.PDF", "notes.txt", "sub/c.pdf"):
+        (tmp_path / name).write_bytes(b"")
+
+    assert rebuild_client.count_pdfs(tmp_path, recurse=False) == 2
+
+
 def test_count_pdfs_is_zero_for_a_folder_that_does_not_exist(tmp_path):
     assert rebuild_client.count_pdfs(tmp_path / "missing") == 0
 

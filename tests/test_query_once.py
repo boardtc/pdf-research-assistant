@@ -857,3 +857,86 @@ def test_main_reuses_the_price_list_however_the_question_arrives(query_once_modu
         query_once_module.main()
 
     reuse.assert_called_once_with()
+
+
+MADE_UP = "the need to foster intrinsic motivators rather than depend solely on grades"
+REAL = "grades reduce interest in the learning itself"
+LANG_CHUNK = "Kohn argues that grades reduce interest in the\nlearning itself."
+
+
+def _quoted_session(answer, formatted=None):
+    return SimpleNamespace(
+        answer=answer,
+        formatted_answer=f"Question: Q\n\n{answer}\n\nReferences\n\n1. (Lang2021 chunk 1): Lang"
+        if formatted is None
+        else formatted,
+        cost=0.0,
+        contexts=[],
+    )
+
+
+def test_run_query_payload_unquotes_a_made_up_quote_in_the_answer_shown_and_the_answer_kept(query_once_module):
+    session = _quoted_session(f'Lang stresses "{MADE_UP}" (Lang2021 chunk 1) but quotes "{REAL}".')
+    response = SimpleNamespace(session=session)
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.Docs = mock.Mock(return_value=SimpleNamespace(texts=[SimpleNamespace(text=LANG_CHUNK)]))
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=None):
+        result = query_once_module.run_query_payload("Q")
+
+    mark = query_once_module.quote_check.PARAPHRASE_MARK
+    expected = f'Lang stresses {MADE_UP} {mark} (Lang2021 chunk 1) but quotes "{REAL}".'
+    assert session.answer == expected
+    assert session.formatted_answer == f"Question: Q\n\n{expected}\n\nReferences\n\n1. (Lang2021 chunk 1): Lang"
+    assert result["answer"] == session.formatted_answer
+    # The answer is kept after the check, so a saved answer shows the same text as the chat.
+    assert query_once_module.saved_answers.save_answer.call_args.args[1] is response
+
+
+def test_check_quotes_leaves_an_answer_whose_quotes_are_all_found_as_it_is(query_once_module):
+    session = _quoted_session(f'Lang quotes "{REAL}".')
+    before = session.formatted_answer
+
+    query_once_module.check_quotes(session, [SimpleNamespace(text=LANG_CHUNK)])
+
+    assert session.answer == f'Lang quotes "{REAL}".'
+    assert session.formatted_answer == before
+
+
+def test_check_quotes_does_nothing_when_paperqa_wrote_no_answer(query_once_module):
+    session = SimpleNamespace(formatted_answer="")
+
+    query_once_module.check_quotes(session, [])
+
+    assert session.formatted_answer == ""
+    assert not hasattr(session, "answer")
+
+
+def test_check_quotes_still_unquotes_the_answer_when_the_formatted_answer_does_not_contain_it(query_once_module):
+    session = _quoted_session(f'Lang stresses "{MADE_UP}".', formatted="Something PaperQA formatted differently")
+
+    query_once_module.check_quotes(session, [])
+
+    assert session.answer == f"Lang stresses {MADE_UP} {query_once_module.quote_check.PARAPHRASE_MARK}."
+    assert session.formatted_answer == "Something PaperQA formatted differently"
+
+
+def test_check_quotes_treats_a_passage_without_text_as_empty(query_once_module):
+    session = _quoted_session(f'Lang quotes "{REAL}".')
+
+    query_once_module.check_quotes(session, ["not a passage", SimpleNamespace(text=None)])
+
+    assert query_once_module.quote_check.PARAPHRASE_MARK in session.answer
+
+
+def test_check_quotes_reads_the_full_chunks_that_paperqas_answer_has_emptied(query_once_module):
+    chunk = Text(text=LANG_CHUNK, name="Lang pages 1-2", doc=Doc(docname="d", citation="c", dockey="k"))
+    session, docs = stripped_session_and_docs(chunk)
+    session.answer = f'Lang quotes "{REAL}" (pqac-0).'
+    session.formatted_answer = f"Question: Q\n\n{session.answer}"
+    assert session.contexts[0].text.text == ""
+
+    query_once_module.check_quotes(session, docs.texts)
+
+    assert session.answer == f'Lang quotes "{REAL}" (pqac-0).'

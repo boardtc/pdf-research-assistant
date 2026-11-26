@@ -22,7 +22,7 @@ from paperqa import Docs
 from paperqa.agents.main import run_agent
 from paperqa.utils import run_or_ensure
 
-from pdf_research_assistant import rate_profiles, saved_answers, settings_groups
+from pdf_research_assistant import quote_check, rate_profiles, saved_answers, settings_groups
 from pdf_research_assistant.bootstrap import build_settings
 
 
@@ -106,6 +106,26 @@ def answer_text(session) -> str:
     return NO_ANSWER_NOTE.format(reason=reason)
 
 
+def check_quotes(session, passages) -> None:
+    """Unquote and mark any quote in the answer that is not word for word in a chunk the question read.
+
+    passages are the full chunks (the Docs object's texts), since PaperQA's answer empties its own copies.
+    The answer and the formatted answer (question, answer and references) are both changed, so the chat, the
+    command line and the saved answer show the same text. PaperQA's raw_answer keeps the model's own wording.
+    """
+    answer = getattr(session, "answer", "") or ""
+    if not answer:
+        return
+    chunks = [getattr(passage, "text", None) or "" for passage in passages]
+    checked, flagged = quote_check.mark_unverified_quotes(answer, chunks)
+    if not flagged:
+        return
+    session.answer = checked
+    formatted = getattr(session, "formatted_answer", "") or ""
+    if answer in formatted:
+        session.formatted_answer = formatted.replace(answer, checked, 1)
+
+
 def question_cost(session_cost: float | None, tracked_cost: float | None) -> float:
     """Return what the question cost, embeddings included.
 
@@ -152,6 +172,7 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         cost = question_cost(response.session.cost, GLOBAL_COST_TRACKER.lifetime_cost_usd - tracked_before)
         # The saved answer takes its cost from the session, so it shows the same figure as the chat.
         response.session.cost = cost
+        check_quotes(response.session, docs.texts)
         contexts = serialize_contexts(
             getattr(response.session, "contexts", []),
             cited_ids=getattr(response.session, "used_contexts", ()),

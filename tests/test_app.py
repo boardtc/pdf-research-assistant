@@ -127,6 +127,7 @@ def imported_pdf_research_assistant(
     rebuild_patches=None,
     index_names=None,
     unindexed_files=None,
+    out_of_scope_files=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -207,6 +208,9 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_unindexed_files = mock.Mock(return_value=[] if unindexed_files is None else unindexed_files)
+    bootstrap_module.get_out_of_scope_files = mock.Mock(
+        return_value=[] if out_of_scope_files is None else out_of_scope_files
+    )
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     # Like the real build_settings, which always applies a rate profile.
     bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(
@@ -1327,6 +1331,50 @@ def test_the_page_says_when_the_pdf_folder_has_pdfs_not_yet_indexed():
         keys = _button_keys(module)
 
     assert any("1 PDF in the PDF folder is not in the index yet" in warning for warning in warnings)
+    assert "rebuild_offer_main" in keys
+
+
+@pytest.mark.parametrize(
+    "out_of_scope_count, expected",
+    [
+        (
+            1,
+            "1 PDF in the index is no longer in scope, but questions still search it until the index is rebuilt. "
+            "Click **Rebuild the index** to remove it.",
+        ),
+        (
+            2,
+            "2 PDFs in the index are no longer in scope, but questions still search them until the index is "
+            "rebuilt. Click **Rebuild the index** to remove them.",
+        ),
+    ],
+    ids=["one", "several"],
+)
+def test_select_index_status_warns_when_the_index_holds_pdfs_no_longer_in_scope(
+    pdf_research_assistant_module, out_of_scope_count, expected
+):
+    status = pdf_research_assistant_module.select_index_status(2, 0, 0, out_of_scope_count)
+
+    assert status == [("caption", "Index available for 2 PDFs under PAPER_DIR."), ("warning", expected)]
+
+
+def test_select_index_status_gives_both_warnings_when_pdfs_are_missing_and_out_of_scope(
+    pdf_research_assistant_module,
+):
+    status = pdf_research_assistant_module.select_index_status(2, 0, 1, 1)
+
+    assert [level for level, _message in status] == ["caption", "warning", "warning"]
+    assert "not in the index yet" in status[1][1]
+    assert "no longer in scope" in status[2][1]
+
+
+def test_the_page_says_when_the_index_holds_pdfs_no_longer_in_scope():
+    with imported_pdf_research_assistant(indexed_count=2, out_of_scope_files=["sub/old.pdf"]) as module:
+        module.bootstrap.get_out_of_scope_files.assert_called_once_with(Path(r"C:\index\active-shard"))
+        warnings = [str(call.args[0]) for call in module.st.warning.call_args_list]
+        keys = _button_keys(module)
+
+    assert any("1 PDF in the index is no longer in scope" in warning for warning in warnings)
     assert "rebuild_offer_main" in keys
 
 
@@ -3606,6 +3654,15 @@ def test_index_needs_rebuild_when_it_is_empty_incomplete_has_failed_pdfs_or_miss
     assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count) is expected
 
 
+@pytest.mark.parametrize("out_of_scope_count, expected", [(0, False), (1, True)])
+def test_index_needs_rebuild_when_it_holds_pdfs_no_longer_in_scope(
+    pdf_research_assistant_module, out_of_scope_count, expected
+):
+    module = pdf_research_assistant_module
+
+    assert module.index_needs_rebuild(3, 0, [], 0, out_of_scope_count) is expected
+
+
 def test_a_rebuild_is_offered_on_the_page_when_the_index_is_empty():
     with imported_pdf_research_assistant(indexed_count=0) as module:
         offer = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_offer_main")
@@ -5139,6 +5196,14 @@ def test_the_scope_settings_sit_in_their_own_panel_and_form_so_nothing_changes_u
     module.st.rerun.assert_not_called()
 
 
+def test_the_scope_note_and_saved_notice_say_the_change_waits_for_a_rebuild(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    for text in (module.SCOPE_SETTINGS_NOTE, module.SCOPE_SAVED_NOTICE):
+        assert "**Rebuild the index**" in text
+        assert "next question" not in text
+
+
 def test_the_scope_controls_start_at_the_values_in_use(pdf_research_assistant_module, tmp_path):
     module = pdf_research_assistant_module
     get_setting = module.settings_groups.get_setting
@@ -5369,6 +5434,17 @@ def test_the_scope_warning_names_the_index_the_user_gave_it(pdf_research_assista
     text = module.describe_scope_change(preview, Path("index/pqa_index_1"), "My papers")
 
     assert "**My papers** (`pqa_index_1`)" in text
+
+
+def test_the_scope_warning_says_the_index_changes_only_when_it_is_rebuilt(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    preview = {"added": [], "removed": ["sub/a.pdf"], "already_indexed": []}
+
+    text = module.describe_scope_change(preview, Path("index/pqa_index_1"))
+
+    assert "**Rebuild the index**" in text
+    assert "questions keep searching the index as it is" in text
+    assert "next question" not in text
 
 
 def test_confirming_a_scope_change_saves_every_value_and_draws_the_page_again(pdf_research_assistant_module, tmp_path):

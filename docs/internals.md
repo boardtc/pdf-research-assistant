@@ -89,7 +89,7 @@ The app automatically ignores the broken loopback proxy placeholder `127.0.0.1:9
 - The search index is stored in the folder set by `INDEX_DIR`.
 - If `manifest.csv` exists, the app uses it to decide which PDFs are in scope and which metadata to use, unless you choose **All PDFs in the folder** under [Which PDFs are searched](settings.md#which-pdfs-are-searched).
 - If `manifest.csv` does not exist, the app indexes all PDFs under `PAPER_DIR`, subfolders included unless you turn **Search subfolders** off.
-- If you change `MANIFEST_PATH` to a narrower manifest while keeping the same `PAPER_DIR` and `INDEX_DIR`, the next rebuild or normal query removes the other papers from that index. Use a separate `INDEX_DIR` for a subset.
+- If you change `MANIFEST_PATH` to a narrower manifest while keeping the same `PAPER_DIR` and `INDEX_DIR`, the next rebuild removes the other papers from that index (questions search the index as it is, so they keep finding them until then). Use a separate `INDEX_DIR` for a subset.
 
 ## Files the app writes
 

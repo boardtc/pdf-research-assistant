@@ -398,7 +398,8 @@ REINDEX_SETTINGS = (
 )
 
 # PaperQA does not put these in the index name, so changing one keeps the index in use and changes which PDFs
-# it holds: on the next question PaperQA indexes the PDFs that came into scope and removes the ones that left.
+# it holds: the next rebuild indexes the PDFs that came into scope and removes the ones that left. Questions
+# search the index as it is (agent.rebuild_index is off), so nothing changes before that rebuild.
 # They are not index settings that need a rebuild, so they have their own group and their own warning.
 SCOPE_SETTINGS = (
     Setting(
@@ -406,9 +407,9 @@ SCOPE_SETTINGS = (
         label="Paper list",
         help=(
             "Whether only the PDFs named in the paper list (`manifest.csv`) are searched, or every PDF in the "
-            "PDF folder. PaperQA keeps the same index either way, so on the next question it indexes the PDFs "
-            "that came into scope, which costs money, and removes the ones that left. Affects indexing and "
-            "questions, and exhaustive search."
+            "PDF folder. PaperQA keeps the same index either way, so a change takes effect when you click "
+            "**Rebuild the index**: it indexes the PDFs that came into scope, which costs money, and removes the "
+            "ones that left. Affects indexing and questions, and exhaustive search."
         ),
         needs_reindex=False,
         read=lambda settings: settings.agent.index.manifest_file,
@@ -426,9 +427,9 @@ SCOPE_SETTINGS = (
         label="Search subfolders",
         help=(
             "Whether PDFs in folders inside the PDF folder are searched as well as the ones directly in it. "
-            "PaperQA keeps the same index either way, so on the next question it indexes the PDFs that came "
-            "into scope, which costs money, and removes the ones that left. Affects indexing and questions, "
-            "and exhaustive search."
+            "PaperQA keeps the same index either way, so a change takes effect when you click "
+            "**Rebuild the index**: it indexes the PDFs that came into scope, which costs money, and removes the "
+            "ones that left. Affects indexing and questions, and exhaustive search."
         ),
         needs_reindex=False,
         read=lambda settings: settings.agent.index.recurse_subdirectories,

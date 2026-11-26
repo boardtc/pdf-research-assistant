@@ -312,7 +312,7 @@ Questions never index PDFs themselves: they search the index as it is, so a PDF 
 1. The page lists how many PDFs are in scope, the index that will be built and what is paid for: the embedding model and, with images and tables on with enrichment, a model call for every image and table. It gives no cost figure, because that depends on the text in the PDFs.
 2. Nothing starts until you click **Start paid rebuild**. **Cancel** leaves everything as it was.
 3. The rebuild runs the same code as `pdf-research-rebuild`, in its own process, with the library and index settings saved in the sidebar. PDFs already in the index are left alone; new ones, and ones that failed before, are indexed.
-4. A progress bar shows how many PDFs are done. Questions and the index settings are switched off until it finishes, and the output goes to `rebuild.log` in `INDEX_DIR`.
+4. A progress bar shows how many PDFs are done. Questions and the index settings are switched off until it finishes, and the output goes to `rebuild.log` in `INDEX_DIR`. The index counts and warnings at the top of the page are hidden meanwhile, because the rebuild is changing them.
 5. **Stop rebuild**, under the progress bar, ends the rebuild early (see [Stopping a rebuild](#stopping-a-rebuild)).
 6. When it finishes, the page shows the end of the log (**Show the end of the rebuild log**) and the new state of the index, and the warning about changed settings goes away.
 

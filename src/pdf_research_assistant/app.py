@@ -865,6 +865,18 @@ def render_index_changes(changes: dict | None) -> None:
         st.warning(describe_index_changes(changes))
 
 
+def render_index_banner(changes: dict | None, status: list[tuple[str, str]], rebuilding: bool) -> None:
+    """Draw the warnings and counts at the top of the page, unless a rebuild is running.
+
+    They are worked out when the page loads and only the rebuild's progress refreshes, so during a rebuild they
+    would contradict it. The page is drawn again when the rebuild finishes, which brings them back up to date.
+    """
+    if rebuilding:
+        return
+    render_index_changes(changes)
+    render_index_status(status)
+
+
 def save_index_name(active_index_dir: Path, name: str) -> None:
     """Save the name typed for the active index and draw the page again, or say why it was not saved."""
     try:
@@ -2106,10 +2118,14 @@ def main() -> None:
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
     # A rebuild and a question both write to the index, so only one of them goes ahead at a time.
-    rebuild_busy = bool(rebuild_client.get_run() or st.session_state.get("rebuild_pending"))
+    rebuilding = rebuild_client.get_run() is not None
+    rebuild_busy = rebuilding or bool(st.session_state.get("rebuild_pending"))
     busy = bool(exhaustive_pending or exhaustive_run or rebuild_busy)
-    render_index_changes(index_changes)
-    render_index_status(select_index_status(indexed_count, manifest_count, unindexed_count, out_of_scope_count))
+    render_index_banner(
+        index_changes,
+        select_index_status(indexed_count, manifest_count, unindexed_count, out_of_scope_count),
+        rebuilding,
+    )
     render_rebuild(
         settings,
         active_index_dir,

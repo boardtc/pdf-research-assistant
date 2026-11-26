@@ -3854,6 +3854,73 @@ def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_setti
         module.st.rerun.assert_not_called()
 
 
+def test_a_running_first_build_hides_the_missing_index_banner_and_the_settings_warning(tmp_path):
+    run = _rebuild_run(tmp_path, pdf_count=4)
+    patches = {"get_run": mock.Mock(return_value=run), "describe_progress": mock.Mock(return_value="0 of 4 PDFs done")}
+
+    with imported_pdf_research_assistant(
+        indexed_count=0, index_changes=CHUNK_CHANGES, rebuild_patches=patches
+    ) as module:
+        shown = [
+            str(call.args[0])
+            for method in (module.st.warning, module.st.info, module.st.caption)
+            for call in method.call_args_list
+        ]
+
+        assert not any("Index not found" in message for message in shown)
+        assert module.describe_index_changes(CHUNK_CHANGES) not in shown
+        assert "No paper list is in use, so all PDFs under PAPER_DIR are in scope." not in shown
+        assert module.REBUILD_RUNNING_NOTE in shown
+
+
+def test_a_running_rebuild_hides_the_counts_it_is_changing(tmp_path):
+    run = _rebuild_run(tmp_path, pdf_count=4)
+    patches = {"get_run": mock.Mock(return_value=run), "describe_progress": mock.Mock(return_value="2 of 4 PDFs done")}
+
+    with imported_pdf_research_assistant(
+        indexed_count=2, unindexed_files=["new.pdf"], out_of_scope_files=["old.pdf"], rebuild_patches=patches
+    ) as module:
+        shown = [
+            str(call.args[0])
+            for method in (module.st.warning, module.st.caption)
+            for call in method.call_args_list
+        ]
+
+        assert "Index available for 2 PDFs under PAPER_DIR." not in shown
+        assert not any("not in the index yet" in message for message in shown)
+        assert not any("no longer in scope" in message for message in shown)
+
+
+def test_render_index_banner_draws_nothing_while_a_rebuild_runs(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    for method in (module.st.warning, module.st.info, module.st.caption):
+        method.reset_mock()
+
+    module.render_index_banner(CHUNK_CHANGES, [("warning", "Index not found."), ("info", "No list.")], rebuilding=True)
+
+    module.st.warning.assert_not_called()
+    module.st.info.assert_not_called()
+    module.st.caption.assert_not_called()
+
+
+def test_render_index_banner_draws_the_settings_warning_then_the_status_when_no_rebuild_runs(
+    pdf_research_assistant_module,
+):
+    module = pdf_research_assistant_module
+    module.st.warning.reset_mock()
+    module.st.caption.reset_mock()
+
+    module.render_index_banner(
+        CHUNK_CHANGES, [("caption", "Index available."), ("warning", "1 PDF missing.")], rebuilding=False
+    )
+
+    assert module.st.warning.call_args_list == [
+        mock.call(module.describe_index_changes(CHUNK_CHANGES)),
+        mock.call("1 PDF missing."),
+    ]
+    module.st.caption.assert_called_once_with("Index available.")
+
+
 def test_a_running_rebuild_offers_a_stop_button(pdf_research_assistant_module, tmp_path):
     module = pdf_research_assistant_module
     run = _rebuild_run(tmp_path)

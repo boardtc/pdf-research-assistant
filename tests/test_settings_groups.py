@@ -749,6 +749,20 @@ def test_changing_a_scope_setting_keeps_the_paperqa_index_name(setting, tmp_path
     assert settings.get_index_name() == name_before
 
 
+@pytest.mark.parametrize("setting", settings_groups.SCOPE_SETTINGS, ids=lambda setting: setting.key)
+def test_the_scope_help_says_the_index_changes_only_when_it_is_rebuilt(setting):
+    """Questions search the index as it is (#130), so nothing is added or removed until a rebuild."""
+    assert "**Rebuild the index**" in setting.help
+    assert "next question" not in setting.help
+
+
+def test_paperqa_rebuilds_remove_pdfs_out_of_scope_by_default():
+    """A rebuild (get_directory_index with build=True) removes index entries out of scope only with this on."""
+    from paperqa.settings import IndexSettings
+
+    assert IndexSettings().sync_with_paper_directory is True
+
+
 def test_scope_settings_are_real_paperqa_index_settings():
     from paperqa.settings import IndexSettings
 

@@ -76,14 +76,14 @@ INDEX_SETTINGS_SAVED_NOTICE = (
 )
 SCOPE_SETTINGS_PANEL = "Which PDFs are searched"
 SCOPE_SETTINGS_NOTE = (
-    "These do not start a new index. They change which PDFs the index you are using holds: on the next "
-    "question PaperQA adds the PDFs that came into scope, which costs money, and removes the ones that left. "
-    "You are shown how many before anything is saved."
+    "These do not start a new index. They change which PDFs the index you are using holds, once you click "
+    "**Rebuild the index**: it adds the PDFs that came into scope, which costs money, and removes the ones that "
+    "left. Until then questions search the index as it is. You are shown how many before anything is saved."
 )
 SCOPE_SETTINGS_SAVE_LABEL = "Save scope"
-SCOPE_CONFIRM_LABEL = "Save and change the index"
+SCOPE_CONFIRM_LABEL = "Save the new scope"
 SCOPE_NO_PAPER_LIST_NOTE = "No paper list was found, so every PDF in the folder is in scope."
-SCOPE_SAVED_NOTICE = "Scope saved."
+SCOPE_SAVED_NOTICE = "Scope saved. Click **Rebuild the index** to bring the index into line with it."
 SCOPE_EMPTY_INDEX_NOTICE = (
     "Scope saved. The index holds no PDFs yet, so nothing in it changes; the first build uses this scope."
 )
@@ -753,11 +753,27 @@ def describe_unindexed(count: int) -> str:
     )
 
 
-def select_index_status(indexed_count: int, manifest_count: int, unindexed_count: int) -> list[tuple[str, str]]:
+def describe_out_of_scope(count: int) -> str:
+    """Say that the index holds PDFs that are no longer in scope, which questions still search until a rebuild."""
+    if count == 1:
+        return (
+            "1 PDF in the index is no longer in scope, but questions still search it until the index is rebuilt. "
+            f"Click **{REBUILD_LABEL}** to remove it."
+        )
+    return (
+        f"{count} PDFs in the index are no longer in scope, but questions still search them until the index is "
+        f"rebuilt. Click **{REBUILD_LABEL}** to remove them."
+    )
+
+
+def select_index_status(
+    indexed_count: int, manifest_count: int, unindexed_count: int, out_of_scope_count: int = 0
+) -> list[tuple[str, str]]:
     """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest.
 
-    Questions search the index as it is and never index PDFs themselves, so the banner says when a rebuild is
-    needed first: when there is no index, or when the PDF folder has PDFs the index does not list yet.
+    Questions search the index as it is and never add or remove PDFs themselves, so the banner says when a
+    rebuild is needed first: when there is no index, when the PDF folder has PDFs the index does not list yet,
+    or when the index holds PDFs that are no longer in scope.
     """
     use_manifest_scope = manifest_count > 0
     if indexed_count == 0:
@@ -778,6 +794,8 @@ def select_index_status(indexed_count: int, manifest_count: int, unindexed_count
         status = [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
     if unindexed_count:
         status.append(("warning", describe_unindexed(unindexed_count)))
+    if out_of_scope_count:
+        status.append(("warning", describe_out_of_scope(out_of_scope_count)))
     return status
 
 
@@ -889,15 +907,26 @@ def render_active_index(details: dict[str, str | None]) -> None:
 
 
 def index_needs_rebuild(
-    indexed_count: int, manifest_count: int, failed_files: list[str], unindexed_count: int = 0
+    indexed_count: int,
+    manifest_count: int,
+    failed_files: list[str],
+    unindexed_count: int = 0,
+    out_of_scope_count: int = 0,
 ) -> bool:
     """Return whether the page can tell that the index is out of date; a manifest count of 0 means no manifest.
 
     An empty index covers changed index settings too, because PaperQA then looks for a new, empty index.
-    unindexed_count counts PDFs in the folder that the index does not list yet. The page cannot tell that a
-    PDF already indexed was changed, so the sidebar always offers a rebuild.
+    unindexed_count counts PDFs in the folder that the index does not list yet, and out_of_scope_count the PDFs
+    it holds that are no longer in scope. The page cannot tell that a PDF already indexed was changed, so the
+    sidebar always offers a rebuild.
     """
-    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files) or unindexed_count > 0
+    return (
+        indexed_count == 0
+        or indexed_count < manifest_count
+        or bool(failed_files)
+        or unindexed_count > 0
+        or out_of_scope_count > 0
+    )
 
 
 def describe_rebuild_plan(
@@ -1520,8 +1549,9 @@ def describe_scope_change(preview: dict, active_index_dir: Path, friendly_name: 
     index = describe_index_name(active_index_dir.name, friendly_name)
     parts = [
         "**This changes the index you are using. It does not start a new one.** These settings are not part of "
-        f"the index's name, so PaperQA keeps {index} and, on the next question, brings it into line with the new "
-        "scope. Nothing is saved until you confirm.",
+        f"the index's name, so PaperQA keeps {index} and brings it into line with the new scope when you click "
+        f"**{REBUILD_LABEL}**. Until then questions keep searching the index as it is. Nothing is saved until you "
+        "confirm.",
         "\n".join(f"- {line}" for line in scope_change.describe_preview(preview)),
     ]
     return "\n\n".join(parts)
@@ -2072,19 +2102,22 @@ def main() -> None:
         index_changes = index_changes | {"name": names.get(index_changes["index"])}
     failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
     unindexed_count = len(bootstrap.get_unindexed_files(active_index_dir))
+    out_of_scope_count = len(bootstrap.get_out_of_scope_files(active_index_dir))
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
     # A rebuild and a question both write to the index, so only one of them goes ahead at a time.
     rebuild_busy = bool(rebuild_client.get_run() or st.session_state.get("rebuild_pending"))
     busy = bool(exhaustive_pending or exhaustive_run or rebuild_busy)
     render_index_changes(index_changes)
-    render_index_status(select_index_status(indexed_count, manifest_count, unindexed_count))
+    render_index_status(select_index_status(indexed_count, manifest_count, unindexed_count, out_of_scope_count))
     render_rebuild(
         settings,
         active_index_dir,
         manifest_count,
         indexed_count,
-        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count),
+        out_of_date=index_needs_rebuild(
+            indexed_count, manifest_count, failed_files, unindexed_count, out_of_scope_count
+        ),
         busy=busy,
     )
     render_active_index(

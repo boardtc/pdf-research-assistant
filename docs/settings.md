@@ -232,7 +232,7 @@ Open **Which PDFs are searched** in the sidebar to choose the scope of the index
 
 - PaperQA setting: `manifest_file`.
 - Values: **Only the PDFs in the paper list** (`manifest.csv`; the default when the file exists) or **All PDFs in the folder**. The control is switched off while there is no paper list.
-- Cost and time: PDFs that come into scope are indexed on the next question, which costs money for embeddings.
+- Cost and time: PDFs that come into scope are indexed when you click **Rebuild the index**, which costs money for embeddings.
 - Affects indexing, questions and exhaustive search.
 
 ### Search subfolders
@@ -244,7 +244,9 @@ Open **Which PDFs are searched** in the sidebar to choose the scope of the index
 
 ### Saving the scope
 
-Neither setting is part of PaperQA's index name, so changing one does not start a new index, and the [changed-settings warning](#library-and-index-settings) does not apply. PaperQA keeps the index and, on the next question, brings it into line with the new scope: it indexes the PDFs that came into scope, which costs money for embeddings, and removes the ones that left. So these settings have a warning of their own, shown before anything is saved. When you click **Save scope** and the change would add or remove PDFs in an index that already holds some, the page says that it changes the index in use, gives how many PDFs would be added and removed and names the first few, and saves only when you click **Save and change the index**; **Cancel** saves nothing. PDFs that come into scope but are already in the index are listed separately, because they cost nothing. A change that adds or removes nothing, or one made while the index is empty, is saved at once. The new scope is applied the next time a question is asked or **Rebuild the index** is run.
+Neither setting is part of PaperQA's index name, so changing one does not start a new index, and the [changed-settings warning](#library-and-index-settings) does not apply. PaperQA keeps the index and brings it into line with the new scope when you click **Rebuild the index**: it indexes the PDFs that came into scope, which costs money for embeddings, and removes the ones that left. Questions search the index as it is, so until that rebuild they still search the PDFs that left the scope and miss the ones that came into it. So these settings have a warning of their own, shown before anything is saved. When you click **Save scope** and the change would add or remove PDFs in an index that already holds some, the page says that it changes the index in use, gives how many PDFs the rebuild would add and remove and names the first few, and saves only when you click **Save the new scope**; **Cancel** saves nothing. PDFs that come into scope but are already in the index are listed separately, because they cost nothing. A change that adds or removes nothing, or one made while the index is empty, is saved at once.
+
+After the scope is saved, the page counts only the PDFs in scope. It warns, and offers **Rebuild the index** on the page, while the PDF folder has PDFs in scope that the index does not list yet, or while the index holds PDFs that are no longer in scope (including PDFs deleted from the folder).
 
 The choices are saved to `saved_settings.json`, so the page's counts, the rebuild, the command line, exhaustive search and the next-question estimate all use the same scope. They cannot be changed while a rebuild is running. Subfolders cannot be turned off while the paper list names PDFs only inside subfolders, because no PDF would be left to search. A paper list that names PDFs inside subfolders ignores those rows while subfolders are off.
 

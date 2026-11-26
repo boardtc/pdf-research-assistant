@@ -1,8 +1,8 @@
 """What changing the manifest scope or the subfolder search does to the index in use.
 
 Neither setting is part of PaperQA's index name, so the index PaperQA reads stays the same. On the next
-question PaperQA lists the PDFs in scope and syncs the index to match: it indexes the ones that are missing,
-which costs money, and removes the ones that are no longer in scope. This module works out those PDFs from
+rebuild PaperQA lists the PDFs in scope and syncs the index to match: it indexes the ones that are missing,
+which costs money, and removes the ones that are no longer in scope. Questions search the index as it is. This module works out those PDFs from
 the folder, the paper list and the index's own file list, so the app can say so before the change is saved.
 
 It reads folders only and does not import PaperQA.
@@ -57,7 +57,7 @@ def leaves_nothing_to_search(manifest_paths: set[str], use_manifest: bool, recur
 
 
 def preview_change(scope_now: set[str], scope_new: set[str], indexed: set[str]) -> dict[str, list[str]]:
-    """Return what the next question would do to the index because the scope changes.
+    """Return what the next rebuild would do to the index because the scope changes.
 
     "added" are PDFs entering the scope that are not indexed, so they would be read and embedded. "removed" are
     indexed PDFs leaving the scope. "already_indexed" are PDFs entering the scope that the index already holds.

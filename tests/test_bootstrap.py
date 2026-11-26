@@ -811,3 +811,99 @@ def test_get_unindexed_files_leaves_out_subfolders_when_they_are_not_searched(bo
     with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
             mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", False)):
         assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir) == ["top.pdf"]
+
+
+def test_build_settings_keeps_the_index_synced_with_the_folder_so_a_rebuild_removes_pdfs_out_of_scope(
+    bootstrap_module,
+):
+    """The out-of-scope warning tells the user a rebuild removes those PDFs; PaperQA does so only with this on.
+
+    PaperQA turns it on by default (checked in test_settings_groups), so build_settings must not turn it off.
+    """
+    index = bootstrap_module.build_settings().agent.index
+
+    assert "sync_with_paper_directory" not in vars(index)
+
+
+def test_get_out_of_scope_files_lists_indexed_pdfs_in_subfolders_once_they_are_not_searched(
+    bootstrap_module, workspace_tmp_path
+):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "top.pdf", "sub/deeper.pdf")
+    index_dir = workspace_tmp_path / "index"
+    # PaperQA lists files by their path under the PDF folder, with Windows separators on Windows.
+    _write_files_zip(index_dir, "pqa_index_x", {"top.pdf": "OK", r"sub\deeper.pdf": "OK"})
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", False)):
+        assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", paper_dir) == ["sub/deeper.pdf"]
+
+
+def test_get_out_of_scope_files_is_empty_while_every_indexed_pdf_is_in_scope(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "top.pdf", "sub/deeper.pdf", "new.pdf")
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "pqa_index_x", {"top.pdf": "OK", r"sub\deeper.pdf": "OK"})
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", True)):
+        assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", paper_dir) == []
+
+
+def test_get_out_of_scope_files_lists_indexed_pdfs_the_paper_list_leaves_out(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "listed.pdf", "unlisted.pdf")
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "pqa_index_x", {"listed.pdf": "OK", "unlisted.pdf": "OK"})
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value={"listed.pdf"}), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("manifest", True)):
+        assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", paper_dir) == ["unlisted.pdf"]
+
+
+def test_get_out_of_scope_files_lists_indexed_pdfs_no_longer_in_the_folder(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "kept.pdf")
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "pqa_index_x", {"kept.pdf": "OK", "deleted.pdf": "OK"})
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", paper_dir) == ["deleted.pdf"]
+
+
+def test_get_out_of_scope_files_leaves_out_pdfs_that_failed_to_index(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "top.pdf", "sub/failed.pdf")
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(
+        index_dir, "pqa_index_x", {"top.pdf": "OK", r"sub\failed.pdf": bootstrap_module.FAILED_DOCUMENT_ADD_ID}
+    )
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", False)):
+        assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", paper_dir) == []
+
+
+def test_get_out_of_scope_files_skips_an_unreadable_index_file_list(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "paper.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    (index_dir / "files.zip").write_bytes(b"not-a-valid-archive")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_out_of_scope_files(index_dir, paper_dir) == []
+
+
+def test_get_out_of_scope_files_is_empty_when_there_is_no_index(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "paper.pdf")
+
+    assert bootstrap_module.get_out_of_scope_files(workspace_tmp_path / "missing", paper_dir) == []
+
+
+def test_get_out_of_scope_files_is_empty_when_the_pdf_folder_does_not_exist(bootstrap_module, workspace_tmp_path):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "pqa_index_x", {"a.pdf": "OK"})
+
+    assert bootstrap_module.get_out_of_scope_files(index_dir / "pqa_index_x", workspace_tmp_path / "missing") == []

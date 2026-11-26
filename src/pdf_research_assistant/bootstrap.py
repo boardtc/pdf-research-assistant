@@ -177,7 +177,8 @@ def get_indexed_doc_count(index_dir: Path = INDEX_DIR) -> int:
             if status == FAILED_DOCUMENT_ADD_ID:
                 continue
             normalized = normalize_file_location(file_location)
-            # PaperQA removes entries in subfolders from the index once they are no longer searched.
+            # Entries in subfolders stay in the index until a rebuild once subfolders are no longer searched;
+            # the page counts only the PDFs in scope and warns about the others (get_out_of_scope_files).
             if not recurse and "/" in normalized:
                 continue
             if not current_use_manifest or normalized in current_allowed_paths:
@@ -199,15 +200,12 @@ def get_index_entries(index_dir: Path) -> set[str]:
     return entries
 
 
-def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
-    """Return the PDFs in the PDF folder that the index does not list yet, as paths under the folder.
+def get_files_in_scope(paper_dir: Path) -> set[str]:
+    """Return the PDFs PaperQA would index on a rebuild, as paths under the PDF folder.
 
-    These are the files PaperQA would index on a rebuild: everything in the folder, and its subfolders when
-    they are searched, that only_manifest lets through. A PDF that failed to index is listed in the index
-    already, so it is not counted here.
+    That is everything in the folder, and its subfolders when they are searched, that only_manifest lets
+    through. The folder must exist.
     """
-    if not paper_dir.exists():
-        return []
     # Read once here, where only_manifest would read the manifest again for every file.
     allowed_paths = get_allowed_paths()
     _manifest_scope, recurse = saved_scope()
@@ -216,7 +214,44 @@ def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[st
         relative = normalize_relative_pdf_path(path.relative_to(paper_dir))
         if relative in allowed_paths if allowed_paths else path.suffix.lower() in PDF_EXTENSIONS:
             in_scope.add(relative)
-    return sorted(in_scope - get_index_entries(index_dir))
+    return in_scope
+
+
+def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
+    """Return the PDFs in the PDF folder that the index does not list yet, as paths under the folder.
+
+    These are the files PaperQA would index on a rebuild. A PDF that failed to index is listed in the index
+    already, so it is not counted here.
+    """
+    if not paper_dir.exists():
+        return []
+    return sorted(get_files_in_scope(paper_dir) - get_index_entries(index_dir))
+
+
+def get_out_of_scope_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
+    """Return the PDFs the index holds that are no longer in scope, as paths under the PDF folder.
+
+    Questions search the index as it is and never sync it with the folder, so these are still searched until a
+    rebuild removes them: PDFs left out by a narrower paper list or with subfolders turned off, and PDFs
+    deleted from the folder. A PDF that failed to index is never searched, so it is not counted here. Nothing
+    is counted while the PDF folder is missing.
+    """
+    if not paper_dir.exists():
+        return []
+    indexed = set()
+    for file_index in iter_index_file_archives(index_dir) if index_dir.exists() else []:
+        try:
+            data = pickle.loads(zlib.decompress(file_index.read_bytes()))
+        except Exception:
+            continue
+        indexed.update(
+            normalize_file_location(file_location, paper_dir=paper_dir)
+            for file_location, status in data.items()
+            if status != FAILED_DOCUMENT_ADD_ID
+        )
+    if not indexed:
+        return []
+    return sorted(indexed - get_files_in_scope(paper_dir))
 
 
 def get_failed_files(index_dir: Path = INDEX_DIR) -> list[str]:

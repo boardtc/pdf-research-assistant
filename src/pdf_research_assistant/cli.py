@@ -1,10 +1,8 @@
 import json
-import subprocess
 import sys
 import time
-from pathlib import Path
 
-from pdf_research_assistant import exhaustive_client
+from pdf_research_assistant import exhaustive_client, query_client
 from pdf_research_assistant.costs import format_cost
 
 PROGRESS_POLL_SECONDS = 2
@@ -53,6 +51,9 @@ def main() -> int:
     asked = 0
     total_cost = 0.0
     while True:
+        if not exhaustive_mode:
+            # Loads PaperQA while the question is being typed.
+            query_client.prepare()
         q = input("\nQuestion (or quit): ").strip()
         if q.lower() == "quit":
             if asked:
@@ -62,15 +63,7 @@ def main() -> int:
             run_exhaustive_question(q)
             continue
         asked += 1
-        helper = Path(__file__).with_name("query_once.py")
-        result = subprocess.run(
-            [sys.executable, str(helper), q],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        result = query_client.run(q)
         if result.returncode != 0 and not result.stdout.strip():
             print("\nQuery failed.")
             if result.stderr.strip():

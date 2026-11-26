@@ -44,6 +44,7 @@ The modules in `src/pdf_research_assistant/`:
 | `bootstrap.py` | Reads `.env`, finds the PDFs and the index, and builds the PaperQA settings everything else uses |
 | `pdf_parser.py` | Reads PDFs, with a fallback for some PDFs whose fonts the usual reader cannot decode |
 | `query_once.py` | Answers one question in its own process, for the app and the CLI |
+| `query_client.py` | Starts the next question's process ahead of time, so PaperQA is already loaded when the question is asked |
 | `exhaustive.py` | Exhaustive search: checks every chunk of every paper in scope, in its own process |
 | `exhaustive_client.py` | Plans, starts and follows exhaustive runs for the app and the CLI |
 | `settings_groups.py` | Lists every sidebar setting, which group it is in, and its allowed values |

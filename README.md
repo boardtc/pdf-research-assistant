@@ -63,7 +63,7 @@ Streamlit usually opens the app in your browser and prints the local URL, by def
 
 ### Ask a first question
 
-1. Click **Rebuild the index**, check what will be paid for, and click **Start paid rebuild**. If you skip this, the first question builds the index, which can take a while for a large library ([reference](docs/settings.md#rebuild-the-index)).
+1. Click **Rebuild the index**, check what will be paid for, and click **Start paid rebuild**. Questions only search the index, so build it first; it can take a while for a large library ([reference](docs/settings.md#rebuild-the-index)).
 2. Type a question in the box at the bottom of the page. The default settings suit a first question.
 3. Open `Show source passages` and `Open chunk` under the answer to check what it was based on ([reference](docs/settings.md#answers)).
 

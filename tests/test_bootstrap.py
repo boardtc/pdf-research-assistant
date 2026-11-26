@@ -728,3 +728,86 @@ def test_get_index_entries_skips_unreadable_index_files(bootstrap_module, worksp
 
 def test_get_index_entries_is_empty_when_there_is_no_index(bootstrap_module, workspace_tmp_path):
     assert bootstrap_module.get_index_entries(workspace_tmp_path / "missing") == set()
+
+
+def _make_papers(paper_dir: Path, *names: str) -> None:
+    for name in names:
+        path = paper_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4")
+
+
+def test_get_unindexed_files_lists_every_pdf_in_the_folder_and_its_subfolders_when_there_is_no_index(
+    bootstrap_module, workspace_tmp_path
+):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "b.pdf", "sub/a.PDF", "notes.txt")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "missing-index", paper_dir) == [
+            "b.pdf",
+            "sub/a.PDF",
+        ]
+
+
+def test_get_unindexed_files_leaves_out_pdfs_the_index_lists_failed_ones_included(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "kept.pdf", "failed.pdf", "sub/kept.pdf", "new.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    # PaperQA lists files by their path under the PDF folder, with Windows separators on Windows.
+    (index_dir / "files.zip").write_bytes(
+        zlib.compress(
+            pickle.dumps(
+                {"kept.pdf": "OK", "failed.pdf": bootstrap_module.FAILED_DOCUMENT_ADD_ID, r"sub\kept.pdf": "OK"}
+            )
+        )
+    )
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(index_dir, paper_dir) == ["new.pdf"]
+
+
+def test_get_unindexed_files_looks_only_at_pdfs_the_manifest_lists(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "listed.pdf", "sub/listed.pdf", "unlisted.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value={"listed.pdf", "sub/listed.pdf"}):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir) == [
+            "listed.pdf",
+            "sub/listed.pdf",
+        ]
+
+
+def test_get_unindexed_files_skips_an_unreadable_index_file_list(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "paper.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    (index_dir / "files.zip").write_bytes(b"not-a-valid-archive")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(index_dir, paper_dir) == ["paper.pdf"]
+
+
+def test_get_unindexed_files_is_empty_when_the_pdf_folder_does_not_exist(bootstrap_module, workspace_tmp_path):
+    assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", workspace_tmp_path / "missing") == []
+
+
+def test_get_unindexed_files_reads_the_manifest_once_however_many_pdfs_there_are(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "a.pdf", "b.pdf", "c.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()) as allowed:
+        bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir)
+
+    allowed.assert_called_once_with()
+
+
+def test_get_unindexed_files_leaves_out_subfolders_when_they_are_not_searched(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "top.pdf", "sub/deeper.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", False)):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir) == ["top.pdf"]

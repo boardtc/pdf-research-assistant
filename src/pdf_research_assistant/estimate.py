@@ -4,7 +4,8 @@ Exhaustive search plans one summary call per passage in scope (exhaustive.estima
 question is smaller and its size is known from the settings alone, so it can be estimated on every
 page load without reading the index:
 
-- Starting the query process, which is mostly loading PaperQA, takes a fixed time before the first call.
+- Starting the question takes a short fixed time before the first call. PaperQA is loaded beforehand, in a
+  spare query process that waits for the question (query_client.py).
 - PaperQA's agent makes a call to choose each step (search, gather evidence, answer, finish), usually
   about eight. With fixed search steps (`agent.agent_type` "fake") the answer model is instead asked once
   for a few searches and once more to finish, after the steps have run.
@@ -51,12 +52,14 @@ AGENT_OUTPUT_TOKENS = 50
 # evidence 1 to 7 times, most often 3. Counted for the time only, since the cost estimate was already
 # within about twice the real cost without it.
 EVIDENCE_ROUNDS = 3
-# Starting the query process, before the first call, measured on the library of about 120 PDFs (25 Nov 2026,
-# 11 runs on a busy machine): 9 to 23 seconds after a first cold run of 64, median about 16. Nearly all of it
-# is importing PaperQA and LiteLLM; scanning the PDF folder for new files took about 1 second, and reading the
-# settings and the index's file list under a tenth of a second. Keeping the answer afterwards took about 0.2
-# seconds.
-START_SECONDS = 16
+# From asking a question to PaperQA's first model call, measured on the library of about 120 PDFs with a
+# local stand-in for OpenAI (25 Nov 2026, 10 runs with the CPU at 100%): 0.4 to 2.8 seconds, median about 1.3,
+# once the spare query process had loaded PaperQA and LiteLLM and fetched LiteLLM's price list. Rounded up to
+# the slow end. Before the spare process, and before questions stopped scanning the PDF folder for new files,
+# the same measurement took 78 to 146 seconds on the same busy machine (9 to 23 on a quieter one). A question
+# asked before the spare has finished loading waits for the rest of it. Keeping the answer afterwards took
+# about 0.2 seconds.
+START_SECONDS = 3
 # Each agent step is a short call sent the conversation so far, plus the tool it runs. A search measured under
 # a tenth of a second, so the step is nearly all the call. Not measured on its own: fitted, with the figures
 # above, to real questions timed from asking to the answer appearing (24 and 25 Nov 2026).
@@ -106,10 +109,11 @@ BALANCED = "Balanced"
 SLOWER = "Slower"
 HIGHER_COST = "Higher cost"
 # Chosen so PaperQA's defaults with gpt-4o-mini come out Balanced, the Fast preset (5 passages, short answers,
-# fixed steps, about 35 seconds) Fast, Low limits Slower, and 30 passages Higher cost.
-FAST_SECONDS = 50
+# fixed steps, about 20 seconds) Fast, Low limits Slower, and 30 passages Higher cost. Both times were 13 seconds
+# higher when starting a question took 16 seconds; every question got that much shorter, so they moved with it.
+FAST_SECONDS = 37
 FAST_COST_USD = 0.004
-SLOWER_SECONDS = 90
+SLOWER_SECONDS = 77
 HIGHER_COST_USD = 0.008
 
 BADGE_COLOURS = {FAST: "green", BALANCED: "blue", SLOWER: "orange", HIGHER_COST: "orange"}
@@ -126,7 +130,7 @@ PRE_PROMPT_NOTE = (
     "A before-answer prompt is set, so the answer model is called once more, before it writes the answer."
 )
 PICTURE_NOTE = "Pictures often cost more than the text and make each passage slower to read."
-START_NOTE = f"That includes about {START_SECONDS} seconds to start the question and load PaperQA."
+START_NOTE = f"That includes about {START_SECONDS} seconds to start the question."
 EVIDENCE_ROUNDS_NOTE = (
     f"The model usually gathers evidence about {EVIDENCE_ROUNDS} times, reading the passages again each time."
 )

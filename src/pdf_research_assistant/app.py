@@ -4,7 +4,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import traceback
 from copy import deepcopy
 from datetime import datetime
@@ -23,6 +22,7 @@ from pdf_research_assistant import (
     local_llm,
     prompt_hooks,
     quality_presets,
+    query_client,
     rate_profiles,
     rebuild_client,
     research_presets,
@@ -604,20 +604,10 @@ def run_query_subprocess(
 ) -> tuple[str, float, list[dict], dict | None, str | None]:
     """Run one question in its own process, with any settings changed for this question only.
 
+    The process is usually the spare one the page started earlier, which has already loaded PaperQA.
     The last value says why the answer could not be kept for searching later, or is None when it was.
     """
-    helper = Path(__file__).with_name("query_once.py")
-    command = [sys.executable, str(helper), question]
-    if one_off:
-        command.append(json.dumps(one_off))
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    result = query_client.run(question, one_off)
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(result.stderr.strip() or "Query subprocess failed.")
     try:
@@ -750,34 +740,45 @@ def render_exhaustive_run(run: dict, app_state: dict) -> None:
         st.progress(min(finished / max(total, 1), 1.0), text=f"{finished} of {total} papers finished")
 
 
-def select_index_status(indexed_count: int, manifest_count: int) -> list[tuple[str, str]]:
-    """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest."""
+def describe_unindexed(count: int) -> str:
+    """Say that some PDFs in the folder are not in the index yet, so questions miss them."""
+    if count == 1:
+        return (
+            "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+            f"Click **{REBUILD_LABEL}** to add it."
+        )
+    return (
+        f"{count} PDFs in the PDF folder are not in the index yet, so questions do not search them. "
+        f"Click **{REBUILD_LABEL}** to add them."
+    )
+
+
+def select_index_status(indexed_count: int, manifest_count: int, unindexed_count: int) -> list[tuple[str, str]]:
+    """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest.
+
+    Questions search the index as it is and never index PDFs themselves, so the banner says when a rebuild is
+    needed first: when there is no index, or when the PDF folder has PDFs the index does not list yet.
+    """
     use_manifest_scope = manifest_count > 0
-    if indexed_count == 0 and use_manifest_scope:
-        return [
+    if indexed_count == 0:
+        scope = f" for {manifest_count} manifest PDFs" if use_manifest_scope else ""
+        status = [
             (
                 "warning",
-                f"Index not found. The first question will rebuild the index for {manifest_count} manifest PDFs, "
-                "which may take a long time.",
-            ),
-            ("info", f"A rebuild starts only when you click **{REBUILD_LABEL}** or submit a question below."),
-        ]
-    if use_manifest_scope and indexed_count < manifest_count:
-        return [
-            (
-                "warning",
-                f"Index is incomplete: {indexed_count} of {manifest_count} manifest PDFs appear indexed. "
-                "The next question should continue or trigger indexing work.",
+                f"Index not found. Questions search only the index, so click **{REBUILD_LABEL}** to build it"
+                f"{scope} before asking one. It may take a long time.",
             )
         ]
-    if indexed_count == 0:
-        return [
-            ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
-            ("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."),
-        ]
+        if not use_manifest_scope:
+            status.append(("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."))
+        return status
     if use_manifest_scope:
-        return [("caption", f"Index available for {indexed_count} manifest PDFs.")]
-    return [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
+        status = [("caption", f"Index available for {indexed_count} manifest PDFs.")]
+    else:
+        status = [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
+    if unindexed_count:
+        status.append(("warning", describe_unindexed(unindexed_count)))
+    return status
 
 
 def render_index_status(status: list[tuple[str, str]]) -> None:
@@ -887,13 +888,16 @@ def render_active_index(details: dict[str, str | None]) -> None:
             save_index_name(Path(details["folder"]), typed)
 
 
-def index_needs_rebuild(indexed_count: int, manifest_count: int, failed_files: list[str]) -> bool:
+def index_needs_rebuild(
+    indexed_count: int, manifest_count: int, failed_files: list[str], unindexed_count: int = 0
+) -> bool:
     """Return whether the page can tell that the index is out of date; a manifest count of 0 means no manifest.
 
     An empty index covers changed index settings too, because PaperQA then looks for a new, empty index.
-    Without a manifest the page cannot tell that PDFs were added, so the sidebar always offers a rebuild.
+    unindexed_count counts PDFs in the folder that the index does not list yet. The page cannot tell that a
+    PDF already indexed was changed, so the sidebar always offers a rebuild.
     """
-    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files)
+    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files) or unindexed_count > 0
 
 
 def describe_rebuild_plan(
@@ -2067,19 +2071,20 @@ def main() -> None:
     if index_changes:
         index_changes = index_changes | {"name": names.get(index_changes["index"])}
     failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
+    unindexed_count = len(bootstrap.get_unindexed_files(active_index_dir))
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
     # A rebuild and a question both write to the index, so only one of them goes ahead at a time.
     rebuild_busy = bool(rebuild_client.get_run() or st.session_state.get("rebuild_pending"))
     busy = bool(exhaustive_pending or exhaustive_run or rebuild_busy)
     render_index_changes(index_changes)
-    render_index_status(select_index_status(indexed_count, manifest_count))
+    render_index_status(select_index_status(indexed_count, manifest_count, unindexed_count))
     render_rebuild(
         settings,
         active_index_dir,
         manifest_count,
         indexed_count,
-        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files),
+        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count),
         busy=busy,
     )
     render_active_index(
@@ -2093,6 +2098,8 @@ def main() -> None:
     )
     render_failed_files(failed_files)
 
+    # Loads PaperQA in a spare query process while the question is being typed.
+    query_client.prepare()
     app_state = get_persistent_app_state()
     init_session_state(app_state)
     search_mode, one_off = render_sidebar(app_state, settings, index_changes, busy)

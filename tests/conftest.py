@@ -5,6 +5,11 @@ import sys
 from pathlib import Path
 
 
+# Use the price list that comes with LiteLLM instead of downloading it on import. The download added
+# 30 seconds or more to every run and made the tests depend on the network. Set before anything imports
+# LiteLLM; processes the tests start inherit it. Set it to False first to test against the latest list.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 

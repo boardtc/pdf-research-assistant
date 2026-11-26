@@ -207,9 +207,9 @@ def test_the_calls_set_the_time_when_the_token_rate_limit_is_not_reached():
 
 
 def test_the_start_up_is_the_measured_time_to_start_a_question():
-    # Starting a question's process, its imports, the settings and the scan of the PDF folder, measured on the
-    # real library: 9 to 23 seconds after a first cold run, with a median of about 16.
-    assert estimate.START_SECONDS == 16
+    # From asking to PaperQA's first model call, with the spare query process already loaded, measured on the
+    # real library: 0.4 to 2.8 seconds, rounded up to the slow end.
+    assert estimate.START_SECONDS == 3
 
 
 def test_an_agent_step_takes_longer_than_a_short_reply_alone():
@@ -242,7 +242,9 @@ def _pre_prompt_settings() -> Settings:
 
 
 # Real questions on a library of 119 PDFs with High limits (24 and 25 Nov 2026), timed from asking to the
-# answer appearing. Where a setting was timed more than once, this is a typical time.
+# answer appearing. Where a setting was timed more than once, this is a typical time. They were timed when
+# starting a question took about 16 seconds, so each would now finish this much sooner.
+START_UP_SAVING = 16 - estimate.START_SECONDS
 MEASURED_QUESTIONS = [
     ("Balanced", lambda: _paperqa_settings(), 80),
     ("Fast", lambda: _preset_settings("Fast"), 35),
@@ -259,15 +261,18 @@ MEASURED_QUESTIONS = [
 
 @pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
 def test_the_time_is_close_to_measured_questions(name, settings, seconds):
-    result = estimate.estimate_question(settings())
+    # Compared as things were when the questions were timed: the estimate plus the start-up saved since.
+    then = estimate.estimate_question(settings()).seconds + START_UP_SAVING
 
     # One question can run a minute longer or shorter than the next, depending on how many searches the
     # model makes, so close means within about half again either way.
-    assert seconds * 0.75 <= result.seconds <= seconds * 1.6
+    assert seconds * 0.75 <= then <= seconds * 1.6
 
 
 @pytest.mark.parametrize(("name", "settings", "seconds"), MEASURED_QUESTIONS, ids=[q[0] for q in MEASURED_QUESTIONS])
-def test_no_measured_question_is_shown_as_under_half_a_minute(name, settings, seconds):
+def test_no_question_measured_at_half_a_minute_or_more_is_shown_as_under_half_a_minute(name, settings, seconds):
+    if seconds - START_UP_SAVING < 30:
+        pytest.skip("This question now takes under half a minute.")
     assert estimate.describe_time(estimate.estimate_question(settings()).seconds) != "under half a minute"
 
 

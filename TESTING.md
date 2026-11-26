@@ -128,6 +128,7 @@ python -m pytest --cov=pdf_research_assistant --cov-branch --cov-report=term-mis
 | `tests/test_bootstrap.py` | `.env` handling, the manifest, the index and building PaperQA settings |
 | `tests/test_pdf_parser.py` | Reading PDFs and the font-encoding fallback |
 | `tests/test_query_once.py` | Answering one question, its cost, the rate limiter wait and the missing-answer note |
+| `tests/test_query_client.py` | Starting the next question's process ahead of time and handing it the question |
 | `tests/test_rebuild.py` | The `pdf-research-rebuild` command |
 | `tests/test_rebuild_client.py` | Starting and following a rebuild from the app |
 | `tests/test_exhaustive.py` | Exhaustive search runs |
@@ -140,6 +141,7 @@ python -m pytest --cov=pdf_research_assistant --cov-branch --cov-report=term-mis
 | `tests/test_prompt_hooks.py` | The before-answer prompt |
 | `tests/test_rate_profiles.py` | The speed limits profiles and the rate limiter wait, against PaperQA's real limiter |
 | `tests/test_estimate.py` | The next-question estimate, including its fit to timed real questions |
+| `tests/test_costs.py` | How a cost is shown in dollars |
 | `tests/test_research_presets.py` | Research presets, import and export |
 | `tests/test_local_llm.py` | Local LLM settings and the local request timeout |
 | `tests/test_index_names.py` | Friendly index names |

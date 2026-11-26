@@ -2,8 +2,8 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import subprocess
-import sys
 import traceback
 from copy import deepcopy
 from datetime import datetime
@@ -22,13 +22,16 @@ from pdf_research_assistant import (
     local_llm,
     prompt_hooks,
     quality_presets,
+    query_client,
     rate_profiles,
     rebuild_client,
     research_presets,
     saved_answers,
     saved_settings,
+    scope_change,
     settings_groups,
 )
+from pdf_research_assistant.costs import format_cost
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
 
@@ -71,6 +74,24 @@ INDEX_SETTINGS_SAVED_NOTICE = (
     "Index settings saved. PaperQA now looks for an index built with them, so your PDFs have to be indexed "
     "again before they can be searched. Click **Rebuild the index** to do that."
 )
+SCOPE_SETTINGS_PANEL = "Which PDFs are searched"
+SCOPE_SETTINGS_NOTE = (
+    "These do not start a new index. They change which PDFs the index you are using holds: on the next "
+    "question PaperQA adds the PDFs that came into scope, which costs money, and removes the ones that left. "
+    "You are shown how many before anything is saved."
+)
+SCOPE_SETTINGS_SAVE_LABEL = "Save scope"
+SCOPE_CONFIRM_LABEL = "Save and change the index"
+SCOPE_NO_PAPER_LIST_NOTE = "No paper list was found, so every PDF in the folder is in scope."
+SCOPE_SAVED_NOTICE = "Scope saved."
+SCOPE_EMPTY_INDEX_NOTICE = (
+    "Scope saved. The index holds no PDFs yet, so nothing in it changes; the first build uses this scope."
+)
+SCOPE_NO_CHANGE_NOTICE = "Scope saved. No PDF is added to or removed from the index."
+SCOPE_NOTHING_LEFT_NOTE = (
+    "The paper list names PDFs only inside subfolders, so turning subfolders off would leave no PDF to search. "
+    "Nothing was changed."
+)
 REBUILD_LABEL = "Rebuild the index"
 REBUILD_HELP = (
     "Indexes your PDFs with the library and index settings saved here. PDFs already in the index are left "
@@ -87,6 +108,31 @@ REBUILD_QUESTION_NOTE = "Your question was not sent, because the index is being 
 REBUILD_LOCKED_NOTE = "These cannot be changed while the index is being rebuilt."
 REBUILD_FINISHED_NOTICE = "The index rebuild has finished. This page shows what the index holds now."
 REBUILD_FAILED_NOTICE = "The index rebuild stopped unexpectedly, so the index may be incomplete."
+REBUILD_STOP_LABEL = "Stop rebuild"
+REBUILD_STOP_HELP = (
+    "Starts no more PDFs. The ones already under way are finished and saved, which can take a minute or two. "
+    "Nothing is killed, so the index is never cut off mid-write. Start a rebuild again later to carry on."
+)
+REBUILD_STOP_NOTE = "Stopping keeps the PDFs already indexed. You pay only for the PDFs already started."
+REBUILD_STOPPING_NOTE = (
+    "Stopping: no new PDFs are being started, and the ones under way are being finished and saved. "
+    "This page updates when the rebuild has ended."
+)
+REBUILD_STOPPED_USABLE_NOTICE = (
+    "The index rebuild was stopped. The index can still be used: it holds {count} PDFs. "
+    "Rebuild again to index the rest."
+)
+REBUILD_STOPPED_EMPTY_NOTICE = (
+    "The index rebuild was stopped before any PDF was saved, so the index is still empty and nothing is damaged. "
+    "Rebuild again to index your PDFs."
+)
+REBUILD_STOPPED_UNUSABLE_NOTICE = (
+    "The index rebuild was stopped, but the index's file list cannot be read, so the index may be damaged."
+)
+REBUILD_INDEX_STATE_USABLE = "The index can still be used: it holds {count} PDFs."
+REBUILD_INDEX_STATE_UNUSABLE = (
+    "The index's file list cannot be read, so the index may be damaged. Rebuild it before asking questions."
+)
 REBUILD_LOG_TITLE = "Show the end of the rebuild log"
 INDEX_SETTINGS_UNCHANGED_NOTE = "These are the settings already in use, so nothing was saved."
 MEDIA_PACKAGE_NOTE = (
@@ -455,18 +501,6 @@ def describe_asked_at(asked_at: str | None) -> str | None:
     return when.strftime("%d %b %Y, %H:%M")
 
 
-def format_cost(amount: float | None) -> str:
-    """Show a cost in dollars to four places, or say it is less than $0.0001 when it would round to zero.
-
-    A question answered by a local model costs only the OpenAI embeddings that find its passages, a
-    fraction of a hundredth of a cent, which would otherwise show as $0.0000 as if it were free.
-    """
-    amount = amount or 0.0
-    if 0 < amount < 0.00005:
-        return "less than $0.0001"
-    return f"${amount:.4f}"
-
-
 def describe_found_answer(answer: dict, names: dict) -> str:
     """Return the line under a found answer's question: when it was asked, on which index, and its cost."""
     parts = []
@@ -557,25 +591,23 @@ def render_answer_search() -> None:
         render_search_results(found)
 
 
+class QueryFailedError(RuntimeError):
+    """A question that failed, with what it spent before failing."""
+
+    def __init__(self, message: str, cost: float = 0.0):
+        super().__init__(message)
+        self.cost = cost
+
+
 def run_query_subprocess(
     question: str, one_off: dict | None = None
 ) -> tuple[str, float, list[dict], dict | None, str | None]:
     """Run one question in its own process, with any settings changed for this question only.
 
+    The process is usually the spare one the page started earlier, which has already loaded PaperQA.
     The last value says why the answer could not be kept for searching later, or is None when it was.
     """
-    helper = Path(__file__).with_name("query_once.py")
-    command = [sys.executable, str(helper), question]
-    if one_off:
-        command.append(json.dumps(one_off))
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    result = query_client.run(question, one_off)
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(result.stderr.strip() or "Query subprocess failed.")
     try:
@@ -583,7 +615,10 @@ def run_query_subprocess(
     except json.JSONDecodeError as exc:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Invalid query response.") from exc
     if not payload.get("ok"):
-        raise RuntimeError(f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
+        raise QueryFailedError(
+            f"{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}",
+            cost=payload.get("cost") or 0.0,
+        )
     return (
         payload["answer"],
         payload["cost"],
@@ -609,8 +644,11 @@ def sync_persistent_state(app_state: dict) -> None:
 
 
 def escape_dollars(text: str) -> str:
-    """Stop Streamlit Markdown reading text between two dollar signs as a maths formula."""
-    return text.replace("$", r"\$")
+    """Stop Streamlit Markdown reading text between two dollar signs as a maths formula.
+
+    A dollar sign that is already escaped is left alone, so text kept escaped by an earlier version is not escaped twice.
+    """
+    return re.sub(r"(?<!\\)\$", r"\\$", text)
 
 
 def render_exhaustive_report(report_path: str) -> None:
@@ -678,7 +716,7 @@ def finish_exhaustive_run(run: dict, app_state: dict) -> None:
         item |= {"content": exhaustive_client.describe_crash(output_dir), "cost": exhaustive_client.read_saved_cost(output_dir)}
     else:
         item |= {
-            "content": escape_dollars("\n\n".join(exhaustive_client.describe_result(summary, output_dir))),
+            "content": "\n\n".join(exhaustive_client.describe_result(summary, output_dir)),
             "cost": summary["cost_usd"],
             "report_path": str(output_dir / "report.md"),
         }
@@ -702,34 +740,45 @@ def render_exhaustive_run(run: dict, app_state: dict) -> None:
         st.progress(min(finished / max(total, 1), 1.0), text=f"{finished} of {total} papers finished")
 
 
-def select_index_status(indexed_count: int, manifest_count: int) -> list[tuple[str, str]]:
-    """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest."""
+def describe_unindexed(count: int) -> str:
+    """Say that some PDFs in the folder are not in the index yet, so questions miss them."""
+    if count == 1:
+        return (
+            "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+            f"Click **{REBUILD_LABEL}** to add it."
+        )
+    return (
+        f"{count} PDFs in the PDF folder are not in the index yet, so questions do not search them. "
+        f"Click **{REBUILD_LABEL}** to add them."
+    )
+
+
+def select_index_status(indexed_count: int, manifest_count: int, unindexed_count: int) -> list[tuple[str, str]]:
+    """Return the index banner as (level, message) pairs; a manifest count of 0 means no manifest.
+
+    Questions search the index as it is and never index PDFs themselves, so the banner says when a rebuild is
+    needed first: when there is no index, or when the PDF folder has PDFs the index does not list yet.
+    """
     use_manifest_scope = manifest_count > 0
-    if indexed_count == 0 and use_manifest_scope:
-        return [
+    if indexed_count == 0:
+        scope = f" for {manifest_count} manifest PDFs" if use_manifest_scope else ""
+        status = [
             (
                 "warning",
-                f"Index not found. The first question will rebuild the index for {manifest_count} manifest PDFs, "
-                "which may take a long time.",
-            ),
-            ("info", f"A rebuild starts only when you click **{REBUILD_LABEL}** or submit a question below."),
-        ]
-    if use_manifest_scope and indexed_count < manifest_count:
-        return [
-            (
-                "warning",
-                f"Index is incomplete: {indexed_count} of {manifest_count} manifest PDFs appear indexed. "
-                "The next question should continue or trigger indexing work.",
+                f"Index not found. Questions search only the index, so click **{REBUILD_LABEL}** to build it"
+                f"{scope} before asking one. It may take a long time.",
             )
         ]
-    if indexed_count == 0:
-        return [
-            ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
-            ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
-        ]
+        if not use_manifest_scope:
+            status.append(("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."))
+        return status
     if use_manifest_scope:
-        return [("caption", f"Index available for {indexed_count} manifest PDFs.")]
-    return [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
+        status = [("caption", f"Index available for {indexed_count} manifest PDFs.")]
+    else:
+        status = [("caption", f"Index available for {indexed_count} PDFs under PAPER_DIR.")]
+    if unindexed_count:
+        status.append(("warning", describe_unindexed(unindexed_count)))
+    return status
 
 
 def render_index_status(status: list[tuple[str, str]]) -> None:
@@ -839,13 +888,16 @@ def render_active_index(details: dict[str, str | None]) -> None:
             save_index_name(Path(details["folder"]), typed)
 
 
-def index_needs_rebuild(indexed_count: int, manifest_count: int, failed_files: list[str]) -> bool:
+def index_needs_rebuild(
+    indexed_count: int, manifest_count: int, failed_files: list[str], unindexed_count: int = 0
+) -> bool:
     """Return whether the page can tell that the index is out of date; a manifest count of 0 means no manifest.
 
     An empty index covers changed index settings too, because PaperQA then looks for a new, empty index.
-    Without a manifest the page cannot tell that PDFs were added, so the sidebar always offers a rebuild.
+    unindexed_count counts PDFs in the folder that the index does not list yet. The page cannot tell that a
+    PDF already indexed was changed, so the sidebar always offers a rebuild.
     """
-    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files)
+    return indexed_count == 0 or indexed_count < manifest_count or bool(failed_files) or unindexed_count > 0
 
 
 def describe_rebuild_plan(
@@ -880,7 +932,7 @@ def request_rebuild() -> None:
 
 def render_rebuild_pending(settings, active_index_dir: Path, manifest_count: int, indexed_count: int) -> None:
     """Show what the rebuild involves and start it only when the user confirms."""
-    pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR)
+    pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR, bootstrap.saved_scope()[1])
     st.markdown(f"**{REBUILD_LABEL}**")
     plan = describe_rebuild_plan(
         settings, active_index_dir, pdf_count, indexed_count, index_names.get_name(active_index_dir)
@@ -913,16 +965,38 @@ def render_rebuild_run() -> None:
     st.info(REBUILD_RUNNING_NOTE)
     st.progress(rebuild_client.progress_fraction(run, done), text=rebuild_client.describe_progress(run, done))
     st.caption(f"Details are written to `{run['log_path']}`.")
+    if st.button(
+        REBUILD_STOP_LABEL,
+        key="rebuild_stop",
+        help=REBUILD_STOP_HELP,
+        disabled=rebuild_client.is_stopping(run),
+    ):
+        rebuild_client.request_stop(run)
+    if rebuild_client.is_stopping(run):
+        st.warning(REBUILD_STOPPING_NOTE)
+    else:
+        st.caption(REBUILD_STOP_NOTE)
 
 
 def render_rebuild_result(result: dict | None) -> None:
     """Say how the last rebuild ended, with the end of its log."""
     if not result:
         return
-    if result["ok"]:
+    index = result.get("index")
+    if result.get("stopped") and index and index["usable"] and not index["indexed"]:
+        st.success(REBUILD_STOPPED_EMPTY_NOTICE)
+    elif result.get("stopped") and index and index["usable"]:
+        st.success(REBUILD_STOPPED_USABLE_NOTICE.format(count=index["indexed"]))
+    elif result.get("stopped"):
+        st.error(f"{REBUILD_STOPPED_UNUSABLE_NOTICE} See `{result['log_path']}`.")
+    elif result["ok"]:
         st.success(REBUILD_FINISHED_NOTICE)
     else:
         st.error(f"{REBUILD_FAILED_NOTICE} See `{result['log_path']}`.")
+        if index and index["usable"]:
+            st.info(REBUILD_INDEX_STATE_USABLE.format(count=index["indexed"]))
+        elif index:
+            st.error(REBUILD_INDEX_STATE_UNUSABLE)
     if result["lines"]:
         with st.expander(REBUILD_LOG_TITLE):
             st.code("\n".join(result["lines"]))
@@ -1394,6 +1468,145 @@ def render_reindex_settings(settings, index_changes: dict | None = None, busy: b
                     render_changed_note(setting, changed, index_changes)
 
 
+def scope_widget_key(setting_key: str) -> str:
+    """Return a scope control's key, which changes after a scope change is saved or cancelled so it starts afresh."""
+    return f"scope_setting_{setting_key}_{st.session_state.get('scope_settings_round', 0)}"
+
+
+def draw_scope_setting(setting: settings_groups.Setting, settings, paper_list_found: bool) -> object:
+    """Draw the control for a scope setting, starting at the value in use, and return the value left in it."""
+    current = settings_groups.current_choice(setting, settings)
+    key = scope_widget_key(setting.key)
+    check = setting.check
+    if isinstance(check, settings_groups.OneOf):
+        options = list(check.values)
+        return st.selectbox(
+            setting.label,
+            options,
+            index=options.index(current),
+            format_func=lambda value: check.name_for(value) or str(value),
+            help=setting.help,
+            key=key,
+            disabled=not paper_list_found,
+        )
+    return st.checkbox(setting.label, value=bool(current), help=setting.help, key=key)
+
+
+def plan_scope_change(changed: dict, active_index_dir: Path) -> dict:
+    """Work out what saving these scope choices would do to the index in use.
+
+    Returns "preview" (scope_change.preview_change), "indexed" (how many PDFs the index lists) and "error",
+    which is set instead when the choices would leave nothing to search.
+    """
+    now_scope, now_recurse = bootstrap.saved_scope()
+    new_scope = changed.get("manifest_scope", now_scope)
+    new_recurse = changed.get("recurse_subdirectories", now_recurse)
+    listed = bootstrap.load_allowed_manifest_paths(bootstrap.MANIFEST_PATH)
+    use_list = new_scope == settings_groups.MANIFEST_SCOPE_USE
+    if scope_change.leaves_nothing_to_search(listed, use_list, new_recurse):
+        return {"preview": None, "indexed": 0, "error": SCOPE_NOTHING_LEFT_NOTE}
+
+    def in_scope(manifest_scope: str, recurse: bool) -> set[str]:
+        allowed = scope_change.manifest_paths_in_scope(listed, manifest_scope, recurse)
+        return scope_change.pdfs_in_scope(bootstrap.PAPER_DIR, allowed, recurse)
+
+    indexed = bootstrap.get_index_entries(active_index_dir)
+    preview = scope_change.preview_change(in_scope(now_scope, now_recurse), in_scope(new_scope, new_recurse), indexed)
+    return {"preview": preview, "indexed": len(indexed), "error": None}
+
+
+def describe_scope_change(preview: dict, active_index_dir: Path, friendly_name: str | None = None) -> str:
+    """Return the warning shown before a scope change that adds or removes PDFs in the index in use is saved."""
+    index = describe_index_name(active_index_dir.name, friendly_name)
+    parts = [
+        "**This changes the index you are using. It does not start a new one.** These settings are not part of "
+        f"the index's name, so PaperQA keeps {index} and, on the next question, brings it into line with the new "
+        "scope. Nothing is saved until you confirm.",
+        "\n".join(f"- {line}" for line in scope_change.describe_preview(preview)),
+    ]
+    return "\n\n".join(parts)
+
+
+def save_scope_settings(changed: dict, notice: str) -> None:
+    """Save the scope choices, then draw the page again with a notice and fresh controls."""
+    for key, value in changed.items():
+        saved_settings.save_value(key, value)
+    st.session_state.scope_pending = None
+    st.session_state.scope_settings_notice = notice
+    st.session_state.scope_settings_round = st.session_state.get("scope_settings_round", 0) + 1
+    st.rerun()
+
+
+def request_scope_change(chosen: dict, settings, active_index_dir: Path) -> None:
+    """Save the scope choices that differ from the ones in use, or hold them back for confirmation.
+
+    A change that would add or remove PDFs in an index that already holds some waits for the user's
+    confirmation, with the counts; any other change is saved at once.
+    """
+    changed = {
+        key: value
+        for key, value in chosen.items()
+        if value != settings_groups.current_choice(settings_groups.get_setting(key), settings)
+    }
+    if not changed:
+        st.info(INDEX_SETTINGS_UNCHANGED_NOTE)
+        return
+    plan = plan_scope_change(changed, active_index_dir)
+    if plan["error"]:
+        st.error(plan["error"])
+        return
+    if not plan["indexed"]:
+        save_scope_settings(changed, SCOPE_EMPTY_INDEX_NOTICE)
+    elif not scope_change.changes_index(plan["preview"]):
+        save_scope_settings(changed, SCOPE_NO_CHANGE_NOTICE)
+    else:
+        st.session_state.scope_pending = {"values": changed, "preview": plan["preview"]}
+        st.rerun()
+
+
+def render_scope_pending(pending: dict, active_index_dir: Path) -> None:
+    """Show what the scope change would do to the index, and save it only when the user confirms."""
+    st.warning(describe_scope_change(pending["preview"], active_index_dir, index_names.get_name(active_index_dir)))
+    if st.button(SCOPE_CONFIRM_LABEL, key="scope_confirm"):
+        save_scope_settings(pending["values"], SCOPE_SAVED_NOTICE)
+        return
+    if st.button("Cancel", key="scope_cancel"):
+        st.session_state.scope_pending = None
+        st.session_state.scope_settings_round = st.session_state.get("scope_settings_round", 0) + 1
+        st.rerun()
+
+
+def render_scope_settings(settings) -> None:
+    """Show the settings that decide which PDFs are searched, in one form, saved only after a confirmation.
+
+    While a rebuild runs they cannot be saved, because it is using them.
+    """
+    rebuilding = rebuild_client.get_run() is not None
+    paper_list_found = bootstrap.manifest_exists()
+    with st.sidebar:
+        with st.expander(SCOPE_SETTINGS_PANEL):
+            notice = st.session_state.pop("scope_settings_notice", None)
+            if notice:
+                st.success(notice)
+            st.caption(SCOPE_SETTINGS_NOTE)
+            chosen = {}
+            with st.form("scope_settings_form"):
+                for setting in settings_groups.SCOPE_SETTINGS:
+                    chosen[setting.key] = draw_scope_setting(setting, settings, paper_list_found)
+                    if setting.key == "manifest_scope" and not paper_list_found:
+                        st.caption(SCOPE_NO_PAPER_LIST_NOTE)
+                submitted = st.form_submit_button(SCOPE_SETTINGS_SAVE_LABEL, disabled=rebuilding)
+            if rebuilding:
+                st.caption(REBUILD_LOCKED_NOTE)
+                return
+            pending = st.session_state.get("scope_pending")
+            # Looked up only when needed, so drawing the panel alone never reads the index.
+            if submitted:
+                request_scope_change(chosen, settings, bootstrap.get_active_index_dir(settings))
+            if pending:
+                render_scope_pending(pending, bootstrap.get_active_index_dir(settings))
+
+
 def render_usage(app_state: dict) -> None:
     with st.sidebar:
         st.header("Usage")
@@ -1683,6 +1896,7 @@ def render_sidebar(
         presets_slot = st.container()
     search_mode, one_off = render_instant_settings(settings)
     render_reindex_settings(settings, index_changes, busy)
+    render_scope_settings(settings)
     render_usage(app_state)
     # Last, so it reads the choices every control above has saved during this run.
     render_research_presets(presets_slot)
@@ -1740,7 +1954,7 @@ def render_local_llm_setup() -> None:
 def render_history(history: list[dict]) -> None:
     for item in history:
         with st.chat_message(item["role"]):
-            st.markdown(item["content"])
+            st.markdown(escape_dollars(item["content"]))
             if item["role"] == "assistant" and "cost" in item:
                 render_copy_button(item["content"], key=f"copy_history_{item.get('id', 0)}")
                 render_source_passages(item.get("contexts", []), key=f"history_{item.get('id', 0)}")
@@ -1791,11 +2005,13 @@ def answer_question(
             answer, cost, contexts, recorded_settings, save_error = run_query_subprocess(question, one_off)
         except Exception as exc:
             answer = describe_query_failure(exc)
+            # Only a failure reported by the question's own process knows what was spent before it.
+            cost = getattr(exc, "cost", 0.0)
             st.error(answer)
-            st.caption("Cost: $0.0000")
+            st.caption(f"Cost: {format_cost(cost)}")
             st.code("".join(traceback.format_exception(exc)))
-            return answer, 0.0, [], None, None
-        st.markdown(answer)
+            return answer, cost, [], None, None
+        st.markdown(escape_dollars(answer))
         render_copy_button(answer, key=f"copy_current_{len(st.session_state.history)}")
         render_source_passages(contexts, key=f"current_{len(st.session_state.history)}")
         render_answer_settings(recorded_settings)
@@ -1812,7 +2028,7 @@ def submit_question(question: str, app_state: dict, one_off: dict | None = None)
     st.session_state.history.append({"role": "user", "content": question})
     sync_persistent_state(app_state)
     with st.chat_message("user"):
-        st.markdown(question)
+        st.markdown(escape_dollars(question))
 
     with st.chat_message("assistant"):
         answer, cost, contexts, recorded_settings, save_error = answer_question(question, one_off)
@@ -1855,19 +2071,20 @@ def main() -> None:
     if index_changes:
         index_changes = index_changes | {"name": names.get(index_changes["index"])}
     failed_files = bootstrap.get_failed_files(index_dir=active_index_dir)
+    unindexed_count = len(bootstrap.get_unindexed_files(active_index_dir))
     exhaustive_pending = st.session_state.get("exhaustive_pending")
     exhaustive_run = st.session_state.get("exhaustive_run")
     # A rebuild and a question both write to the index, so only one of them goes ahead at a time.
     rebuild_busy = bool(rebuild_client.get_run() or st.session_state.get("rebuild_pending"))
     busy = bool(exhaustive_pending or exhaustive_run or rebuild_busy)
     render_index_changes(index_changes)
-    render_index_status(select_index_status(indexed_count, manifest_count))
+    render_index_status(select_index_status(indexed_count, manifest_count, unindexed_count))
     render_rebuild(
         settings,
         active_index_dir,
         manifest_count,
         indexed_count,
-        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files),
+        out_of_date=index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count),
         busy=busy,
     )
     render_active_index(
@@ -1881,6 +2098,8 @@ def main() -> None:
     )
     render_failed_files(failed_files)
 
+    # Loads PaperQA in a spare query process while the question is being typed.
+    query_client.prepare()
     app_state = get_persistent_app_state()
     init_session_state(app_state)
     search_mode, one_off = render_sidebar(app_state, settings, index_changes, busy)

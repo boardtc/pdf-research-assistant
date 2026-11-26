@@ -52,9 +52,10 @@ def query_once_module():
         module = importlib.import_module("pdf_research_assistant.query_once")
         # Never write to a real index of past answers; tests that check saving look at this mock.
         # Never change the wait on the real shared rate limiter; the test that checks it looks at this mock.
+        # Never download LiteLLM's price list; patching it here also undoes any reuse_model_cost_map wrapper.
         with mock.patch.object(module.saved_answers, "save_answer", return_value=None), mock.patch.object(
             module.rate_profiles, "allow_limiter_wait"
-        ):
+        ), mock.patch.object(module.litellm, "get_model_cost_map", return_value={}):
             yield module
         sys.modules.pop("pdf_research_assistant.query_once", None)
 
@@ -487,7 +488,37 @@ def test_run_query_payload_returns_error_payload_when_query_execution_raises(que
         "ok": False,
         "error_type": "RuntimeError",
         "error": "boom",
+        "cost": 0.0,
     }
+
+
+def _fail_after_tracked_cost(query_once_module, tracked_cost, build_error=None):
+    """Run a question that fails after its PaperQA run adds tracked_cost to a fake cost tracker."""
+    tracker = SimpleNamespace(lifetime_cost_usd=1.5)
+
+    def run(coro):
+        tracker.lifetime_cost_usd += tracked_cost
+        raise RuntimeError("rate limited")
+
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings(), side_effect=build_error)
+    query_once_module.run_or_ensure = mock.Mock(side_effect=run)
+    with mock.patch.object(query_once_module, "GLOBAL_COST_TRACKER", tracker),             mock.patch.object(query_once_module, "enable_cost_tracking"):
+        return query_once_module.run_query_payload("Q")
+
+
+def test_run_query_payload_reports_what_a_failed_question_spent_before_failing(query_once_module):
+    result = _fail_after_tracked_cost(query_once_module, tracked_cost=0.0042)
+
+    assert result["ok"] is False
+    assert result["error"] == "rate limited"
+    assert result["cost"] == pytest.approx(0.0042)
+
+
+def test_run_query_payload_reports_no_cost_when_the_question_fails_before_tracking_starts(query_once_module):
+    result = _fail_after_tracked_cost(query_once_module, tracked_cost=0.0042, build_error=ValueError("bad .env"))
+
+    assert result == {"ok": False, "error_type": "ValueError", "error": "bad .env", "cost": 0.0}
+    query_once_module.run_or_ensure.assert_not_called()
 
 
 def test_main_returns_exit_code_1_when_question_argument_count_is_incorrect(query_once_module):
@@ -635,3 +666,194 @@ def test_utf8_output_switches_a_stream_to_utf8(query_once_module):
     query_once_module.use_utf8_output(stream)
 
     stream.reconfigure.assert_called_once_with(encoding="utf-8")
+
+
+def test_run_query_payload_searches_the_index_as_it_is_without_indexing_new_pdfs(query_once_module):
+    """New PDFs are indexed by Rebuild the index, not in the middle of a question."""
+    settings = _stub_settings()
+    settings.agent.rebuild_index = True
+    seen = {}
+    response = SimpleNamespace(session=SimpleNamespace(formatted_answer="A", cost=0.0, contexts=[]))
+    query_once_module.build_settings = mock.Mock(return_value=settings)
+    query_once_module.run_agent = mock.Mock(
+        side_effect=lambda _docs, _question, used, **_kwargs: seen.update(rebuild_index=used.agent.rebuild_index)
+    )
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value={}):
+        query_once_module.run_query_payload("Q")
+
+    assert seen == {"rebuild_index": False}
+
+
+def _run_waiting_main(module, stdin_text, payload=None):
+    import io
+
+    with mock.patch.object(module.sys, "argv", ["query_once.py", module.WAIT_FLAG]), \
+            mock.patch.object(module.sys, "stdin", io.StringIO(stdin_text)), \
+            mock.patch.object(module, "run_query_payload", return_value=payload or {"ok": True}) as payload_mock, \
+            mock.patch("builtins.print") as print_mock:
+        exit_code = module.main()
+    return exit_code, payload_mock, print_mock
+
+
+def test_main_waits_for_a_question_and_its_one_off_settings_on_stdin(query_once_module):
+    payload = {"ok": True, "answer": "Answer text", "cost": 0.5, "contexts": []}
+    request = json.dumps({"question": "What is new?", "one_off": {"evidence_k": 3}}) + "\n"
+
+    exit_code, payload_mock, print_mock = _run_waiting_main(query_once_module, request, payload)
+
+    assert exit_code == 0
+    payload_mock.assert_called_once_with("What is new?", {"evidence_k": 3})
+    print_mock.assert_called_once_with(json.dumps(payload, ensure_ascii=False))
+
+
+def test_main_waiting_for_a_question_accepts_no_one_off_settings(query_once_module):
+    request = json.dumps({"question": "What is new?", "one_off": None}) + "\n"
+
+    exit_code, payload_mock, _print_mock = _run_waiting_main(query_once_module, request)
+
+    assert exit_code == 0
+    payload_mock.assert_called_once_with("What is new?", None)
+
+
+def test_main_exits_quietly_when_stdin_closes_before_a_question_arrives(query_once_module):
+    """The app or the CLI closed, so the spare process has nothing to do."""
+    exit_code, payload_mock, print_mock = _run_waiting_main(query_once_module, "")
+
+    assert exit_code == 0
+    payload_mock.assert_not_called()
+    print_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "request_line",
+    [
+        "not json\n",
+        "[1, 2]\n",
+        json.dumps({"one_off": None}) + "\n",
+        json.dumps({"question": 3, "one_off": None}) + "\n",
+        json.dumps({"question": "Q", "one_off": [1]}) + "\n",
+    ],
+    ids=["not-json", "not-an-object", "no-question", "question-not-text", "one-off-not-an-object"],
+)
+def test_main_rejects_a_waited_request_that_is_not_a_question(query_once_module, request_line):
+    exit_code, payload_mock, print_mock = _run_waiting_main(query_once_module, request_line)
+
+    assert exit_code == 1
+    payload_mock.assert_not_called()
+    print_mock.assert_called_once_with(json.dumps({"ok": False, "error": query_once_module.USAGE_ERROR}))
+
+
+def test_main_loads_the_model_clients_before_waiting_for_a_question(query_once_module):
+    """LiteLLM imports the OpenAI client only on its first call, so the spare process does that while it waits."""
+    order = []
+    request = json.dumps({"question": "Q", "one_off": None}) + "\n"
+
+    class Stdin:
+        def readline(self):
+            order.append("question")
+            return request
+
+    with mock.patch.object(query_once_module, "preload_model_clients", side_effect=lambda: order.append("preload")), \
+            mock.patch.object(query_once_module.sys, "argv", ["query_once.py", query_once_module.WAIT_FLAG]), \
+            mock.patch.object(query_once_module.sys, "stdin", Stdin()), \
+            mock.patch.object(query_once_module, "run_query_payload", return_value={"ok": True}), \
+            mock.patch("builtins.print"):
+        query_once_module.main()
+
+    assert order == ["preload", "question"]
+
+
+def test_main_with_the_question_on_the_command_line_loads_nothing_ahead(query_once_module):
+    with mock.patch.object(query_once_module, "preload_model_clients") as preload, \
+            mock.patch.object(query_once_module.sys, "argv", ["query_once.py", "Q"]), \
+            mock.patch.object(query_once_module, "run_query_payload", return_value={"ok": True}), \
+            mock.patch("builtins.print"):
+        query_once_module.main()
+
+    preload.assert_not_called()
+
+
+def test_preload_model_clients_imports_each_client_module(query_once_module):
+    with mock.patch.object(query_once_module.importlib, "import_module") as import_module,             mock.patch.object(query_once_module.litellm, "get_model_cost_map"):
+        query_once_module.preload_model_clients()
+
+    assert [call.args[0] for call in import_module.call_args_list] == list(query_once_module.MODEL_CLIENT_MODULES)
+
+
+def test_preload_model_clients_skips_a_module_that_a_newer_library_has_moved(query_once_module):
+    def import_module(name):
+        if name == query_once_module.MODEL_CLIENT_MODULES[0]:
+            raise ImportError(name)
+
+    with mock.patch.object(query_once_module.importlib, "import_module", side_effect=import_module) as imported,             mock.patch.object(query_once_module.litellm, "get_model_cost_map"):
+        query_once_module.preload_model_clients()
+
+    assert imported.call_count == len(query_once_module.MODEL_CLIENT_MODULES)
+
+
+def test_the_model_client_modules_exist_in_the_installed_libraries(query_once_module):
+    import importlib.util
+
+    for name in query_once_module.MODEL_CLIENT_MODULES:
+        assert importlib.util.find_spec(name) is not None, name
+
+
+def test_preload_model_clients_fetches_the_price_list_the_embedding_model_reads(query_once_module):
+    with mock.patch.object(query_once_module.importlib, "import_module"),             mock.patch.object(query_once_module.litellm, "get_model_cost_map") as fetch:
+        query_once_module.preload_model_clients()
+
+    fetch.assert_called_once_with(url=query_once_module.EMBEDDING_PRICE_LIST_URL)
+
+
+def test_the_price_list_url_is_the_one_paperqas_embedding_model_fetches(query_once_module):
+    import inspect
+
+    from lmi import embeddings
+
+    assert query_once_module.EMBEDDING_PRICE_LIST_URL in inspect.getsource(embeddings)
+
+
+def _fake_fetch():
+    return mock.Mock(side_effect=lambda url: {"url": url})
+
+
+def test_reuse_model_cost_map_fetches_each_price_list_once_per_process(query_once_module):
+    fetch = _fake_fetch()
+    with mock.patch.object(query_once_module.litellm, "get_model_cost_map", fetch):
+        query_once_module.reuse_model_cost_map()
+        first = query_once_module.litellm.get_model_cost_map("u1")
+        again = query_once_module.litellm.get_model_cost_map(url="u1")
+        other = query_once_module.litellm.get_model_cost_map("u2")
+
+    assert first is again
+    assert other == {"url": "u2"}
+    assert [call.args[0] for call in fetch.call_args_list] == ["u1", "u2"]
+
+
+def test_reuse_model_cost_map_twice_still_fetches_only_once(query_once_module):
+    fetch = _fake_fetch()
+    with mock.patch.object(query_once_module.litellm, "get_model_cost_map", fetch):
+        query_once_module.reuse_model_cost_map()
+        query_once_module.reuse_model_cost_map()
+        query_once_module.litellm.get_model_cost_map("u1")
+        query_once_module.litellm.get_model_cost_map("u1")
+
+    fetch.assert_called_once_with("u1")
+
+
+@pytest.mark.parametrize("argv_tail", [["Q"], ["--wait"]], ids=["command-line", "waiting"])
+def test_main_reuses_the_price_list_however_the_question_arrives(query_once_module, argv_tail):
+    import io
+
+    request = json.dumps({"question": "Q", "one_off": None}) + "\n"
+    with mock.patch.object(query_once_module, "reuse_model_cost_map") as reuse, \
+            mock.patch.object(query_once_module, "preload_model_clients"), \
+            mock.patch.object(query_once_module.sys, "argv", ["query_once.py", *argv_tail]), \
+            mock.patch.object(query_once_module.sys, "stdin", io.StringIO(request)), \
+            mock.patch.object(query_once_module, "run_query_payload", return_value={"ok": True}), \
+            mock.patch("builtins.print"):
+        query_once_module.main()
+
+    reuse.assert_called_once_with()

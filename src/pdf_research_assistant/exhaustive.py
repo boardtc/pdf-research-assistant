@@ -202,17 +202,22 @@ def read_index_files(index_dir: Path) -> tuple[dict[str, str], str | None]:
 
 
 def resolve_in_scope_paths(index_files: dict[str, str]) -> list[str]:
-    """Return every in-scope PDF: the manifest, or else all PDFs on disk or in the index."""
+    """Return every in-scope PDF: the manifest, or else all PDFs on disk or in the index, as the saved scope allows."""
     allowed_paths = bootstrap.get_allowed_paths()
     if allowed_paths:
         return sorted(allowed_paths)
+    _manifest_scope, recurse = bootstrap.saved_scope()
     paths = {bootstrap.normalize_file_location(file_location) for file_location in index_files}
     if bootstrap.PAPER_DIR.exists():
+        on_disk = bootstrap.PAPER_DIR.rglob("*") if recurse else bootstrap.PAPER_DIR.glob("*")
         paths.update(
             bootstrap.normalize_relative_pdf_path(path.relative_to(bootstrap.PAPER_DIR))
-            for path in bootstrap.PAPER_DIR.rglob("*")
+            for path in on_disk
             if path.suffix.lower() in bootstrap.PDF_EXTENSIONS
         )
+    if not recurse:
+        # PaperQA drops entries in subfolders from the index once they are no longer searched.
+        paths = {path for path in paths if "/" not in path}
     return sorted(paths)
 
 

@@ -9,9 +9,11 @@ a second rebuild beside it.
 """
 
 import os
+import pickle
 import subprocess
 import sys
 import threading
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -19,19 +21,31 @@ HELPER = Path(__file__).with_name("rebuild.py")
 LOG_NAME = "rebuild.log"
 LOG_TAIL_LINES = 30
 PDF_SUFFIX = ".pdf"
+STOP_NAME = "rebuild.stop"
+# The rebuild process looks for this file between PDFs; rebuild.py reads the same names.
+STOP_ENV = "PDF_RESEARCH_STOP_FILE"
+STOPPED_EXIT_CODE = 3
+# PaperQA's marker in files.zip for a PDF it could not index (bootstrap.py repeats it for the app).
+FAILED_DOCUMENT_ADD_ID = "ERROR"
 
 _state: dict = {"run": None, "result": None}
 _start_lock = threading.Lock()
 
 
-def count_pdfs(paper_dir: Path) -> int:
-    """Return how many PDFs sit under a folder, subfolders included."""
-    return sum(1 for path in Path(paper_dir).rglob("*") if path.suffix.lower() == PDF_SUFFIX)
+def count_pdfs(paper_dir: Path, recurse: bool = True) -> int:
+    """Return how many PDFs sit in a folder, in its subfolders too unless recurse is off."""
+    paths = Path(paper_dir).rglob("*") if recurse else Path(paper_dir).glob("*")
+    return sum(1 for path in paths if path.suffix.lower() == PDF_SUFFIX)
 
 
 def log_path(index_dir: Path) -> Path:
     """Return where a rebuild writes its output: beside the index folders, replaced by each rebuild."""
     return Path(index_dir).parent / LOG_NAME
+
+
+def stop_path(index_dir: Path) -> Path:
+    """Return the file whose presence asks a running rebuild to stop: beside the log."""
+    return Path(index_dir).parent / STOP_NAME
 
 
 def get_run() -> dict | None:
@@ -49,6 +63,8 @@ def start(index_dir: Path, pdf_count: int) -> dict:
             return _state["run"]
         log = log_path(index_dir)
         log.parent.mkdir(parents=True, exist_ok=True)
+        # A request left by an earlier rebuild must not stop this one before it begins.
+        stop_path(index_dir).unlink(missing_ok=True)
         with open(log, "w", encoding="utf-8") as handle:
             process = subprocess.Popen(
                 # Unbuffered, so the log can be read while the rebuild runs.
@@ -56,7 +72,7 @@ def start(index_dir: Path, pdf_count: int) -> dict:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 # File names in the output may hold characters the console encoding cannot write.
-                env=os.environ | {"PYTHONIOENCODING": "utf-8"},
+                env=os.environ | {"PYTHONIOENCODING": "utf-8", STOP_ENV: str(stop_path(index_dir))},
             )
         _state["result"] = None
         _state["run"] = {
@@ -68,6 +84,37 @@ def start(index_dir: Path, pdf_count: int) -> dict:
             "started": datetime.now(),
         }
         return _state["run"]
+
+
+def request_stop(run: dict) -> None:
+    """Ask a running rebuild to stop at its next safe point: no new PDF is started, those under way are saved.
+
+    Nothing is killed, so the index is never cut off in the middle of a write.
+    """
+    stop_path(run["index_dir"]).write_text("stop", encoding="utf-8")
+    run["stopping"] = True
+
+
+def is_stopping(run: dict) -> bool:
+    return bool(run.get("stopping"))
+
+
+def read_index_state(index_dir: Path) -> dict:
+    """Say whether PaperQA's file list in an index can be read, and how many PDFs it holds.
+
+    PaperQA rewrites files.zip in place, so a rebuild cut off at the wrong moment could leave it half written.
+    """
+    file_list = Path(index_dir) / "files.zip"
+    if not file_list.exists():
+        # Nothing was saved yet, so there is nothing to be damaged.
+        return {"usable": True, "indexed": 0}
+    try:
+        files = pickle.loads(zlib.decompress(file_list.read_bytes()))
+    except Exception:
+        return {"usable": False, "indexed": 0}
+    if not isinstance(files, dict):
+        return {"usable": False, "indexed": 0}
+    return {"usable": True, "indexed": sum(1 for status in files.values() if status != FAILED_DOCUMENT_ADD_ID)}
 
 
 def note_progress(run: dict, done: int) -> int:
@@ -103,10 +150,15 @@ def collect_result() -> dict | None:
     if run is None or run["process"].poll() is None:
         return None
     _state["run"] = None
+    stop_path(run["index_dir"]).unlink(missing_ok=True)
+    returncode = run["process"].poll()
     _state["result"] = {
-        "ok": run["process"].poll() == 0,
+        "ok": returncode == 0,
+        "stopped": returncode == STOPPED_EXIT_CODE,
         "log_path": str(run["log_path"]),
         "lines": read_log_tail(run["log_path"]),
+        "index_dir": run["index_dir"],
+        "index": read_index_state(run["index_dir"]),
     }
     return _state["result"]
 

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from paperqa import Settings
 from paperqa.settings import AgentSettings, AnswerSettings, IndexSettings, ParsingSettings
 
-from pdf_research_assistant import local_llm, rate_profiles, saved_answers, saved_settings
+from pdf_research_assistant import local_llm, rate_profiles, saved_answers, saved_settings, scope_change, settings_groups
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -96,13 +96,29 @@ def load_allowed_manifest_paths(manifest_path: Path = MANIFEST_PATH) -> set[str]
         }
 
 
-ALLOWED_PATHS = load_allowed_manifest_paths()
-USE_MANIFEST = bool(ALLOWED_PATHS)
+def saved_scope() -> tuple[str, bool]:
+    """Return the saved manifest scope and whether subfolders are searched; PaperQA's own defaults when unsaved.
+
+    Every part of the app that decides which PDFs are in scope reads these two choices, so the index, the
+    counts, exhaustive search and the estimates all agree.
+    """
+    saved = saved_settings.load()
+    return (
+        saved.get("manifest_scope", settings_groups.MANIFEST_SCOPE_USE),
+        saved.get("recurse_subdirectories", True),
+    )
+
+
+def manifest_paths_in_scope(
+    manifest_scope: str, recurse: bool, manifest_path: Path = MANIFEST_PATH
+) -> set[str]:
+    """Return the paper list's PDF paths that a scope allows; empty when the list is left out or has no paths."""
+    return scope_change.manifest_paths_in_scope(load_allowed_manifest_paths(manifest_path), manifest_scope, recurse)
 
 
 def get_allowed_paths(manifest_path: Path = MANIFEST_PATH) -> set[str]:
-    """Return the currently allowed relative PDF paths from the manifest, if any."""
-    return load_allowed_manifest_paths(manifest_path)
+    """Return the relative PDF paths the saved scope allows from the manifest; empty when no manifest is in use."""
+    return manifest_paths_in_scope(*saved_scope(), manifest_path)
 
 
 def use_manifest(manifest_path: Path = MANIFEST_PATH) -> bool:
@@ -150,6 +166,7 @@ def get_indexed_doc_count(index_dir: Path = INDEX_DIR) -> int:
         return 0
     current_allowed_paths = get_allowed_paths()
     current_use_manifest = bool(current_allowed_paths)
+    _manifest_scope, recurse = saved_scope()
     indexed = set()
     for file_index in iter_index_file_archives(index_dir):
         try:
@@ -160,9 +177,46 @@ def get_indexed_doc_count(index_dir: Path = INDEX_DIR) -> int:
             if status == FAILED_DOCUMENT_ADD_ID:
                 continue
             normalized = normalize_file_location(file_location)
+            # PaperQA removes entries in subfolders from the index once they are no longer searched.
+            if not recurse and "/" in normalized:
+                continue
             if not current_use_manifest or normalized in current_allowed_paths:
                 indexed.add(normalized)
     return len(indexed)
+
+
+def get_index_entries(index_dir: Path) -> set[str]:
+    """Return every PDF the index lists in the manifest form, failed ones included, whatever the scope."""
+    entries = set()
+    if not index_dir.exists():
+        return entries
+    for file_index in iter_index_file_archives(index_dir):
+        try:
+            data = pickle.loads(zlib.decompress(file_index.read_bytes()))
+        except Exception:
+            continue
+        entries.update(normalize_file_location(file_location) for file_location in data)
+    return entries
+
+
+def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
+    """Return the PDFs in the PDF folder that the index does not list yet, as paths under the folder.
+
+    These are the files PaperQA would index on a rebuild: everything in the folder, and its subfolders when
+    they are searched, that only_manifest lets through. A PDF that failed to index is listed in the index
+    already, so it is not counted here.
+    """
+    if not paper_dir.exists():
+        return []
+    # Read once here, where only_manifest would read the manifest again for every file.
+    allowed_paths = get_allowed_paths()
+    _manifest_scope, recurse = saved_scope()
+    in_scope = set()
+    for path in paper_dir.rglob("*") if recurse else paper_dir.iterdir():
+        relative = normalize_relative_pdf_path(path.relative_to(paper_dir))
+        if relative in allowed_paths if allowed_paths else path.suffix.lower() in PDF_EXTENSIONS:
+            in_scope.add(relative)
+    return sorted(in_scope - get_index_entries(index_dir))
 
 
 def get_failed_files(index_dir: Path = INDEX_DIR) -> list[str]:

@@ -50,6 +50,8 @@ CHANGES = {
     "overlap": lambda s: s.parsing.reader_config.update(overlap=12),
     "full_page": lambda s: s.parsing.reader_config.update(full_page=True),
     "multimodal": _set_multimodal,
+    "manifest_scope": lambda s: setattr(s.agent.index, "manifest_file", None),
+    "recurse_subdirectories": lambda s: setattr(s.agent.index, "recurse_subdirectories", False),
 }
 
 
@@ -80,7 +82,10 @@ def test_every_setting_is_in_exactly_one_group():
         "full_page",
         "multimodal",
     ]
-    assert [setting.key for setting in settings_groups.SETTINGS] == instant + reindex
+    scope = [setting.key for setting in settings_groups.SCOPE_SETTINGS]
+    assert scope == ["manifest_scope", "recurse_subdirectories"]
+    assert [setting.key for setting in settings_groups.SETTINGS] == instant + reindex + scope
+    assert all(not setting.needs_reindex for setting in settings_groups.SCOPE_SETTINGS)
     assert all(not setting.needs_reindex for setting in settings_groups.INSTANT_SETTINGS)
     assert all(setting.needs_reindex for setting in settings_groups.REINDEX_SETTINGS)
 
@@ -261,6 +266,8 @@ def test_the_settings_that_can_be_saved_from_the_sidebar():
         "overlap",
         "full_page",
         "multimodal",
+        "manifest_scope",
+        "recurse_subdirectories",
     ]
     assert all(setting.check is not None for setting in settings_groups.SETTINGS if setting.write is not None)
 
@@ -721,3 +728,92 @@ def test_search_steps_help_explains_both_ways_of_searching():
 
     assert "Planned by the model" in help_text
     assert "Fixed steps" in help_text
+
+
+def _settings_with_paper_list(tmp_path):
+    settings = _real_settings(tmp_path)
+    settings.agent.index.manifest_file = tmp_path / "manifest.csv"
+    return settings
+
+
+@pytest.mark.parametrize("setting", settings_groups.SCOPE_SETTINGS, ids=lambda setting: setting.key)
+def test_changing_a_scope_setting_keeps_the_paperqa_index_name(setting, tmp_path):
+    """The reason these settings need a warning of their own: PaperQA keeps the index but changes what is in it."""
+    settings = _settings_with_paper_list(tmp_path)
+    name_before = settings.get_index_name()
+    value_before = setting.read(settings)
+
+    CHANGES[setting.key](settings)
+
+    assert setting.read(settings) != value_before
+    assert settings.get_index_name() == name_before
+
+
+def test_scope_settings_are_real_paperqa_index_settings():
+    from paperqa.settings import IndexSettings
+
+    assert {"manifest_file", "recurse_subdirectories"} <= set(IndexSettings.model_fields)
+
+
+def test_the_paper_list_starts_in_use_when_paperqa_has_one_and_off_when_it_has_none(tmp_path):
+    setting = settings_groups.get_setting("manifest_scope")
+
+    assert settings_groups.current_choice(setting, _settings_with_paper_list(tmp_path)) == "manifest"
+    assert settings_groups.current_choice(setting, _real_settings(tmp_path)) == "all"
+
+
+def test_choosing_all_pdfs_takes_the_paper_list_out_of_paperqa_s_settings(tmp_path):
+    settings = _settings_with_paper_list(tmp_path)
+
+    settings_groups.get_setting("manifest_scope").write(settings, "all")
+
+    assert settings.agent.index.manifest_file is None
+
+
+def test_choosing_the_paper_list_leaves_the_path_the_app_set(tmp_path):
+    settings = _settings_with_paper_list(tmp_path)
+
+    settings_groups.get_setting("manifest_scope").write(settings, "manifest")
+
+    assert settings.agent.index.manifest_file == tmp_path / "manifest.csv"
+
+
+def test_the_paper_list_choice_offers_the_list_or_all_pdfs_by_name():
+    check = settings_groups.get_setting("manifest_scope").check
+
+    assert check.values == ("manifest", "all")
+    assert check.name_for("manifest") == "Only the PDFs in the paper list"
+    assert check.name_for("all") == "All PDFs in the folder"
+
+
+def test_writing_the_subfolder_choice_changes_paperqa_s_recursion(tmp_path):
+    settings = _real_settings(tmp_path)
+
+    settings_groups.get_setting("recurse_subdirectories").write(settings, False)
+
+    assert settings.agent.index.recurse_subdirectories is False
+    assert settings_groups.current_choice(settings_groups.get_setting("recurse_subdirectories"), settings) is False
+
+
+@pytest.mark.parametrize("key", ["manifest_scope", "recurse_subdirectories"])
+def test_scope_settings_can_be_saved_and_say_the_index_changes_in_place(key):
+    setting = settings_groups.get_setting(key)
+
+    assert setting.write is not None
+    assert not setting.needs_reindex
+    assert "same index" in setting.help
+    assert setting.help.endswith(".")
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "allowed"),
+    [
+        ("manifest_scope", "manifest", True),
+        ("manifest_scope", "all", True),
+        ("manifest_scope", "some", False),
+        ("recurse_subdirectories", False, True),
+        ("recurse_subdirectories", "no", False),
+    ],
+)
+def test_scope_values_are_checked_like_every_saved_setting(key, value, allowed):
+    assert settings_groups.usable(key, value) is allowed

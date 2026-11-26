@@ -55,6 +55,8 @@ def _fake_settings(**changes):
         "answer_template": None,
         "grounding": None,
         "pre_prompt": None,
+        "manifest_file": None,
+        "recurse_subdirectories": True,
     } | changes
     settings = SimpleNamespace(
         llm=values["llm"],
@@ -87,6 +89,8 @@ def _fake_settings(**changes):
             index=SimpleNamespace(
                 paper_directory=values["paper_directory"],
                 use_absolute_paper_directory=values["use_absolute_paper_directory"],
+                manifest_file=values["manifest_file"],
+                recurse_subdirectories=values["recurse_subdirectories"],
             ),
             agent_llm=values["llm"],
             agent_llm_config={},
@@ -122,6 +126,7 @@ def imported_pdf_research_assistant(
     clicked_keys=(),
     rebuild_patches=None,
     index_names=None,
+    unindexed_files=None,
 ):
     streamlit_module = ModuleType("streamlit")
     bootstrap_module = ModuleType("pdf_research_assistant.bootstrap")
@@ -144,6 +149,9 @@ def imported_pdf_research_assistant(
         # And the button that puts the sidebar settings back to the defaults.
         if str(key or "").startswith("answer_settings_"):
             return False
+        # And the scope settings' confirm and cancel buttons.
+        if str(key or "").startswith("scope_"):
+            return key in clicked_keys
         # And the one that does the same for the library and index settings.
         if str(key or "").startswith("index_settings_"):
             return False
@@ -192,8 +200,13 @@ def imported_pdf_research_assistant(
 
     # Mock bootstrap lookups so each import scenario can model a specific index and manifest state.
     bootstrap_module.get_allowed_paths = mock.Mock(return_value=set() if allowed_paths is None else allowed_paths)
+    bootstrap_module.saved_scope = mock.Mock(return_value=("manifest", True))
+    bootstrap_module.manifest_exists = mock.Mock(return_value=bool(allowed_paths))
+    bootstrap_module.load_allowed_manifest_paths = mock.Mock(return_value=set(allowed_paths or ()))
+    bootstrap_module.get_index_entries = mock.Mock(return_value=set())
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
+    bootstrap_module.get_unindexed_files = mock.Mock(return_value=[] if unindexed_files is None else unindexed_files)
     bootstrap_module.get_active_index_dir = mock.Mock(return_value=active_index_dir)
     # Like the real build_settings, which always applies a rate profile.
     bootstrap_module.build_settings = mock.Mock(return_value=_fake_settings(
@@ -216,7 +229,7 @@ def imported_pdf_research_assistant(
         if subprocess_result is None:
             subprocess_result = SimpleNamespace(returncode=0, stdout='{"ok": true, "answer": "", "cost": 0.0, "contexts": []}', stderr="")
 
-        # Mock subprocess.run before import so question-submission scenarios never hit the real helper process.
+        # Mock subprocess.run before import so nothing on the page ever starts a real process.
         # Point the saved sidebar choices at a file that does not exist, so a real saved file never leaks in.
         with mock.patch("subprocess.run", return_value=subprocess_result), mock.patch("time.sleep"), \
                 mock.patch("pdf_research_assistant.saved_settings.SETTINGS_PATH", Path("tests/.tmp/no-saved-settings.json")),                 mock.patch("pdf_research_assistant.research_presets.PRESETS_PATH", Path("tests/.tmp/no-presets.json")), \
@@ -242,6 +255,12 @@ def imported_pdf_research_assistant(
                     "pdf_research_assistant.index_record",
                     remember=mock.Mock(return_value=False),
                     find_changes=mock.Mock(return_value=index_changes),
+                ), \
+                mock.patch.multiple(
+                    # Questions get the result a test gives, and no real query process is ever started.
+                    "pdf_research_assistant.query_client",
+                    run=mock.Mock(return_value=subprocess_result),
+                    prepare=mock.Mock(),
                 ), \
                 mock.patch.multiple(
                     # Read only the index names a test gives, and never save one for real.
@@ -423,6 +442,17 @@ def test_escape_dollars_stops_streamlit_reading_amounts_as_maths(pdf_research_as
     assert result == r"\$0.01 to \$0.03"
 
 
+def test_escape_dollars_leaves_an_already_escaped_dollar_alone(pdf_research_assistant_module):
+    escape = pdf_research_assistant_module.escape_dollars
+
+    assert escape(r"\$5 and $10") == r"\$5 and \$10"
+    assert escape(escape("$5 and $10")) == r"\$5 and \$10"
+
+
+def test_escape_dollars_leaves_text_without_dollars_alone(pdf_research_assistant_module):
+    assert pdf_research_assistant_module.escape_dollars("No money here") == "No money here"
+
+
 def test_pending_plan_escapes_dollar_amounts():
     state = _empty_state() | {"exhaustive_pending": {"question": "Cost of $5 and $6?", "plan": READY_PLAN}}
 
@@ -433,12 +463,14 @@ def test_pending_plan_escapes_dollar_amounts():
     assert r"Cost of \$5 and \$6?" in text
 
 
-def test_finished_search_escapes_dollar_amounts_in_the_message(tmp_path):
+def test_finished_search_keeps_the_message_unescaped_so_it_copies_as_typed(tmp_path):
     (tmp_path / "summary.json").write_text(json.dumps(FINISHED_SUMMARY), encoding="utf-8")
     state = _empty_state() | {"exhaustive_run": _active_run(tmp_path, 0)}
 
     with imported_pdf_research_assistant(app_state=state) as module:
-        assert r"Actual cost: \$0.5000" in module.st.session_state.history[-1]["content"]
+        content = module.st.session_state.history[-1]["content"]
+        assert "Actual cost: $0.5000" in content
+        assert r"\$" not in content
 
 
 def test_full_report_escapes_dollars_on_screen_but_not_in_the_download(tmp_path):
@@ -899,28 +931,27 @@ def test_run_query_subprocess_returns_answer_cost_contexts_and_settings_for_succ
         stderr="",
     )
 
-    # Mock subprocess.run so the test can supply the exact helper output contract.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
+    # Mock the query client so the test can supply the exact helper output contract.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result) as run_mock:
         answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert (answer, cost, contexts, settings, save_error) == ("Answer", 0.25, [{"name": "Source"}], recorded, None)
-    assert run_mock.call_args.args[0][0] == pdf_research_assistant_module.sys.executable
-    assert run_mock.call_args.args[0][-1] == "What is new?"
+    run_mock.assert_called_once_with("What is new?", None)
 
 
 def test_run_query_subprocess_sends_one_off_settings_after_the_question(pdf_research_assistant_module):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result) as run_mock:
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result) as run_mock:
         pdf_research_assistant_module.run_query_subprocess("What is new?", {"evidence_k": 3})
 
-    assert run_mock.call_args.args[0][-2:] == ["What is new?", json.dumps({"evidence_k": 3})]
+    run_mock.assert_called_once_with("What is new?", {"evidence_k": 3})
 
 
 def test_run_query_subprocess_returns_no_settings_when_the_payload_has_none(pdf_research_assistant_module):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         answer, cost, contexts, settings, save_error = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert (contexts, settings, save_error) == ([], None, None)
@@ -930,7 +961,7 @@ def test_run_query_subprocess_passes_on_why_the_answer_could_not_be_kept(pdf_res
     payload = {"ok": True, "answer": "Answer", "cost": 0.0, "save_error": "OSError: disk full"}
     result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         returned = pdf_research_assistant_module.run_query_subprocess("What is new?")
 
     assert returned[-1] == "OSError: disk full"
@@ -941,8 +972,8 @@ def test_run_query_subprocess_raises_subprocess_error_message_when_process_fails
 ):
     result = SimpleNamespace(returncode=1, stdout="   ", stderr="subprocess failed")
 
-    # Mock subprocess.run so the function follows the non-zero-returncode branch with empty stdout.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function follows the non-zero-returncode branch with empty stdout.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="subprocess failed"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -952,8 +983,8 @@ def test_run_query_subprocess_raises_invalid_query_response_when_stdout_is_not_j
 ):
     result = SimpleNamespace(returncode=0, stdout="not json", stderr="")
 
-    # Mock subprocess.run so the function reaches the JSON parsing error branch.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function reaches the JSON parsing error branch.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="not json"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -963,8 +994,8 @@ def test_run_query_subprocess_raises_stderr_message_when_stdout_is_not_json_but_
 ):
     result = SimpleNamespace(returncode=0, stdout="not json", stderr="better error")
 
-    # Mock subprocess.run so stderr takes precedence after JSON decoding fails.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so stderr takes precedence after JSON decoding fails.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="better error"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -974,8 +1005,8 @@ def test_run_query_subprocess_raises_stdout_message_when_stdout_is_not_json_but_
 ):
     result = SimpleNamespace(returncode=0, stdout="plain text failure", stderr="   ")
 
-    # Mock subprocess.run so stdout becomes the fallback error message after JSON decoding fails.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so stdout becomes the fallback error message after JSON decoding fails.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="plain text failure"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -989,10 +1020,23 @@ def test_run_query_subprocess_raises_payload_error_type_and_message_when_query_p
         stderr="",
     )
 
-    # Mock subprocess.run so the function reaches the application-level error payload branch.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
-        with pytest.raises(RuntimeError, match="ValueError: bad payload"):
+    # Mock the query client so the function reaches the application-level error payload branch.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
+        with pytest.raises(pdf_research_assistant_module.QueryFailedError, match="ValueError: bad payload") as caught:
             pdf_research_assistant_module.run_query_subprocess("What is new?")
+    # A payload from before failed questions carried a cost counts as spending nothing.
+    assert caught.value.cost == 0.0
+
+
+def test_run_query_subprocess_passes_on_what_a_failed_question_spent(pdf_research_assistant_module):
+    payload = {"ok": False, "error_type": "RateLimitError", "error": "slow down", "cost": 0.0042}
+    result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
+        with pytest.raises(RuntimeError, match="RateLimitError: slow down") as caught:
+            pdf_research_assistant_module.run_query_subprocess("What is new?")
+
+    assert caught.value.cost == 0.0042
 
 
 def test_run_query_subprocess_defaults_unknown_error_type_and_message_when_error_payload_fields_are_missing(
@@ -1000,8 +1044,8 @@ def test_run_query_subprocess_defaults_unknown_error_type_and_message_when_error
 ):
     result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": False}), stderr="")
 
-    # Mock subprocess.run so the function exercises the default error-type and error-message fallbacks.
-    with mock.patch.object(pdf_research_assistant_module.subprocess, "run", return_value=result):
+    # Mock the query client so the function exercises the default error-type and error-message fallbacks.
+    with mock.patch.object(pdf_research_assistant_module.query_client, "run", return_value=result):
         with pytest.raises(RuntimeError, match="Error: Unknown error"):
             pdf_research_assistant_module.run_query_subprocess("What is new?")
 
@@ -1037,20 +1081,21 @@ def test_import_warns_when_manifest_index_is_missing():
         indexed_count=0,
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will rebuild the index for 2 manifest PDFs, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+            "for 2 manifest PDFs before asking one. It may take a long time."
         )
-        module.st.info.assert_called_once_with(
-            "A rebuild starts only when you click **Rebuild the index** or submit a question below."
-        )
+        module.st.info.assert_not_called()
 
 
-def test_import_warns_when_manifest_index_is_incomplete():
+def test_import_warns_when_manifest_pdfs_in_the_folder_are_not_indexed_yet():
     with imported_pdf_research_assistant(
         allowed_paths={"paper_a.pdf", "paper_b.pdf", "paper_c.pdf"},
         indexed_count=2,
+        unindexed_files=["paper_c.pdf"],
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index is incomplete: 2 of 3 manifest PDFs appear indexed. The next question should continue or trigger indexing work."
+            "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+            "Click **Rebuild the index** to add it."
         )
 
 
@@ -1060,9 +1105,9 @@ def test_import_warns_when_non_manifest_index_is_missing():
         indexed_count=0,
     ) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will build the PDF index, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."
         )
-        module.st.info.assert_called_once_with("No manifest.csv was found, so all PDFs under PAPER_DIR are in scope.")
+        module.st.info.assert_called_once_with("No paper list is in use, so all PDFs under PAPER_DIR are in scope.")
 
 
 def test_import_shows_manifest_index_caption_when_manifest_index_is_available():
@@ -1202,48 +1247,100 @@ def test_import_question_submission_error_renders_diagnostics_and_still_appends_
 
 
 @pytest.mark.parametrize(
-    ("indexed_count", "manifest_count", "expected"),
+    ("indexed_count", "manifest_count", "unindexed_count", "expected"),
     [
         (
             0,
             2,
+            2,
             [
                 (
                     "warning",
-                    "Index not found. The first question will rebuild the index for 2 manifest PDFs, "
-                    "which may take a long time.",
+                    "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+                    "for 2 manifest PDFs before asking one. It may take a long time.",
                 ),
-                ("info", "A rebuild starts only when you click **Rebuild the index** or submit a question below."),
             ],
         ),
         (
-            2,
+            0,
+            0,
             3,
             [
                 (
                     "warning",
-                    "Index is incomplete: 2 of 3 manifest PDFs appear indexed. "
-                    "The next question should continue or trigger indexing work.",
-                )
+                    "Index not found. Questions search only the index, so click **Rebuild the index** to build it "
+                    "before asking one. It may take a long time.",
+                ),
+                ("info", "No paper list is in use, so all PDFs under PAPER_DIR are in scope."),
+            ],
+        ),
+        (2, 3, 0, [("caption", "Index available for 2 manifest PDFs.")]),
+        (4, 0, 0, [("caption", "Index available for 4 PDFs under PAPER_DIR.")]),
+        (
+            2,
+            3,
+            1,
+            [
+                ("caption", "Index available for 2 manifest PDFs."),
+                (
+                    "warning",
+                    "1 PDF in the PDF folder is not in the index yet, so questions do not search it. "
+                    "Click **Rebuild the index** to add it.",
+                ),
             ],
         ),
         (
+            4,
             0,
-            0,
+            3,
             [
-                ("warning", "Index not found. The first question will build the PDF index, which may take a long time."),
-                ("info", "No manifest.csv was found, so all PDFs under PAPER_DIR are in scope."),
+                ("caption", "Index available for 4 PDFs under PAPER_DIR."),
+                (
+                    "warning",
+                    "3 PDFs in the PDF folder are not in the index yet, so questions do not search them. "
+                    "Click **Rebuild the index** to add them.",
+                ),
             ],
         ),
-        (2, 2, [("caption", "Index available for 2 manifest PDFs.")]),
-        (4, 0, [("caption", "Index available for 4 PDFs under PAPER_DIR.")]),
     ],
-    ids=["manifest-missing", "manifest-incomplete", "no-manifest-missing", "manifest-ready", "no-manifest-ready"],
+    ids=[
+        "manifest-missing",
+        "no-manifest-missing",
+        "manifest-ready",
+        "no-manifest-ready",
+        "one-pdf-not-indexed",
+        "several-pdfs-not-indexed",
+    ],
 )
 def test_select_index_status_picks_the_banner_for_each_index_state(
-    pdf_research_assistant_module, indexed_count, manifest_count, expected
+    pdf_research_assistant_module, indexed_count, manifest_count, unindexed_count, expected
 ):
-    assert pdf_research_assistant_module.select_index_status(indexed_count, manifest_count) == expected
+    assert (
+        pdf_research_assistant_module.select_index_status(indexed_count, manifest_count, unindexed_count) == expected
+    )
+
+
+def test_the_page_says_when_the_pdf_folder_has_pdfs_not_yet_indexed():
+    with imported_pdf_research_assistant(indexed_count=2, unindexed_files=["new.pdf"]) as module:
+        module.bootstrap.get_unindexed_files.assert_called_once_with(Path(r"C:\index\active-shard"))
+        warnings = [str(call.args[0]) for call in module.st.warning.call_args_list]
+        keys = _button_keys(module)
+
+    assert any("1 PDF in the PDF folder is not in the index yet" in warning for warning in warnings)
+    assert "rebuild_offer_main" in keys
+
+
+def test_the_page_starts_a_spare_query_process_so_the_next_question_starts_quickly():
+    with imported_pdf_research_assistant() as module:
+        module.query_client.prepare.assert_called_once_with()
+
+
+def test_a_question_is_handed_to_the_query_client_with_its_one_off_settings():
+    result = SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "answer": "Answer", "cost": 0.0}), stderr="")
+
+    with imported_pdf_research_assistant(chat_input_value="What is new?", subprocess_result=result) as module:
+        module.query_client.run.assert_called_once_with("What is new?", {})
+        assert module.st.session_state.history[-1]["content"] == "Answer"
 
 
 def test_render_index_status_shows_each_message_at_its_level(pdf_research_assistant_module):
@@ -1948,7 +2045,7 @@ def test_page_warns_about_changed_index_settings_before_the_missing_index_banner
         module.index_record.find_changes.assert_called_once_with(settings, active_index_dir)
         assert module.st.warning.call_args_list == [
             mock.call(module.describe_index_changes(CHUNK_CHANGES)),
-            mock.call("Index not found. The first question will build the PDF index, which may take a long time."),
+            mock.call("Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."),
         ]
         captions = [call.args[0] for call in module.st.caption.call_args_list]
         assert "Changed. The index `pqa_index_old` was built with `5000`." in captions
@@ -1957,7 +2054,7 @@ def test_page_warns_about_changed_index_settings_before_the_missing_index_banner
 def test_page_shows_only_the_missing_index_banner_when_no_setting_changed():
     with imported_pdf_research_assistant(indexed_count=0, index_changes=None) as module:
         module.st.warning.assert_called_once_with(
-            "Index not found. The first question will build the PDF index, which may take a long time."
+            "Index not found. Questions search only the index, so click **Rebuild the index** to build it before asking one. It may take a long time."
         )
 
 
@@ -1989,6 +2086,7 @@ def test_render_sidebar_draws_instant_then_reindex_settings_then_usage_then_rese
         render_research_presets=steps.presets,
         render_instant_settings=steps.instant,
         render_reindex_settings=steps.reindex,
+        render_scope_settings=steps.scope,
         render_usage=steps.usage,
     ):
         assert module.render_sidebar(app_state, settings, CHUNK_CHANGES, True) == ("Exhaustive", {"evidence_k": 3})
@@ -1999,6 +2097,7 @@ def test_render_sidebar_draws_instant_then_reindex_settings_then_usage_then_rese
     assert steps.mock_calls == [
         mock.call.instant(settings),
         mock.call.reindex(settings, CHUNK_CHANGES, True),
+        mock.call.scope(settings),
         mock.call.usage(app_state),
         mock.call.presets(slot),
     ]
@@ -2017,6 +2116,7 @@ def test_page_shows_both_settings_groups_with_the_local_llm_panel_in_the_instant
             module.ONE_OFF_TITLE,
             "Local LLM setup",
             "Library and index settings",
+            module.SCOPE_SETTINGS_PANEL,
             module.RESEARCH_PRESETS_PANEL,
             module.RESEARCH_PRESET_FILES_PANEL,
             # Drawn above the chat, after the sidebar.
@@ -2039,6 +2139,34 @@ def test_render_history_shows_a_user_message_without_answer_actions(pdf_research
     st.markdown.assert_called_once_with("User question")
     st.button.assert_not_called()
     st.caption.assert_not_called()
+
+
+def test_render_history_escapes_dollars_but_copies_the_text_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.button = mock.Mock(return_value=False)
+    st.markdown.reset_mock()
+    items = [
+        {"role": "user", "content": "Is it $5 or $10?"},
+        {"role": "assistant", "content": "Between $5 and $10.", "cost": 0.25, "id": 3},
+    ]
+
+    with mock.patch.object(module, "render_copy_button") as copy_button:
+        module.render_history(items)
+
+    assert [call.args[0] for call in st.markdown.call_args_list] == [r"Is it \$5 or \$10?", r"Between \$5 and \$10."]
+    copy_button.assert_called_once_with("Between $5 and $10.", key="copy_history_3")
+
+
+def test_render_history_does_not_escape_an_exhaustive_answer_kept_already_escaped(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.button = mock.Mock(return_value=False)
+    st.markdown.reset_mock()
+
+    module.render_history([{"role": "assistant", "content": r"Cost \$5 to \$10", "cost": 0.5, "id": 0}])
+
+    assert st.markdown.call_args_list[0] == mock.call(r"Cost \$5 to \$10")
 
 
 def test_render_history_shows_copy_sources_and_cost_for_an_answer(pdf_research_assistant_module):
@@ -2202,6 +2330,23 @@ def test_answer_question_returns_and_shows_a_successful_answer(pdf_research_assi
     st.error.assert_not_called()
 
 
+def test_answer_question_escapes_dollars_on_screen_but_copies_the_text_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+    st.markdown.reset_mock()
+
+    with mock.patch.object(
+        module, "run_query_subprocess", return_value=("From $5 to $10", 0.1, [], None, None)
+    ), mock.patch.object(module, "render_copy_button") as copy_button, mock.patch.object(
+        module, "render_source_passages"
+    ), mock.patch.object(module, "render_answer_settings"):
+        module.answer_question("Q")
+
+    st.markdown.assert_called_once_with(r"From \$5 to \$10")
+    copy_button.assert_called_once_with("From $5 to $10", key="copy_current_0")
+
+
 def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_research_assistant_module):
     module = pdf_research_assistant_module
     st = module.st
@@ -2218,6 +2363,48 @@ def test_answer_question_returns_and_shows_diagnostics_when_the_query_fails(pdf_
     st.caption.assert_called_once_with("Cost: $0.0000")
     st.code.assert_called_once_with("trace line\n")
     st.markdown.assert_not_called()
+
+
+def test_answer_question_shows_and_returns_what_a_failed_question_spent(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    for shown in (st.markdown, st.caption, st.error, st.code):
+        shown.reset_mock()
+    failure = module.QueryFailedError("RateLimitError: slow down", cost=0.0042)
+
+    with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
+        answer, cost, contexts, settings, save_error = module.answer_question("Q")
+
+    assert answer == module.describe_query_failure(failure)
+    assert (cost, contexts, settings, save_error) == (0.0042, [], None, None)
+    st.error.assert_called_once_with(answer)
+    st.caption.assert_called_once_with("Cost: $0.0042")
+
+
+def test_answer_question_shows_a_tiny_failed_cost_as_less_than_a_hundredth_of_a_cent(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.caption.reset_mock()
+    failure = module.QueryFailedError("APIError: down", cost=0.00002)
+
+    with mock.patch.object(module, "run_query_subprocess", side_effect=failure):
+        _, cost, _, _, _ = module.answer_question("Q")
+
+    assert cost == 0.00002
+    st.caption.assert_called_once_with("Cost: less than $0.0001")
+
+
+def test_submit_question_escapes_dollars_in_the_question_but_records_it_as_typed(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    st = module.st
+    st.session_state.update({"history": [], "total_cost": 0.0, "query_count": 0})
+    st.markdown.reset_mock()
+
+    with mock.patch.object(module, "answer_question", return_value=("A", 0.0, [], None, None)):
+        module.submit_question("Is it $5 or $10?", {})
+
+    st.markdown.assert_called_once_with(r"Is it \$5 or \$10?")
+    assert st.session_state.history[0] == {"role": "user", "content": "Is it $5 or $10?"}
 
 
 def test_submit_question_records_the_question_answer_and_cost(pdf_research_assistant_module):
@@ -3399,22 +3586,24 @@ def _button_keys(module):
 
 
 @pytest.mark.parametrize(
-    "indexed_count, manifest_count, failed_files, expected",
+    "indexed_count, manifest_count, failed_files, unindexed_count, expected",
     [
-        (0, 0, [], True),
-        (0, 3, [], True),
-        (2, 3, [], True),
-        (3, 3, ["a.pdf"], True),
-        (3, 3, [], False),
-        (5, 0, [], False),
+        (0, 0, [], 0, True),
+        (0, 3, [], 0, True),
+        (2, 3, [], 0, True),
+        (3, 3, ["a.pdf"], 0, True),
+        (3, 3, [], 0, False),
+        (5, 0, [], 0, False),
+        (5, 0, [], 2, True),
+        (3, 3, [], 1, True),
     ],
 )
-def test_index_needs_rebuild_when_it_is_empty_incomplete_or_has_failed_pdfs(
-    pdf_research_assistant_module, indexed_count, manifest_count, failed_files, expected
+def test_index_needs_rebuild_when_it_is_empty_incomplete_has_failed_pdfs_or_misses_new_ones(
+    pdf_research_assistant_module, indexed_count, manifest_count, failed_files, unindexed_count, expected
 ):
     module = pdf_research_assistant_module
 
-    assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files) is expected
+    assert module.index_needs_rebuild(indexed_count, manifest_count, failed_files, unindexed_count) is expected
 
 
 def test_a_rebuild_is_offered_on_the_page_when_the_index_is_empty():
@@ -3521,7 +3710,7 @@ def test_confirming_without_a_manifest_counts_the_pdfs_in_the_pdf_folder():
     ):
         pass
 
-    count_pdfs.assert_called_once_with(Path(r"D:\papers"))
+    count_pdfs.assert_called_once_with(Path(r"D:\papers"), True)
     start.assert_called_once_with(Path(r"C:\index\active-shard"), 7)
 
 
@@ -3601,10 +3790,119 @@ def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_setti
         module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
         module.st.form_submit_button.assert_any_call(module.INDEX_SETTINGS_SAVE_LABEL, disabled=True)
         module.bootstrap.get_indexed_doc_count.assert_any_call(index_dir=run["index_dir"])
-        assert not any(str(key).startswith("rebuild_") for key in keys)
+        # Only the stop button; no button starts or offers a rebuild.
+        assert [key for key in keys if str(key).startswith("rebuild_")] == ["rebuild_stop"]
         assert module.st.chat_input.call_args.kwargs["disabled"] is True
         assert module.st.session_state.history == []
         module.st.rerun.assert_not_called()
+
+
+def test_a_running_rebuild_offers_a_stop_button(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path)
+    module.st.button.reset_mock()
+    module.st.button.return_value = False
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        module.render_rebuild_run()
+
+    stop = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_stop")
+    assert stop.args[0] == module.REBUILD_STOP_LABEL
+    assert stop.kwargs["help"] == module.REBUILD_STOP_HELP
+    assert stop.kwargs.get("disabled") is not True
+    module.st.caption.assert_any_call(module.REBUILD_STOP_NOTE)
+
+
+def test_clicking_stop_asks_the_rebuild_to_stop_and_draws_the_progress_again(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path)
+    module.st.button.reset_mock()
+    module.st.button.side_effect = lambda *args, **kwargs: kwargs.get("key") == "rebuild_stop"
+    request_stop = mock.Mock()
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        with mock.patch.object(module.rebuild_client, "request_stop", request_stop):
+            module.render_rebuild_run()
+
+    request_stop.assert_called_once_with(run)
+    module.st.button.side_effect = None
+
+
+def test_a_stopping_rebuild_says_so_and_disables_the_stop_button(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    run = _rebuild_run(tmp_path) | {"stopping": True}
+    module.st.button.reset_mock()
+    module.st.button.return_value = False
+    module.st.warning.reset_mock()
+
+    with mock.patch.object(module.rebuild_client, "get_run", return_value=run):
+        module.render_rebuild_run()
+
+    module.st.warning.assert_any_call(module.REBUILD_STOPPING_NOTE)
+    stop = next(call for call in module.st.button.call_args_list if call.kwargs.get("key") == "rebuild_stop")
+    assert stop.kwargs["disabled"] is True
+
+
+def test_a_stopped_rebuild_says_the_index_can_still_be_used_and_how_many_pdfs_it_holds(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 7}}
+    )
+
+    module.st.success.assert_called_once_with(module.REBUILD_STOPPED_USABLE_NOTICE.format(count=7))
+    module.st.error.assert_not_called()
+
+
+def test_a_rebuild_stopped_before_any_pdf_was_saved_says_nothing_is_indexed_yet(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 0}}
+    )
+
+    module.st.success.assert_called_once_with(module.REBUILD_STOPPED_EMPTY_NOTICE)
+    module.st.error.assert_not_called()
+
+
+def test_a_stopped_rebuild_whose_index_cannot_be_read_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "index/rebuild.log", "lines": [], "index": {"usable": False, "indexed": 0}}
+    )
+
+    module.st.error.assert_called_once_with(f"{module.REBUILD_STOPPED_UNUSABLE_NOTICE} See `index/rebuild.log`.")
+    module.st.success.assert_not_called()
+
+
+def test_a_rebuild_that_failed_says_whether_the_index_can_still_be_used(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.error.reset_mock()
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 3}}
+    )
+
+    module.st.info.assert_called_once_with(module.REBUILD_INDEX_STATE_USABLE.format(count=3))
+
+
+def test_a_rebuild_that_failed_and_left_an_unreadable_index_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": False, "indexed": 0}}
+    )
+
+    module.st.error.assert_any_call(module.REBUILD_INDEX_STATE_UNUSABLE)
 
 
 def test_rebuild_progress_counts_failed_pdfs_as_done(pdf_research_assistant_module, tmp_path):
@@ -4494,15 +4792,10 @@ def test_describe_found_answer_gives_only_the_cost_when_nothing_else_is_known(pd
     assert pdf_research_assistant_module.describe_found_answer(answer, {}) == "Cost: $0.0000"
 
 
-def test_format_cost_says_when_a_real_cost_would_round_to_zero(pdf_research_assistant_module):
-    format_cost = pdf_research_assistant_module.format_cost
+def test_app_formats_costs_with_the_shared_helper_the_cli_uses(pdf_research_assistant_module):
+    from pdf_research_assistant import costs
 
-    assert format_cost(0.0123) == "$0.0123"
-    assert format_cost(0.00005) == "$0.0001"
-    # A local model's question: only the OpenAI embedding of the question is paid for.
-    assert format_cost(0.00000018) == "less than $0.0001"
-    assert format_cost(0.0) == "$0.0000"
-    assert format_cost(None) == "$0.0000"
+    assert pdf_research_assistant_module.format_cost is costs.format_cost
 
 
 def test_describe_found_answer_shows_a_tiny_cost_as_less_than_a_hundredth_of_a_cent(pdf_research_assistant_module):
@@ -4763,3 +5056,372 @@ def test_submit_question_records_no_save_problem_when_the_answer_was_kept(pdf_re
         module.submit_question("Q", {})
 
     assert "save_error" not in module.st.session_state.history[-1]
+
+
+# The settings that decide which PDFs are searched: the paper list and subfolders.
+
+
+def _scope_files(root, *names):
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+
+def draw_scope_settings(
+    module,
+    tmp_path,
+    *,
+    files=("a.pdf", "b.pdf", "sub/c.pdf"),
+    listed=frozenset(),
+    saved_scope=("manifest", True),
+    indexed=frozenset(),
+    paper_list_found=True,
+    settings=None,
+    chosen=None,
+    submitted=False,
+    clicked=(),
+    pending=None,
+    rebuilding=False,
+):
+    """Draw the scope settings over a real folder of PDFs, with the user choosing values and perhaps clicking.
+
+    chosen maps a control's label to the value the user leaves in it.
+    """
+    st = module.st
+    chosen = chosen or {}
+    _scope_files(tmp_path, *files)
+    for shown in (st.caption, st.expander, st.rerun, st.error, st.info, st.success, st.warning, st.markdown):
+        shown.reset_mock()
+    st.session_state.pop("scope_pending", None)
+    if pending:
+        st.session_state.scope_pending = pending
+    st.selectbox = mock.Mock(side_effect=lambda label, options, index=0, **_kwargs: chosen.get(label, options[index]))
+    st.checkbox = mock.Mock(side_effect=lambda label, value=False, **_kwargs: chosen.get(label, value))
+    st.form = mock.Mock(return_value=_ContextManagerStub())
+    st.form_submit_button = mock.Mock(return_value=submitted)
+    st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in clicked)
+    run = {"process": mock.Mock()} if rebuilding else None
+    with mock.patch.multiple(
+        module.bootstrap,
+        PAPER_DIR=tmp_path,
+        MANIFEST_PATH=tmp_path / "manifest.csv",
+        saved_scope=mock.Mock(return_value=saved_scope),
+        manifest_exists=mock.Mock(return_value=paper_list_found),
+        load_allowed_manifest_paths=mock.Mock(return_value=set(listed)),
+        get_index_entries=mock.Mock(return_value=set(indexed)),
+    ), mock.patch.object(module.rebuild_client, "get_run", return_value=run), mock.patch.multiple(
+        module.saved_settings, save_value=mock.DEFAULT
+    ) as patched:
+        module.render_scope_settings(settings or _scope_fake_settings(saved_scope, paper_list_found))
+        return patched
+
+
+def _scope_fake_settings(saved_scope=("manifest", True), paper_list_found=True):
+    settings = _fake_settings()
+    settings.agent.index.manifest_file = Path("manifest.csv") if saved_scope[0] == "manifest" and paper_list_found else None
+    settings.agent.index.recurse_subdirectories = saved_scope[1]
+    return settings
+
+
+def test_the_scope_settings_sit_in_their_own_panel_and_form_so_nothing_changes_until_saved(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path)
+
+    module.st.expander.assert_called_once_with(module.SCOPE_SETTINGS_PANEL)
+    module.st.form.assert_called_once_with("scope_settings_form")
+    module.st.form_submit_button.assert_called_once_with(module.SCOPE_SETTINGS_SAVE_LABEL, disabled=False)
+    module.st.caption.assert_any_call(module.SCOPE_SETTINGS_NOTE)
+    patched["save_value"].assert_not_called()
+    module.st.rerun.assert_not_called()
+
+
+def test_the_scope_controls_start_at_the_values_in_use(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    get_setting = module.settings_groups.get_setting
+
+    draw_scope_settings(module, tmp_path, saved_scope=("all", False))
+
+    paper_list = module.st.selectbox.call_args
+    assert paper_list.args[0] == "Paper list"
+    assert paper_list.args[1] == ["manifest", "all"]
+    assert paper_list.kwargs["index"] == 1
+    assert paper_list.kwargs["key"] == "scope_setting_manifest_scope_0"
+    assert paper_list.kwargs["help"] == get_setting("manifest_scope").help
+    assert paper_list.kwargs["disabled"] is False
+    assert [paper_list.kwargs["format_func"](value) for value in paper_list.args[1]] == [
+        "Only the PDFs in the paper list",
+        "All PDFs in the folder",
+    ]
+    subfolders = module.st.checkbox.call_args
+    assert subfolders.args[0] == "Search subfolders"
+    assert subfolders.kwargs == {
+        "value": False,
+        "help": get_setting("recurse_subdirectories").help,
+        "key": "scope_setting_recurse_subdirectories_0",
+    }
+
+
+def test_the_paper_list_control_is_switched_off_when_there_is_no_paper_list(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(module, tmp_path, paper_list_found=False)
+
+    assert module.st.selectbox.call_args.kwargs["disabled"] is True
+    module.st.caption.assert_any_call(module.SCOPE_NO_PAPER_LIST_NOTE)
+
+
+def test_the_no_paper_list_note_is_left_out_when_there_is_a_paper_list(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(module, tmp_path)
+
+    assert mock.call(module.SCOPE_NO_PAPER_LIST_NOTE) not in module.st.caption.call_args_list
+
+
+def test_saving_scope_without_a_change_saves_nothing(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path, submitted=True, indexed={"a.pdf"})
+
+    patched["save_value"].assert_not_called()
+    module.st.info.assert_called_once_with(module.INDEX_SETTINGS_UNCHANGED_NOTE)
+    assert "scope_pending" not in module.st.session_state or not module.st.session_state.scope_pending
+
+
+def test_turning_subfolders_off_waits_for_confirmation_and_says_how_many_pdfs_leave_the_index(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending == {
+        "values": {"recurse_subdirectories": False},
+        "preview": {"added": [], "removed": ["sub/c.pdf"], "already_indexed": []},
+    }
+    module.st.rerun.assert_called_once_with()
+
+
+def test_turning_subfolders_on_says_how_many_pdfs_would_be_added(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        saved_scope=("manifest", False),
+        chosen={"Search subfolders": True},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending["preview"] == {
+        "added": ["sub/c.pdf"],
+        "removed": [],
+        "already_indexed": [],
+    }
+
+
+def test_leaving_the_paper_list_out_adds_the_unlisted_pdfs(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"a.pdf"},
+        chosen={"Paper list": "all"},
+        submitted=True,
+        indexed={"a.pdf"},
+    )
+
+    assert module.st.session_state.scope_pending == {
+        "values": {"manifest_scope": "all"},
+        "preview": {"added": ["b.pdf", "sub/c.pdf"], "removed": [], "already_indexed": []},
+    }
+
+
+def test_using_the_paper_list_removes_the_unlisted_pdfs_from_the_index(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"a.pdf"},
+        saved_scope=("all", True),
+        chosen={"Paper list": "manifest"},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    assert module.st.session_state.scope_pending["preview"] == {
+        "added": [],
+        "removed": ["b.pdf", "sub/c.pdf"],
+        "already_indexed": [],
+    }
+
+
+def test_a_scope_change_that_adds_or_removes_nothing_is_saved_at_once(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        files=("a.pdf", "b.pdf"),
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf"},
+    )
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", False)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_NO_CHANGE_NOTICE
+    assert module.st.session_state.scope_pending is None
+    module.st.rerun.assert_called_once_with()
+
+
+def test_pdfs_coming_into_scope_that_are_already_indexed_need_no_confirmation(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        saved_scope=("manifest", False),
+        chosen={"Search subfolders": True},
+        submitted=True,
+        indexed={"a.pdf", "b.pdf", "sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", True)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_NO_CHANGE_NOTICE
+
+
+def test_a_scope_change_is_saved_at_once_when_the_index_holds_no_pdfs_yet(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(module, tmp_path, chosen={"Search subfolders": False}, submitted=True)
+
+    patched["save_value"].assert_called_once_with("recurse_subdirectories", False)
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_EMPTY_INDEX_NOTICE
+
+
+def test_a_saved_scope_change_gives_the_controls_fresh_keys(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop("scope_settings_round", None)
+
+    draw_scope_settings(module, tmp_path, chosen={"Search subfolders": False}, submitted=True)
+
+    assert module.st.session_state.scope_settings_round == 1
+
+
+def test_subfolders_cannot_be_turned_off_when_the_paper_list_names_only_pdfs_in_them(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module,
+        tmp_path,
+        listed={"sub/c.pdf"},
+        chosen={"Search subfolders": False},
+        submitted=True,
+        indexed={"sub/c.pdf"},
+    )
+
+    patched["save_value"].assert_not_called()
+    module.st.error.assert_called_once_with(module.SCOPE_NOTHING_LEFT_NOTE)
+    module.st.rerun.assert_not_called()
+
+
+def test_a_scope_change_waiting_for_confirmation_shows_the_warning_with_the_counts(
+    pdf_research_assistant_module, tmp_path
+):
+    module = pdf_research_assistant_module
+    pending = {
+        "values": {"recurse_subdirectories": False},
+        "preview": {"added": ["x.pdf"], "removed": ["sub/c.pdf"], "already_indexed": []},
+    }
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending)
+
+    (warning,) = [call.args[0] for call in module.st.warning.call_args_list]
+    assert "This changes the index you are using. It does not start a new one." in warning
+    assert "`active-shard`" in warning
+    assert "1 PDF would be added to the index and read, which costs money: `x.pdf`" in warning
+    assert "1 PDF would be removed from the index: `sub/c.pdf`" in warning
+    assert "Nothing is saved until you confirm." in warning
+    patched["save_value"].assert_not_called()
+
+
+def test_the_scope_warning_names_the_index_the_user_gave_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    preview = {"added": [], "removed": ["a.pdf"], "already_indexed": []}
+
+    text = module.describe_scope_change(preview, Path("index/pqa_index_1"), "My papers")
+
+    assert "**My papers** (`pqa_index_1`)" in text
+
+
+def test_confirming_a_scope_change_saves_every_value_and_draws_the_page_again(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    pending = {
+        "values": {"manifest_scope": "all", "recurse_subdirectories": False},
+        "preview": {"added": [], "removed": ["a.pdf"], "already_indexed": []},
+    }
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending, clicked={"scope_confirm"})
+
+    assert patched["save_value"].call_args_list == [
+        mock.call("manifest_scope", "all"),
+        mock.call("recurse_subdirectories", False),
+    ]
+    assert module.st.session_state.scope_pending is None
+    assert module.st.session_state.scope_settings_notice == module.SCOPE_SAVED_NOTICE
+    module.st.rerun.assert_called_once_with()
+
+
+def test_cancelling_a_scope_change_saves_nothing_and_resets_the_controls(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop("scope_settings_round", None)
+    pending = {"values": {"manifest_scope": "all"}, "preview": {"added": ["a.pdf"], "removed": [], "already_indexed": []}}
+
+    patched = draw_scope_settings(module, tmp_path, pending=pending, clicked={"scope_cancel"})
+
+    patched["save_value"].assert_not_called()
+    assert module.st.session_state.scope_pending is None
+    assert module.st.session_state.scope_settings_round == 1
+    module.st.rerun.assert_called_once_with()
+
+
+def test_the_scope_settings_cannot_be_saved_while_a_rebuild_runs(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+
+    patched = draw_scope_settings(
+        module, tmp_path, chosen={"Search subfolders": False}, submitted=True, indexed={"sub/c.pdf"}, rebuilding=True
+    )
+
+    patched["save_value"].assert_not_called()
+    module.st.form_submit_button.assert_called_once_with(module.SCOPE_SETTINGS_SAVE_LABEL, disabled=True)
+    module.st.caption.assert_any_call(module.REBUILD_LOCKED_NOTE)
+    module.st.rerun.assert_not_called()
+
+
+def test_a_scope_notice_is_shown_once(pdf_research_assistant_module, tmp_path):
+    module = pdf_research_assistant_module
+    module.st.session_state.scope_settings_notice = module.SCOPE_SAVED_NOTICE
+
+    draw_scope_settings(module, tmp_path)
+    module.st.success.assert_called_once_with(module.SCOPE_SAVED_NOTICE)
+    module.st.success.reset_mock()
+    draw_scope_settings(module, tmp_path)
+
+    module.st.success.assert_not_called()

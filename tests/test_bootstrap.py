@@ -93,50 +93,6 @@ def bootstrap_module(workspace_tmp_path):
             sys.modules.pop("pdf_research_assistant.bootstrap", None)
 
 
-def test_import_with_existing_manifest_populates_allowed_paths(workspace_tmp_path):
-    paperqa_module = ModuleType("paperqa")
-    paperqa_settings_module = ModuleType("paperqa.settings")
-    dotenv_module = ModuleType("dotenv")
-
-    paperqa_module.Settings = _CaptureSettings
-    paperqa_settings_module.AgentSettings = _CaptureConfig
-    paperqa_settings_module.IndexSettings = _CaptureConfig
-    paperqa_settings_module.ParsingSettings = _CaptureConfig
-    paperqa_settings_module.AnswerSettings = _CaptureConfig
-    dotenv_module.load_dotenv = mock.Mock(name="load_dotenv")
-
-    paper_dir = workspace_tmp_path / "papers"
-    paper_dir.mkdir()
-    manifest_path = workspace_tmp_path / "manifest.csv"
-    manifest_path.write_text("file_location\nfolder/paper.pdf\n", encoding="utf-8")
-
-    env = {
-        "PAPER_DIR": str(paper_dir),
-        "INDEX_DIR": str(workspace_tmp_path / "index"),
-        "MANIFEST_PATH": str(manifest_path),
-    }
-
-    with mock.patch.dict(os.environ, env, clear=False):
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "paperqa": paperqa_module,
-                "paperqa.settings": paperqa_settings_module,
-                "dotenv": dotenv_module,
-                "pdf_research_assistant.pdf_parser": ModuleType("pdf_research_assistant.pdf_parser"),
-            },
-        ):
-            sys.modules["pdf_research_assistant.pdf_parser"].parse_pdf_with_fallback = mock.Mock(
-                name="parse_pdf_with_fallback"
-            )
-            sys.modules.pop("pdf_research_assistant.bootstrap", None)
-            module = importlib.import_module("pdf_research_assistant.bootstrap")
-            try:
-                assert module.ALLOWED_PATHS == {"folder/paper.pdf"}
-            finally:
-                sys.modules.pop("pdf_research_assistant.bootstrap", None)
-
-
 def test_sanitize_proxy_environment_leaves_environment_unchanged_when_no_proxy_variables_are_set(bootstrap_module):
     with mock.patch.dict(os.environ, {}, clear=True):
         bootstrap_module.sanitize_proxy_environment()
@@ -661,3 +617,197 @@ def test_build_settings_applies_a_saved_preset_with_a_number_changed_afterwards_
     assert settings.answer.evidence_k == 7
     assert settings.answer.answer_max_sources == 3
     assert settings.agent.agent_type == "fake"
+
+
+# The scope settings: whether the paper list is used and whether subfolders are searched.
+
+
+def _write_manifest(workspace_tmp_path, *paths):
+    manifest_path = workspace_tmp_path / "manifest.csv"
+    manifest_path.write_text("file_location\n" + "\n".join(paths) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def test_the_paper_list_and_subfolders_are_in_scope_unless_saved_otherwise(bootstrap_module):
+    assert bootstrap_module.saved_scope() == ("manifest", True)
+
+
+def test_saved_scope_reads_the_saved_sidebar_choices(bootstrap_module):
+    bootstrap_module.saved_settings.save_value("manifest_scope", "all")
+    bootstrap_module.saved_settings.save_value("recurse_subdirectories", False)
+
+    assert bootstrap_module.saved_scope() == ("all", False)
+
+
+def test_get_allowed_paths_follows_the_saved_choice_to_leave_out_the_paper_list(bootstrap_module, workspace_tmp_path):
+    manifest_path = _write_manifest(workspace_tmp_path, "a.pdf")
+    bootstrap_module.saved_settings.save_value("manifest_scope", "all")
+
+    assert bootstrap_module.get_allowed_paths(manifest_path) == set()
+    assert bootstrap_module.use_manifest(manifest_path) is False
+
+
+def test_get_allowed_paths_leaves_out_pdfs_in_subfolders_when_they_are_not_searched(bootstrap_module, workspace_tmp_path):
+    manifest_path = _write_manifest(workspace_tmp_path, "a.pdf", "sub/b.pdf")
+    bootstrap_module.saved_settings.save_value("recurse_subdirectories", False)
+
+    assert bootstrap_module.get_allowed_paths(manifest_path) == {"a.pdf"}
+
+
+def test_manifest_paths_in_scope_can_be_asked_for_choices_that_are_not_saved(bootstrap_module, workspace_tmp_path):
+    manifest_path = _write_manifest(workspace_tmp_path, "a.pdf", "sub/b.pdf")
+
+    assert bootstrap_module.manifest_paths_in_scope("manifest", True, manifest_path) == {"a.pdf", "sub/b.pdf"}
+    assert bootstrap_module.manifest_paths_in_scope("manifest", False, manifest_path) == {"a.pdf"}
+    assert bootstrap_module.manifest_paths_in_scope("all", True, manifest_path) == set()
+
+
+def test_get_indexed_doc_count_leaves_out_pdfs_in_subfolders_when_they_are_not_searched(
+    bootstrap_module, workspace_tmp_path
+):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "one", {"a.pdf": "OK", r"sub\b.pdf": "OK"})
+    bootstrap_module.saved_settings.save_value("recurse_subdirectories", False)
+
+    assert bootstrap_module.get_indexed_doc_count(index_dir) == 1
+
+
+def test_get_indexed_doc_count_counts_subfolders_when_they_are_searched(bootstrap_module, workspace_tmp_path):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "one", {"a.pdf": "OK", r"sub\b.pdf": "OK"})
+
+    assert bootstrap_module.get_indexed_doc_count(index_dir) == 2
+
+
+def test_get_indexed_doc_count_counts_all_pdfs_when_the_paper_list_is_left_out(bootstrap_module, workspace_tmp_path):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "one", {"a.pdf": "OK", "b.pdf": "OK"})
+    _write_manifest(workspace_tmp_path, "a.pdf")
+    bootstrap_module.saved_settings.save_value("manifest_scope", "all")
+
+    with mock.patch.object(bootstrap_module, "MANIFEST_PATH", workspace_tmp_path / "manifest.csv"):
+        assert bootstrap_module.get_indexed_doc_count(index_dir) == 2
+
+
+def test_build_settings_searches_subfolders_unless_saved_otherwise(bootstrap_module):
+    assert bootstrap_module.build_settings().agent.index.recurse_subdirectories is True
+
+
+def test_build_settings_applies_the_saved_scope_to_paperqa_s_index_settings(bootstrap_module, workspace_tmp_path):
+    manifest_path = workspace_tmp_path / "manifest.csv"
+    bootstrap_module.saved_settings.save_value("manifest_scope", "all")
+    bootstrap_module.saved_settings.save_value("recurse_subdirectories", False)
+
+    with mock.patch.multiple(bootstrap_module, MANIFEST_PATH=manifest_path):
+        with mock.patch.object(bootstrap_module, "manifest_exists", return_value=True):
+            settings = bootstrap_module.build_settings()
+
+    assert settings.agent.index.manifest_file is None
+    assert settings.agent.index.recurse_subdirectories is False
+
+
+def test_get_index_entries_lists_every_entry_including_failed_ones_whatever_the_scope(
+    bootstrap_module, workspace_tmp_path
+):
+    index_dir = workspace_tmp_path / "index"
+    _write_files_zip(index_dir, "one", {"a.pdf": "OK", r"sub\b.pdf": bootstrap_module.FAILED_DOCUMENT_ADD_ID})
+    _write_files_zip(index_dir, "two", {"c.pdf": "OK"})
+    bootstrap_module.saved_settings.save_value("recurse_subdirectories", False)
+
+    assert bootstrap_module.get_index_entries(index_dir) == {"a.pdf", "sub/b.pdf", "c.pdf"}
+
+
+def test_get_index_entries_skips_unreadable_index_files(bootstrap_module, workspace_tmp_path):
+    index_dir = workspace_tmp_path / "index"
+    (index_dir / "bad").mkdir(parents=True)
+    (index_dir / "bad" / "files.zip").write_bytes(b"not-a-valid-archive")
+    _write_files_zip(index_dir, "good", {"a.pdf": "OK"})
+
+    assert bootstrap_module.get_index_entries(index_dir) == {"a.pdf"}
+
+
+def test_get_index_entries_is_empty_when_there_is_no_index(bootstrap_module, workspace_tmp_path):
+    assert bootstrap_module.get_index_entries(workspace_tmp_path / "missing") == set()
+
+
+def _make_papers(paper_dir: Path, *names: str) -> None:
+    for name in names:
+        path = paper_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4")
+
+
+def test_get_unindexed_files_lists_every_pdf_in_the_folder_and_its_subfolders_when_there_is_no_index(
+    bootstrap_module, workspace_tmp_path
+):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "b.pdf", "sub/a.PDF", "notes.txt")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "missing-index", paper_dir) == [
+            "b.pdf",
+            "sub/a.PDF",
+        ]
+
+
+def test_get_unindexed_files_leaves_out_pdfs_the_index_lists_failed_ones_included(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "kept.pdf", "failed.pdf", "sub/kept.pdf", "new.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    # PaperQA lists files by their path under the PDF folder, with Windows separators on Windows.
+    (index_dir / "files.zip").write_bytes(
+        zlib.compress(
+            pickle.dumps(
+                {"kept.pdf": "OK", "failed.pdf": bootstrap_module.FAILED_DOCUMENT_ADD_ID, r"sub\kept.pdf": "OK"}
+            )
+        )
+    )
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(index_dir, paper_dir) == ["new.pdf"]
+
+
+def test_get_unindexed_files_looks_only_at_pdfs_the_manifest_lists(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "listed.pdf", "sub/listed.pdf", "unlisted.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value={"listed.pdf", "sub/listed.pdf"}):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir) == [
+            "listed.pdf",
+            "sub/listed.pdf",
+        ]
+
+
+def test_get_unindexed_files_skips_an_unreadable_index_file_list(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "paper.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    (index_dir / "files.zip").write_bytes(b"not-a-valid-archive")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_unindexed_files(index_dir, paper_dir) == ["paper.pdf"]
+
+
+def test_get_unindexed_files_is_empty_when_the_pdf_folder_does_not_exist(bootstrap_module, workspace_tmp_path):
+    assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", workspace_tmp_path / "missing") == []
+
+
+def test_get_unindexed_files_reads_the_manifest_once_however_many_pdfs_there_are(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "a.pdf", "b.pdf", "c.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()) as allowed:
+        bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir)
+
+    allowed.assert_called_once_with()
+
+
+def test_get_unindexed_files_leaves_out_subfolders_when_they_are_not_searched(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "top.pdf", "sub/deeper.pdf")
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()), \
+            mock.patch.object(bootstrap_module, "saved_scope", return_value=("all", False)):
+        assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", paper_dir) == ["top.pdf"]

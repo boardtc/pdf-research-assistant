@@ -1,10 +1,9 @@
 import json
-import subprocess
 import sys
 import time
-from pathlib import Path
 
-from pdf_research_assistant import exhaustive_client
+from pdf_research_assistant import exhaustive_client, query_client
+from pdf_research_assistant.costs import format_cost
 
 PROGRESS_POLL_SECONDS = 2
 ANSWER_NOT_SAVED_NOTE = "This answer could not be kept for searching later:"
@@ -49,22 +48,22 @@ def run_exhaustive_question(question: str) -> None:
 def main() -> int:
     """Run the interactive CLI loop that forwards questions to the one-shot query helper."""
     exhaustive_mode = "--exhaustive" in sys.argv[1:]
+    asked = 0
+    total_cost = 0.0
     while True:
+        if not exhaustive_mode:
+            # Loads PaperQA while the question is being typed.
+            query_client.prepare()
         q = input("\nQuestion (or quit): ").strip()
         if q.lower() == "quit":
+            if asked:
+                print(f"\nQuestions asked this session: {asked}. Total cost: {format_cost(total_cost)}")
             return 0
         if exhaustive_mode:
             run_exhaustive_question(q)
             continue
-        helper = Path(__file__).with_name("query_once.py")
-        result = subprocess.run(
-            [sys.executable, str(helper), q],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        asked += 1
+        result = query_client.run(q)
         if result.returncode != 0 and not result.stdout.strip():
             print("\nQuery failed.")
             if result.stderr.strip():
@@ -79,12 +78,17 @@ def main() -> int:
             elif result.stdout.strip():
                 print(result.stdout.strip())
             continue
+        # A failed question also says what it spent before failing.
+        cost = payload.get("cost") or 0.0
+        total_cost += cost
         if payload.get("ok"):
             print("\n" + payload["answer"])
+            print(f"Cost: {format_cost(cost)}")
             if payload.get("save_error"):
                 print(f"\n{ANSWER_NOT_SAVED_NOTE} {payload['save_error']}")
         else:
             print(f"\n{payload.get('error_type', 'Error')}: {payload.get('error', 'Unknown error')}")
+            print(f"Cost: {format_cost(cost)}")
 
 
 if __name__ == "__main__":

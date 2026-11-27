@@ -66,12 +66,12 @@ ENRICHMENT_OUTPUT_TOKENS = 250
 # were this estimate), 23 seconds for the 3 PDFs, and 22 more to save and close the index.
 START_AND_FINISH_SECONDS = 80
 # Besides the citation call and the time the app takes to read a PDF's text, each PDF takes this long: PaperQA's
-# own reading of it, its call to the embedding model, and saving it to the index. Fitted to a rebuild of the whole
-# library of 120 PDFs (27 Nov 2026), which indexed 23 PDFs (320 pages, 87,026 tokens) in about 10 minutes before it
-# stopped (#157): about 600 seconds, less the 59-second start, 10 seconds of reading and 23 citation calls, over 23
-# PDFs. The 3-PDF run above took 8 seconds a PDF, so this is rougher than the cost: whether longer PDFs, or a larger
-# index, take longer is not known yet. A busy computer takes longer.
-PDF_SECONDS = 22.0
+# own reading of it, its call to the embedding model, and saving it to the index. Fitted to a full rebuild of the
+# library of 120 PDFs (3,163 pages) into an empty index once index writes were retried (#157), on 27 Nov 2026: 983
+# seconds in all, less the start and finish above, 309 seconds of reading as this estimate measures it and 120
+# citation calls, over 120 PDFs. An earlier run that kept failing to write the index took 22 seconds a PDF. A busy
+# computer takes longer.
+PDF_SECONDS = 3.5
 
 NOTHING_TO_INDEX_NOTE = (
     "No PDF needs indexing, so nothing is sent to the embedding model and the rebuild costs nothing"
@@ -287,10 +287,13 @@ def citation_input_tokens(first_passage_tokens: float) -> int:
     return estimate.count_prompt_tokens(citation_prompt) + round(first_passage_tokens)
 
 
-def enrichment_input_tokens(settings: object, characters_per_page: float, pages_per_pdf: float = 1) -> int:
-    """Return the tokens sent to describe one picture: the picture, the prompt and the text of the pages near it."""
+def enrichment_input_tokens(settings: object, characters_per_page: float, pages_per_pdf: float) -> int:
+    """Return the tokens sent to describe one picture: the picture, the prompt and the text of the pages near it.
+
+    The pages near it stop at the ends of the PDF, so a short PDF sends fewer of them.
+    """
     radius = settings.parsing.enrichment_page_radius
-    pages = pages_per_pdf if radius == -1 else 2 * radius + 1
+    pages = pages_per_pdf if radius == -1 else min(2 * radius + 1, pages_per_pdf)
     width, height = estimate.picture_pixels(settings)
     return (
         estimate.count_picture_tokens(settings.parsing.enrichment_llm, width, height)

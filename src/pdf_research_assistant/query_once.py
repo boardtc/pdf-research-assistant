@@ -12,6 +12,7 @@ import base64
 import importlib
 import json
 import os
+import re
 import sys
 
 os.environ.setdefault("PQA_INDEX_DONT_CACHE_INDEXES", "true")
@@ -97,6 +98,14 @@ NO_ANSWER_NOTE = (
 )
 
 
+# PaperQA's citation ids are "pqac-" and 8 characters (Context.ID_HASH_LENGTH); the answer model sometimes
+# writes one a character short or long (#151). An id shorter than MIN_SHORT_ID_LENGTH says too little to
+# tell which passage it means.
+CITATION_ID_PATTERN = re.compile(r"\bpqac-([a-zA-Z0-9]+)\b")
+CITATION_ID_LENGTH = 8
+MIN_SHORT_ID_LENGTH = 4
+
+
 def answer_text(session) -> str:
     """Return the answer to show, or a note saying why there is none when PaperQA wrote no answer."""
     formatted = (getattr(session, "formatted_answer", "") or "").strip()
@@ -104,6 +113,55 @@ def answer_text(session) -> str:
         return formatted
     reason = (getattr(session, "answer", "") or "").strip() or "No answer generated."
     return NO_ANSWER_NOTE.format(reason=reason)
+
+
+def matching_context_id(cited: str, context_ids: list[str]) -> str:
+    """Return the one passage id a mistyped citation id means, or "" when it means none or several.
+
+    A short id means the passage whose id it starts; a long id means the passage whose id it starts with.
+    """
+    if len(cited) < len("pqac-") + MIN_SHORT_ID_LENGTH:
+        return ""
+    if len(cited) < len("pqac-") + CITATION_ID_LENGTH:
+        matches = [context_id for context_id in context_ids if context_id.startswith(cited)]
+    else:
+        matches = [context_id for context_id in context_ids if cited.startswith(context_id)]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def repair_citation_ids(session, passages) -> None:
+    """Turn citation ids the model wrote too short or too long into the passage id they mean (#151).
+
+    PaperQA only recognises ids of exactly CITATION_ID_LENGTH characters, so a short one stayed raw in the
+    answer, its passage showed as not cited and its source was missing from References. Each such id is
+    replaced by the one passage id it matches, or removed, as PaperQA removes made-up ids, when it matches
+    none or several. PaperQA then formats the answer again. passages are the full chunks (the Docs object's
+    texts), used for the references because PaperQA's answer has emptied its own copies.
+    """
+    raw_answer = getattr(session, "raw_answer", "") or ""
+    context_ids = [context.id for context in session.contexts] if raw_answer else []
+
+    def repair(match: re.Match) -> str:
+        cited = match.group(0)
+        if cited in context_ids or len(match.group(1)) == CITATION_ID_LENGTH:
+            # A real id, or one of the right length that PaperQA has already removed from the answer.
+            return cited
+        return matching_context_id(cited, context_ids)
+
+    repaired = CITATION_ID_PATTERN.sub(repair, raw_answer)
+    if repaired == raw_answer:
+        return
+    session.raw_answer = repaired
+    emptied = session.contexts
+    full_chunks = {passage_key(passage): passage for passage in passages}
+    session.contexts = [
+        context.model_copy(update={"text": full_chunks.get(passage_key(context.text), context.text)})
+        for context in emptied
+    ]
+    try:
+        session.populate_formatted_answers_and_bib_from_raw_answer()
+    finally:
+        session.contexts = emptied
 
 
 def check_quotes(session, passages) -> None:
@@ -172,6 +230,8 @@ def run_query_payload(question: str, one_off: dict | None = None) -> dict:
         cost = question_cost(response.session.cost, GLOBAL_COST_TRACKER.lifetime_cost_usd - tracked_before)
         # The saved answer takes its cost from the session, so it shows the same figure as the chat.
         response.session.cost = cost
+        # Before the quote check, which changes the answer that PaperQA formats from the raw answer.
+        repair_citation_ids(response.session, docs.texts)
         check_quotes(response.session, docs.texts)
         contexts = serialize_contexts(
             getattr(response.session, "contexts", []),

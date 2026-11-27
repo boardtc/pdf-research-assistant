@@ -940,3 +940,155 @@ def test_check_quotes_reads_the_full_chunks_that_paperqas_answer_has_emptied(que
     query_once_module.check_quotes(session, docs.texts)
 
     assert session.answer == f'Lang quotes "{REAL}" (pqac-0).'
+
+
+LANG_ID = "pqac-0ed33f3f"
+OTHER_ID = "pqac-7a1b2c3d"
+
+
+def _cited_session(raw_answer, *, ids=(LANG_ID, OTHER_ID), citation="Lang, Small Teaching, 2021."):
+    """Build a real answered PaperQA session whose contexts are emptied the way AnswerResponse does it."""
+    chunks = [
+        Text(
+            text=f"Chunk {n}",
+            name=f"Lang2021 pages {n}-{n + 1}",
+            doc=Doc(docname="Lang2021", citation=citation, dockey="lang"),
+        )
+        for n in range(len(ids))
+    ]
+    docs = Docs()
+    docs.texts = chunks
+    session = PQASession(
+        question="Q",
+        raw_answer=raw_answer,
+        contexts=[Context(id=context_id, context="Summary", text=chunk) for context_id, chunk in zip(ids, chunks)],
+    )
+    session.populate_formatted_answers_and_bib_from_raw_answer()
+    session.filter_content_for_user()
+    return session, docs
+
+
+def test_repair_citation_ids_treats_a_short_id_as_the_one_passage_it_starts(query_once_module):
+    session, docs = _cited_session("Blum says grades harm learning (pqac-0ed33f3).")
+    assert "pqac-0ed33f3" in session.answer
+    assert LANG_ID not in session.used_contexts
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == f"Blum says grades harm learning ({LANG_ID})."
+    assert session.answer == "Blum says grades harm learning (Lang2021 pages 0-1)."
+    assert LANG_ID in session.used_contexts
+    assert session.references == "1. (Lang2021 pages 0-1): Lang, Small Teaching, 2021."
+    assert session.formatted_answer.endswith("References\n\n1. (Lang2021 pages 0-1): Lang, Small Teaching, 2021.")
+
+
+def test_repair_citation_ids_removes_a_short_id_that_starts_no_passage(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-9999999).")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == "Grades harm learning ()."
+    assert "pqac" not in session.answer
+    assert session.used_contexts == set()
+
+
+def test_repair_citation_ids_removes_a_short_id_that_starts_more_than_one_passage(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-0ed3).", ids=("pqac-0ed33f3f", "pqac-0ed3aaaa"))
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == "Grades harm learning ()."
+    assert session.used_contexts == set()
+
+
+def test_repair_citation_ids_removes_a_short_id_too_short_to_tell_which_passage_it_means(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-0ed).")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == "Grades harm learning ()."
+    assert session.used_contexts == set()
+
+
+def test_repair_citation_ids_treats_a_long_id_as_the_one_passage_it_starts_with(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-0ed33f3ff).")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == f"Grades harm learning ({LANG_ID})."
+    assert session.answer == "Grades harm learning (Lang2021 pages 0-1)."
+
+
+def test_repair_citation_ids_removes_a_long_id_that_starts_with_no_passage_id(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-123456789).")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.raw_answer == "Grades harm learning ()."
+
+
+def test_repair_citation_ids_fixes_a_short_id_next_to_a_correct_one(query_once_module):
+    session, docs = _cited_session(f"Grades harm learning ({OTHER_ID}, pqac-0ed33f3).")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.answer == "Grades harm learning (Lang2021 pages 1-2, Lang2021 pages 0-1)."
+    assert session.used_contexts == {LANG_ID, OTHER_ID}
+
+
+def test_repair_citation_ids_leaves_paperqas_own_answer_when_every_id_is_eight_characters(query_once_module):
+    # Full ids, and an 8-character id that matches no passage, are PaperQA's to handle; it already has.
+    session, docs = _cited_session(f"Grades harm learning ({LANG_ID}) and more (pqac-deadbeef).")
+    session.answer = "Answer as PaperQA left it"
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.answer == "Answer as PaperQA left it"
+    assert session.raw_answer == f"Grades harm learning ({LANG_ID}) and more (pqac-deadbeef)."
+
+
+def test_repair_citation_ids_does_nothing_without_a_raw_answer(query_once_module):
+    session = SimpleNamespace(answer="A", formatted_answer="Q\n\nA", contexts=[])
+
+    query_once_module.repair_citation_ids(session, [])
+
+    assert session.answer == "A"
+    assert not hasattr(session, "raw_answer")
+
+
+def test_repair_citation_ids_takes_references_from_the_full_chunks_and_keeps_the_emptied_contexts(query_once_module):
+    session, docs = _cited_session("Grades harm learning (pqac-0ed33f3).", citation="Stripped citation")
+    for chunk in docs.texts:
+        chunk.doc = Doc(docname="Lang2021", citation="Full citation", dockey="lang")
+
+    query_once_module.repair_citation_ids(session, docs.texts)
+
+    assert session.references == "1. (Lang2021 pages 0-1): Full citation"
+    # The session keeps PaperQA's emptied contexts, so the kept answer stays small.
+    assert [context.text.text for context in session.contexts] == ["", ""]
+
+
+def test_repair_citation_ids_uses_the_context_itself_when_no_full_chunk_matches(query_once_module):
+    session, _ = _cited_session("Grades harm learning (pqac-0ed33f3).", citation="Context citation")
+
+    query_once_module.repair_citation_ids(session, [])
+
+    assert session.answer == "Grades harm learning (Lang2021 pages 0-1)."
+    assert session.references == "1. (Lang2021 pages 0-1): Context citation"
+
+
+def test_run_query_payload_repairs_short_ids_before_checking_quotes(query_once_module):
+    session, docs = _cited_session(f'Blum writes "{MADE_UP}" (pqac-0ed33f3).')
+    session.cost = 0.0
+    response = SimpleNamespace(session=session)
+    query_once_module.build_settings = mock.Mock(return_value=_stub_settings())
+    query_once_module.Docs = mock.Mock(return_value=docs)
+    query_once_module.run_or_ensure = mock.Mock(return_value=response)
+
+    with mock.patch.object(query_once_module.settings_groups, "record_answer_settings", return_value=None):
+        result = query_once_module.run_query_payload("Q")
+
+    mark = query_once_module.quote_check.PARAPHRASE_MARK
+    assert session.answer == f"Blum writes {MADE_UP} {mark} (Lang2021 pages 0-1)."
+    assert "References\n\n1. (Lang2021 pages 0-1)" in result["answer"]
+    assert [context["cited"] for context in result["contexts"]] == [True, False]

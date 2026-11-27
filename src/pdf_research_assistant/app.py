@@ -131,6 +131,9 @@ REBUILD_STOPPED_UNUSABLE_NOTICE = (
     "The index rebuild was stopped, but the index's file list cannot be read, so the index may be damaged."
 )
 REBUILD_INDEX_STATE_USABLE = "The index can still be used: it holds {count} PDFs."
+REBUILD_INDEX_STATE_LEFT = (
+    "The index can still be used: it holds {count} of {total} PDFs. Rebuild again to index the other {left}."
+)
 REBUILD_INDEX_STATE_UNUSABLE = (
     "The index's file list cannot be read, so the index may be damaged. Rebuild it before asking questions."
 )
@@ -1142,7 +1145,10 @@ def render_rebuild_result(result: dict | None) -> None:
         st.success(REBUILD_FINISHED_NOTICE)
     else:
         st.error(f"{REBUILD_FAILED_NOTICE} See `{result['log_path']}`.")
-        if index and index["usable"]:
+        left = result.get("pdf_count", 0) - index["indexed"] if index else 0
+        if index and index["usable"] and left > 0:
+            st.info(REBUILD_INDEX_STATE_LEFT.format(count=index["indexed"], total=result["pdf_count"], left=left))
+        elif index and index["usable"]:
             st.info(REBUILD_INDEX_STATE_USABLE.format(count=index["indexed"]))
         elif index:
             st.error(REBUILD_INDEX_STATE_UNUSABLE)

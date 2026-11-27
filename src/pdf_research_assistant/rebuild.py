@@ -12,6 +12,7 @@ import litellm
 from lmi.cost_tracker import GLOBAL_COST_TRACKER, enable_cost_tracking
 from paperqa.agents.search import get_directory_index
 from paperqa.settings import Settings
+from tantivy import Document
 from tenacity import stop_after_attempt
 
 from pdf_research_assistant import index_record, local_llm, rebuild_client, rebuild_estimate
@@ -30,6 +31,14 @@ settings = build_settings()
 
 # How many PDFs were left unstarted because the app asked this rebuild to stop.
 stop_state = {"skipped": 0}
+# Whether PaperQA's build of the index ended with an error before every PDF was done.
+run_state = {"failed": False}
+# On Windows tantivy now and then fails to create one of the index's new files with "Access is denied" (#157).
+# A failed write is tried this many times in all, each time with a new writer and a slightly longer pause.
+WRITE_ATTEMPTS = 5
+WRITE_RETRY_PAUSE_SECONDS = 0.5
+# tantivy's words for a file it could not write, and for a writer that stopped after one of its threads did.
+WRITE_ERROR_MARKERS = ("IoError", "IO error", "writer was killed", "worker thread encountered an error")
 # Set while PaperQA describes a PDF's images and tables, so their calls' cost is counted as enrichment.
 enriching = contextvars.ContextVar("enriching", default=False)
 ESTIMATE_HEADING = "Rough estimate before starting:"
@@ -84,13 +93,33 @@ def stop_between_pdfs(process_file):
     return stoppable_process_file
 
 
+def is_write_error(error: BaseException) -> bool:
+    """Say whether an error is tantivy failing to write one of the index's files, which a new writer can retry."""
+    return isinstance(error, ValueError) and any(marker in str(error) for marker in WRITE_ERROR_MARKERS)
+
+
+def commit_landed(meta_before: str | None, meta_after: str | None) -> bool:
+    """Say whether a commit that failed had already written the index's record of its contents, meta.json.
+
+    Its PDFs are then in the index, and adding them again would put them there twice. When either reading
+    failed, the answer is no: twice in the index is better than not at all.
+    """
+    return meta_before is not None and meta_after is not None and meta_before != meta_after
+
+
 def lock_capped_index(search_index_class):
-    """Return PaperQA's index class, changed so that a rebuild cannot wait hours for the writer lock.
+    """Return PaperQA's index class, changed so that a rebuild cannot wait hours for the writer lock, and so
+    that a write that fails with "Access is denied" is tried again.
 
     PaperQA tries for the index folder's writer lock up to 1000 times, waiting up to a minute between tries.
     On Windows a write that fails with "Access is denied" leaves its writer holding that lock, so the next
     build in the same process waited for it for hours. The class tries LOCK_ATTEMPTS times instead, and
     remembers each index it opens in `opened`, so the rebuild can let go of their writers afterwards.
+
+    A writer whose write failed has dropped every PDF added since the last save, although PaperQA's file list
+    already counts them as indexed. So the class keeps those changes in `unsaved`, and after a failed write lets
+    go of the writer, gives them to a new one, and tries the write again, WRITE_ATTEMPTS times in all. A commit
+    can also fail after it was written, so they are given again only when meta.json has not changed.
     """
     save_index = search_index_class.save_index.retry_with(stop=stop_after_attempt(LOCK_ATTEMPTS))
     delete_document = search_index_class.delete_document.retry_with(stop=stop_after_attempt(LOCK_ATTEMPTS))
@@ -101,16 +130,60 @@ def lock_capped_index(search_index_class):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.opened.append(self)
+            # ("add", PaperQA's fields for a PDF) or ("delete", file location), in order, since the last save.
+            self.unsaved = []
+
+        async def read_meta(self) -> str | None:
+            """Return the text of the index's meta.json, or None when there is none yet or it cannot be read."""
+            try:
+                return Path(await self.index_filename, "meta.json").read_text(encoding="utf-8")
+            except OSError:
+                return None
+
+        async def write_unsaved_again(self, attempt: int, meta_before: str | None) -> None:
+            """Let go of the failed writer, then give a new writer every change since the last save, unless the
+            failed write was a commit that had already been written."""
+            release_writer(self)
+            await asyncio.sleep(WRITE_RETRY_PAUSE_SECONDS * attempt)
+            if commit_landed(meta_before, await self.read_meta()):
+                self.unsaved.clear()
+            async with self.writer() as writer:
+                for kind, item in self.unsaved:
+                    if kind == "add":
+                        writer.add_document(Document.from_dict(item))
+                    else:
+                        writer.delete_documents("file_location", item)
+
+        async def try_write(self, write) -> None:
+            """Run a write to the index, and try it again with a new writer when tantivy cannot write a file."""
+            meta_before = await self.read_meta()
+            for attempt in range(1, WRITE_ATTEMPTS + 1):
+                try:
+                    if attempt > 1:
+                        await self.write_unsaved_again(attempt - 1, meta_before)
+                    await write()
+                    return
+                except Exception as error:
+                    if attempt == WRITE_ATTEMPTS or not is_write_error(error):
+                        raise
+                    print(f"Writing the index failed; trying again (try {attempt + 1} of {WRITE_ATTEMPTS}): {error}")
 
         async def add_document(self, index_doc, document=None, lock_acquisition_max_retries=LOCK_ATTEMPTS):
-            await super().add_document(
-                index_doc, document, lock_acquisition_max_retries=min(lock_acquisition_max_retries, LOCK_ATTEMPTS)
-            )
+            if await self.filecheck(index_doc["file_location"], self.filehash(index_doc["body"])):
+                # PaperQA adds nothing for a PDF the index already holds unchanged.
+                return
+            tries = min(lock_acquisition_max_retries, LOCK_ATTEMPTS)
+            add = super().add_document
+            await self.try_write(lambda: add(index_doc, document, lock_acquisition_max_retries=tries))
+            self.unsaved.append(("add", index_doc))
 
         async def save_index(self):
-            await save_index(self)
+            await self.try_write(lambda: save_index(self))
+            self.unsaved.clear()
 
         async def delete_document(self, file_location):
+            # PaperQA's removal saves the index straight away, through save_index above.
+            self.unsaved.append(("delete", file_location))
             await delete_document(self, file_location)
 
     return LockCappedSearchIndex
@@ -166,6 +239,7 @@ async def async_main():
         print(f"Retrying {cleared_failed_documents} previously failed PDFs in the active index.")
     rebuild_error = None
     stop_state["skipped"] = 0
+    run_state["failed"] = False
     paperqa_search = importlib.import_module("paperqa.agents.search")
     original_process_file = paperqa_search.process_file
     original_search_index = paperqa_search.SearchIndex
@@ -188,9 +262,9 @@ async def async_main():
         )
     failed_files = get_failed_files(index_dir=active_index_dir)
     if rebuild_error and failed_files:
-        print("Rebuild completed with parser/indexing errors; recorded failed PDFs will be reported below.")
+        print("Rebuild stopped with parser/indexing errors; recorded failed PDFs will be reported below.")
     elif rebuild_error:
-        print("Rebuild completed with parser/indexing errors before any failed PDFs were recorded.")
+        print("Rebuild stopped with parser/indexing errors before any failed PDFs were recorded.")
         for message in summarize_exception_messages(rebuild_error):
             print(f"ERROR: {message}")
     indexed_after = get_indexed_doc_count(index_dir=active_index_dir)
@@ -201,6 +275,11 @@ async def async_main():
     print(f"Failed PDFs: {len(failed_files)}")
     for file_location in failed_files:
         print(f"FAILED: {file_location}")
+    if rebuild_error:
+        # PaperQA's build stops every PDF still to do once one of them raises, so those are not indexed.
+        run_state["failed"] = True
+        left = len(get_files_to_index(active_index_dir))
+        print(f"The rebuild did not finish: {left} PDFs are not indexed yet. Run it again to carry on.")
 
 
 def cost_kind(response) -> str:
@@ -287,6 +366,8 @@ def main() -> int:
     """Run the async rebuild workflow from console-script entry points, with the estimate before it and the cost after."""
     print_estimate()
     asyncio.run(rebuild_counting_costs())
+    if run_state["failed"]:
+        return rebuild_client.FAILED_EXIT_CODE
     return rebuild_client.STOPPED_EXIT_CODE if stop_state["skipped"] else 0
 
 

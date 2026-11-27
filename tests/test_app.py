@@ -4165,6 +4165,28 @@ def test_a_rebuild_that_failed_says_whether_the_index_can_still_be_used(pdf_rese
     module.st.info.assert_called_once_with(module.REBUILD_INDEX_STATE_USABLE.format(count=3))
 
 
+def test_a_rebuild_that_failed_part_way_says_how_many_pdfs_are_left(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 23}, "pdf_count": 120}
+    )
+
+    module.st.info.assert_called_once_with(module.REBUILD_INDEX_STATE_LEFT.format(count=23, total=120, left=97))
+
+
+def test_a_rebuild_that_failed_with_every_pdf_indexed_does_not_count_any_left(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.info.reset_mock()
+
+    module.render_rebuild_result(
+        {"ok": False, "log_path": "x", "lines": [], "index": {"usable": True, "indexed": 5}, "pdf_count": 5}
+    )
+
+    module.st.info.assert_called_once_with(module.REBUILD_INDEX_STATE_USABLE.format(count=5))
+
+
 def test_a_rebuild_that_failed_and_left_an_unreadable_index_says_so(pdf_research_assistant_module):
     module = pdf_research_assistant_module
     module.st.info.reset_mock()

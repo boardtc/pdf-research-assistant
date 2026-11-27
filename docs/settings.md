@@ -322,6 +322,8 @@ The rebuild carries on if you close the page, and a reloaded page picks its prog
 
 If PaperQA reports that a PDF is empty but the file opens normally, it may be image-only and need OCR before it can be indexed.
 
+On Windows, writing the search index now and then fails with `Access is denied` on one of its new files. The rebuild then lets go of the failed writer, adds the PDFs not yet saved to a new one, and tries again, up to 5 times; each retry is a `Writing the index failed; trying again` line in the log. If the build still stops early, the log ends with how many PDFs are not indexed yet, `pdf-research-rebuild` exits with code 4, and the page says how many of the PDFs the index holds. Rebuilding again carries on from there.
+
 #### The rebuild estimate
 
 The estimate makes no paid calls. It counts only the PDFs the rebuild will index: those the index does not list yet, and those that failed before and are still in scope.

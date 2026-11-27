@@ -154,6 +154,7 @@ def test_collect_result_ends_a_finished_rebuild_and_keeps_its_last_log_lines(tmp
         "index_dir": run["index_dir"],
         "index": {"usable": True, "indexed": 0},
         "cost": None,
+        "pdf_count": 3,
     }
     assert rebuild_client.get_run() is None
 
@@ -273,6 +274,16 @@ def test_collect_result_says_whether_the_index_can_be_used_and_how_many_pdfs_it_
     _write_files_zip(run["index_dir"], {"a.pdf": "h1", "b.pdf": "h2", "c.pdf": "ERROR"})
 
     assert rebuild_client.collect_result()["index"] == {"usable": True, "indexed": 2}
+
+
+def test_collect_result_says_how_many_pdfs_the_rebuild_set_out_to_index(tmp_path):
+    _start(tmp_path, _process(returncode=rebuild_client.FAILED_EXIT_CODE), pdf_count=120)
+
+    result = rebuild_client.collect_result()
+
+    assert result["pdf_count"] == 120
+    assert result["ok"] is False
+    assert result["stopped"] is False
 
 
 def test_read_index_state_is_an_empty_but_undamaged_index_when_nothing_was_saved_yet(tmp_path):

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import importlib
 import json
 import shutil
@@ -167,6 +168,9 @@ def test_main_continues_when_directory_rebuild_raises_exception_group_and_report
     rebuild_index_module.get_directory_index = mock.AsyncMock(
         side_effect=ExceptionGroup("unhandled errors in a TaskGroup", [LookupError("unknown encoding: /SymbolSetEncoding")])
     )
+    rebuild_index_module.get_files_to_index = mock.Mock(
+        return_value=["Session 7/Sadler 2013 Opening-up-feedback-Teaching-learners-to-see Chapter.pdf"]
+    )
 
     with mock.patch("builtins.print") as print_mock:
         asyncio.run(rebuild_index_module.async_main())
@@ -174,10 +178,11 @@ def test_main_continues_when_directory_rebuild_raises_exception_group_and_report
     assert print_mock.call_args_list == [
         mock.call("Manifest PDFs: 1"),
         mock.call("Indexed before run: 105"),
-        mock.call("Rebuild completed with parser/indexing errors; recorded failed PDFs will be reported below."),
+        mock.call("Rebuild stopped with parser/indexing errors; recorded failed PDFs will be reported below."),
         mock.call("Indexed after run: 105"),
         mock.call("Failed PDFs: 1"),
         mock.call("FAILED: Session 7/Sadler 2013 Opening-up-feedback-Teaching-learners-to-see Chapter.pdf"),
+        mock.call("The rebuild did not finish: 1 PDFs are not indexed yet. Run it again to carry on."),
     ]
 
 
@@ -196,6 +201,7 @@ def test_main_prints_exception_messages_when_directory_rebuild_raises_exception_
             ],
         )
     )
+    rebuild_index_module.get_files_to_index = mock.Mock(return_value=["paper_a.pdf"])
 
     with mock.patch("builtins.print") as print_mock:
         asyncio.run(rebuild_index_module.async_main())
@@ -203,11 +209,12 @@ def test_main_prints_exception_messages_when_directory_rebuild_raises_exception_
     assert print_mock.call_args_list == [
         mock.call("Manifest PDFs: 1"),
         mock.call("Indexed before run: 3"),
-        mock.call("Rebuild completed with parser/indexing errors before any failed PDFs were recorded."),
+        mock.call("Rebuild stopped with parser/indexing errors before any failed PDFs were recorded."),
         mock.call("ERROR: unknown encoding: /SymbolSetEncoding"),
         mock.call("ERROR: bad metadata"),
         mock.call("Indexed after run: 3"),
         mock.call("Failed PDFs: 0"),
+        mock.call("The rebuild did not finish: 1 PDFs are not indexed yet. Run it again to carry on."),
     ]
 
 
@@ -658,6 +665,369 @@ def test_the_lock_cap_is_the_one_saved_answers_uses(rebuild_index_module):
 
     assert rebuild_index_module.LOCK_ATTEMPTS == saved_answers.LOCK_ATTEMPTS
     assert rebuild_index_module.release_writer is saved_answers.release_writer
+
+
+# On Windows, tantivy now and then fails to create a new file of the index with "Access is denied" (#157).
+
+WRITE_ERROR = (
+    "Failed to open file for write: 'IoError { io_error: Os { code: 5, kind: PermissionDenied, message: "
+    '"Access is denied." }, filepath: "89fae2c035d04722bf5746835c1243dd.fast" }\''
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        WRITE_ERROR,
+        "An index writer was killed.",
+        "The index writer was killed. It can happen if an indexing worker encountered an Io error for instance.",
+        "A worker thread encountered an error (io::Error most likely) or panicked.",
+        "An IO error occurred: 'Access is denied. (os error 5)'",
+    ],
+)
+def test_a_failed_write_of_an_index_file_counts_as_a_write_error(rebuild_index_module, message):
+    assert rebuild_index_module.is_write_error(ValueError(message)) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("Failed to acquire Lockfile: LockBusy."),
+        ValueError("bad metadata"),
+        PermissionError(13, "Access is denied"),
+    ],
+)
+def test_other_errors_do_not_count_as_write_errors(rebuild_index_module, error):
+    assert rebuild_index_module.is_write_error(error) is False
+
+
+class _FailingWriter:
+    """Stands in for a tantivy writer: fails the named step `times` times, otherwise passes it to the real one."""
+
+    def __init__(self, real, step, times=1, message=WRITE_ERROR, after=False):
+        self.real, self.step, self.left, self.message, self.after = real, step, times, message, after
+
+    def __getattr__(self, name):
+        attribute = getattr(self.real, name)
+        if name != self.step:
+            return attribute
+
+        def call(*args, **kwargs):
+            if self.left:
+                self.left -= 1
+                if self.after:
+                    # The step's work is done, and only then does it fail.
+                    attribute(*args, **kwargs)
+                raise ValueError(self.message)
+            return attribute(*args, **kwargs)
+
+        return call
+
+
+@pytest.fixture
+def no_write_pauses(monkeypatch):
+    """Count the pauses before each new try at a write, and skip them."""
+    real_sleep = asyncio.sleep
+    pauses = []
+
+    async def no_pause(seconds, *args, **kwargs):
+        pauses.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_pause)
+    return pauses
+
+
+def _doc(name, body=None):
+    return {"file_location": name, "body": body or f"text of {name}", "title": name, "year": "2026"}
+
+
+def _real_capped_index(rebuild_index_module, folder):
+    from paperqa.agents.search import SearchIndex
+
+    capped = rebuild_index_module.lock_capped_index(SearchIndex)
+    capped.opened.clear()
+    return capped(index_name="written", index_directory=folder, fields=["file_location", "body", "title", "year"])
+
+
+def _indexed_names(index) -> list[str]:
+    async def read():
+        tantivy_index = await index.index
+        tantivy_index.reload()
+        searcher = tantivy_index.searcher()
+        return sorted(
+            searcher.doc(address)["file_location"][0]
+            for _score, address in searcher.search(tantivy_index.parse_query("*"), 100).hits
+        )
+
+    return asyncio.run(read())
+
+
+def _close(index):
+    """Let go of the index's writer, so the test folder can be deleted."""
+    from pdf_research_assistant.saved_answers import release_writer
+
+    # A writer whose thread really failed raises here too, so this goes through the forgiving release.
+    release_writer(index)
+
+
+def test_a_save_that_fails_to_write_is_tried_again_with_every_unsaved_pdf(
+    rebuild_index_module, workspace_tmp_path, no_write_pauses
+):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        await index.add_document(_doc("b.pdf"))
+        index._writer = _FailingWriter(index._writer, "commit")
+        with mock.patch("builtins.print") as print_mock:
+            await index.save_index()
+        return print_mock
+
+    print_mock = asyncio.run(run())
+
+    assert _indexed_names(index) == ["a.pdf", "b.pdf"]
+    assert set(asyncio.run(index.index_files)) == {"a.pdf", "b.pdf"}
+    assert index.unsaved == []
+    # On Windows a real "Access is denied" can add a try of its own.
+    assert no_write_pauses[0] == rebuild_index_module.WRITE_RETRY_PAUSE_SECONDS
+    assert print_mock.call_args_list[0] == mock.call(
+        f"Writing the index failed; trying again (try 2 of {rebuild_index_module.WRITE_ATTEMPTS}): {WRITE_ERROR}"
+    )
+    _close(index)
+
+
+def test_a_save_whose_commit_landed_before_it_failed_does_not_add_the_pdfs_twice(
+    rebuild_index_module, workspace_tmp_path, no_write_pauses
+):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        await index.add_document(_doc("b.pdf"))
+        index._writer = _FailingWriter(index._writer, "commit", after=True)
+        with mock.patch("builtins.print"):
+            await index.save_index()
+
+    asyncio.run(run())
+
+    assert _indexed_names(index) == ["a.pdf", "b.pdf"]
+    assert set(asyncio.run(index.index_files)) == {"a.pdf", "b.pdf"}
+    assert index.unsaved == []
+    _close(index)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "landed"),
+    [
+        ('{"opstamp": 1}', '{"opstamp": 1}', False),
+        ('{"opstamp": 1}', '{"opstamp": 3}', True),
+        # When either could not be read, the PDFs are added again: twice in the index is better than not at all.
+        (None, '{"opstamp": 3}', False),
+        ('{"opstamp": 1}', None, False),
+    ],
+)
+def test_a_commit_landed_only_when_the_index_record_changed(rebuild_index_module, before, after, landed):
+    assert rebuild_index_module.commit_landed(before, after) is landed
+
+
+def test_reading_the_index_record_gives_its_text(rebuild_index_module, workspace_tmp_path):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        await index.save_index()
+        return await index.read_meta()
+
+    meta = asyncio.run(run())
+
+    assert meta == (workspace_tmp_path / "written" / "index" / "meta.json").read_text(encoding="utf-8")
+    _close(index)
+
+
+def test_reading_the_index_record_gives_none_before_there_is_one(rebuild_index_module, workspace_tmp_path):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    assert asyncio.run(index.read_meta()) is None
+
+
+def test_reading_the_index_record_gives_none_when_it_cannot_be_read(rebuild_index_module, workspace_tmp_path):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        await index.save_index()
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError(13, "Access is denied")):
+            return await index.read_meta()
+
+    assert asyncio.run(run()) is None
+    _close(index)
+
+
+def test_a_save_that_keeps_failing_to_write_gives_up_after_the_capped_tries(
+    rebuild_index_module, workspace_tmp_path, no_write_pauses
+):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+    real_writer = type(index).writer
+
+    @contextlib.asynccontextmanager
+    async def failing_writer(self, reset=False):
+        async with real_writer(self, reset=False) as writer:
+            if not isinstance(writer, _FailingWriter):
+                self._writer = _FailingWriter(writer, "commit", times=99)
+            yield self._writer
+        if reset:
+            self._writer = None
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        with mock.patch.object(type(index), "writer", failing_writer), mock.patch("builtins.print"):
+            await index.save_index()
+
+    with pytest.raises(ValueError) as raised:
+        asyncio.run(run())
+
+    # On Windows the last try can also fail for real, in tantivy's own words.
+    assert rebuild_index_module.is_write_error(raised.value)
+    assert len(no_write_pauses) == rebuild_index_module.WRITE_ATTEMPTS - 1
+    assert no_write_pauses == sorted(no_write_pauses)
+    assert index.unsaved == [("add", _doc("a.pdf"))]
+    _close(index)
+
+
+def test_a_save_that_fails_for_another_reason_is_not_tried_again(rebuild_index_module, workspace_tmp_path, no_write_pauses):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        index._writer = _FailingWriter(index._writer, "commit", message="bad metadata")
+        await index.save_index()
+
+    with pytest.raises(ValueError, match="bad metadata"):
+        asyncio.run(run())
+
+    assert no_write_pauses == []
+    _close(index)
+
+
+def test_adding_a_pdf_after_the_writer_was_killed_starts_a_new_writer_with_the_unsaved_pdfs(
+    rebuild_index_module, workspace_tmp_path, no_write_pauses
+):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        index._writer = _FailingWriter(index._writer, "add_document", message="An index writer was killed.")
+        with mock.patch("builtins.print"):
+            await index.add_document(_doc("b.pdf"))
+        await index.save_index()
+
+    asyncio.run(run())
+
+    assert _indexed_names(index) == ["a.pdf", "b.pdf"]
+    assert no_write_pauses[0] == rebuild_index_module.WRITE_RETRY_PAUSE_SECONDS
+    _close(index)
+
+
+def test_a_pdf_already_in_the_index_is_not_added_or_remembered_again(rebuild_index_module, workspace_tmp_path):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    async def run():
+        await index.add_document(_doc("a.pdf"))
+        await index.add_document(_doc("a.pdf"))
+
+    asyncio.run(run())
+
+    assert index.unsaved == [("add", _doc("a.pdf"))]
+    _close(index)
+
+
+def test_a_removal_is_written_again_when_its_save_fails(rebuild_index_module, workspace_tmp_path, no_write_pauses):
+    index = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+
+    # PaperQA removes by the whole file location as one word, which only a name of one word matches.
+    async def run():
+        await index.add_document(_doc("alpha"))
+        await index.save_index()
+        await index.add_document(_doc("beta"))
+        index._writer = _FailingWriter(index._writer, "commit")
+        with mock.patch("builtins.print"):
+            await index.delete_document("alpha")
+
+    asyncio.run(run())
+
+    assert _indexed_names(index) == ["beta"]
+    assert index.unsaved == []
+    _close(index)
+
+
+def test_a_new_index_starts_with_nothing_unsaved(rebuild_index_module, workspace_tmp_path):
+    first = _real_capped_index(rebuild_index_module, workspace_tmp_path)
+    asyncio.run(first.add_document(_doc("a.pdf")))
+    _close(first)
+
+    second = _real_capped_index(rebuild_index_module, workspace_tmp_path / "other")
+
+    assert second.unsaved == []
+
+
+# A rebuild that did not finish says so and how many PDFs are left, and exits with an error (#157).
+
+
+def test_main_says_how_many_pdfs_are_left_when_the_build_fails(rebuild_index_module):
+    active_index_dir = Path("index-root") / "active-index"
+    rebuild_index_module.get_allowed_paths = mock.Mock(return_value={"a.pdf", "b.pdf", "c.pdf"})
+    rebuild_index_module.get_indexed_doc_count = mock.Mock(side_effect=[0, 1])
+    rebuild_index_module.get_files_to_index = mock.Mock(return_value=["b.pdf", "c.pdf"])
+    rebuild_index_module.get_directory_index = mock.AsyncMock(side_effect=ExceptionGroup("x", [ValueError(WRITE_ERROR)]))
+
+    with mock.patch("builtins.print") as print_mock:
+        asyncio.run(rebuild_index_module.async_main())
+
+    rebuild_index_module.get_files_to_index.assert_called_once_with(active_index_dir)
+    assert print_mock.call_args_list == [
+        mock.call("Manifest PDFs: 3"),
+        mock.call("Indexed before run: 0"),
+        mock.call("Rebuild stopped with parser/indexing errors before any failed PDFs were recorded."),
+        mock.call(f"ERROR: {WRITE_ERROR}"),
+        mock.call("Indexed after run: 1"),
+        mock.call("Failed PDFs: 0"),
+        mock.call("The rebuild did not finish: 2 PDFs are not indexed yet. Run it again to carry on."),
+    ]
+    assert rebuild_index_module.run_state["failed"] is True
+
+
+def test_main_does_not_count_the_pdfs_left_after_a_build_that_finished(rebuild_index_module):
+    rebuild_index_module.run_state["failed"] = True
+
+    with mock.patch("builtins.print"):
+        asyncio.run(rebuild_index_module.async_main())
+
+    rebuild_index_module.get_files_to_index.assert_not_called()
+    assert rebuild_index_module.run_state["failed"] is False
+
+
+def test_main_exits_with_the_failed_code_when_the_build_did_not_finish(rebuild_index_module):
+    async def failed_run():
+        rebuild_index_module.run_state["failed"] = True
+
+    with mock.patch.object(rebuild_index_module, "async_main", side_effect=failed_run):
+        assert rebuild_index_module.main() == 4
+
+
+def test_main_exits_with_the_failed_code_even_when_a_stop_was_asked_for_too(rebuild_index_module):
+    async def failed_and_stopped_run():
+        rebuild_index_module.run_state["failed"] = True
+        rebuild_index_module.stop_state["skipped"] = 2
+
+    with mock.patch.object(rebuild_index_module, "async_main", side_effect=failed_and_stopped_run):
+        assert rebuild_index_module.main() == 4
+
+
+def test_the_failed_exit_code_is_the_one_the_app_side_reads(rebuild_index_module):
+    from pdf_research_assistant import rebuild_client
+
+    assert rebuild_index_module.rebuild_client.FAILED_EXIT_CODE == rebuild_client.FAILED_EXIT_CODE == 4
 
 
 # The rough cost before a rebuild and the real cost after it (#153).

@@ -28,6 +28,8 @@ STOP_NAME = "rebuild.stop"
 # The rebuild process looks for this file between PDFs; rebuild.py reads the same names.
 STOP_ENV = "PDF_RESEARCH_STOP_FILE"
 STOPPED_EXIT_CODE = 3
+# The rebuild ended with an error before every PDF was indexed; rebuild.py returns the same code.
+FAILED_EXIT_CODE = 4
 # The rebuild writes what it really cost to this file, by kind of call; rebuild.py reads the same names.
 COST_NAME = "rebuild.cost.json"
 COST_ENV = "PDF_RESEARCH_COST_FILE"
@@ -203,6 +205,8 @@ def collect_result() -> dict | None:
         "index_dir": run["index_dir"],
         "index": read_index_state(run["index_dir"]),
         "cost": read_cost(cost_path(run["index_dir"])),
+        # How many PDFs the rebuild set out to index, so a failed one can say how many are left.
+        "pdf_count": run["pdf_count"],
     }
     return _state["result"]
 

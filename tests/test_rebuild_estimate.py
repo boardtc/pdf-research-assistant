@@ -1,6 +1,5 @@
 import math
 import threading
-from pathlib import PurePosixPath, PureWindowsPath
 from dataclasses import replace
 from pathlib import Path
 
@@ -693,23 +692,33 @@ def test_a_pdf_whose_row_paperqa_finds_has_its_citation_already(tmp_path):
     settings = _settings()
     settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf", "sub/b.pdf"])
 
-    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf"], PurePosixPath) == 0
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf"]) == 0
 
 
-def test_a_row_paperqa_finds_needs_no_citation_of_its_own(tmp_path):
-    # PaperQA fills in a citation from the title when a row has none, so it reads none from the PDF.
+def test_a_row_without_a_citation_has_its_citation_read(tmp_path):
+    # The app leaves such rows out of what PaperQA is given, so PaperQA reads the citation from the PDF (#160).
     settings = _settings()
     settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf"], citation="")
 
-    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"], PurePosixPath) == 0
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"]) == 1
 
 
-def test_on_windows_paperqa_finds_no_row_written_with_forward_slashes(tmp_path):
-    # PaperQA looks a PDF up by its path as Windows writes it, so "sub/b.pdf" is looked up as "sub\\b.pdf".
+def test_rows_are_found_whichever_slashes_they_are_written_with(tmp_path):
+    # PaperQA looks a PDF up by its path as the computer writes it, and the app keys the rows the same way (#160).
     settings = _settings()
     settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf", "sub/b.pdf", "sub\\c.pdf"])
 
-    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf", "sub/c.pdf"], PureWindowsPath) == 1
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf", "sub/c.pdf"]) == 0
+
+
+def test_the_paper_list_is_read_with_the_apps_reader_whatever_paperqa_has_been_given(monkeypatch, tmp_path):
+    import paperqa.agents.search as search
+
+    monkeypatch.setattr(search, "maybe_get_manifest", lambda *args: pytest.fail("used PaperQA's own reader"))
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, ["sub/b.pdf"])
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["sub/b.pdf"]) == 0
 
 
 def test_paperqa_also_finds_a_row_by_the_pdfs_full_path(tmp_path):
@@ -725,7 +734,7 @@ def test_paperqa_finds_a_paper_list_named_from_the_pdf_folder(tmp_path):
     settings.agent.index.paper_directory = str(tmp_path)
     settings.agent.index.manifest_file = "manifest.csv"
 
-    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"], PurePosixPath) == 0
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"]) == 0
 
 
 def test_a_paper_list_that_is_missing_gives_no_citations(tmp_path):
@@ -806,7 +815,7 @@ def test_describe_explains_the_citation_calls():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=1, citation_cost=0.0002))
 
     assert (
-        "PaperQA finds no row in the paper list for 1 of these PDFs, so `gpt-4o-mini` is asked twice for it to "
+        "The paper list gives no citation for 1 of these PDFs, so `gpt-4o-mini` is asked twice for it to "
         "read its citation: less than 1 cent"
     ) in lines
 
@@ -815,7 +824,7 @@ def test_describe_explains_the_citation_calls_for_several_pdfs():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_cost=0.0004))
 
     assert (
-        "PaperQA finds no row in the paper list for 2 of these PDFs, so `gpt-4o-mini` is asked twice for each to "
+        "The paper list gives no citation for 2 of these PDFs, so `gpt-4o-mini` is asked twice for each to "
         "read its citation: less than 1 cent"
     ) in lines
 
@@ -824,7 +833,7 @@ def test_describe_says_when_each_citation_takes_one_call():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_calls=1, citation_cost=0.0004))
 
     assert (
-        "PaperQA finds no row in the paper list for 2 of these PDFs, so `gpt-4o-mini` is asked once for each to "
+        "The paper list gives no citation for 2 of these PDFs, so `gpt-4o-mini` is asked once for each to "
         "read its citation: less than 1 cent"
     ) in lines
 
@@ -833,7 +842,7 @@ def test_describe_explains_the_citation_calls_of_a_local_model():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_model="ollama/llama3", local=True))
 
     assert any(
-        line.startswith("PaperQA finds no row in the paper list for 2 of these PDFs")
+        line.startswith("The paper list gives no citation for 2 of these PDFs")
         and line.endswith(rebuild_estimate.LOCAL_NOTE)
         for line in lines
     )

@@ -5,7 +5,7 @@ A rebuild indexes only the PDFs the index does not list yet, and those that fail
 - reads the PDF and splits its text into passages of `reader_config["chunk_chars"]` characters, each repeating
   the last `reader_config["overlap"]` of the one before, and sends them to the embedding model
   (`settings.embedding`) in one call;
-- when it finds no row for the PDF in the paper list, asks the answer model (`settings.llm`) to read the PDF's
+- when the paper list gives no citation for the PDF, asks the answer model (`settings.llm`) to read the PDF's
   citation from its first three pages, and with `parsing.use_doc_details` on (the app turns it off) asks again to
   read the citation back as JSON, to look the paper up online;
 - with images and tables on with enrichment, asks `parsing.enrichment_llm` to describe each picture, sent with
@@ -39,7 +39,7 @@ import tiktoken
 from paperqa.prompts import citation_prompt
 from paperqa.settings import MultimodalOptions
 
-from pdf_research_assistant import estimate
+from pdf_research_assistant import estimate, paper_list
 
 # How long the PDFs are read for before the estimate makes do with those read so far, and how long the page
 # waits at most when one PDF is slow to open, such as one a synced drive must fetch first. Tried against every
@@ -323,7 +323,7 @@ def estimate_rebuild(
 ) -> RebuildEstimate:
     """Estimate a rebuild that indexes this many PDFs, from readings of some of them. Makes no API calls.
 
-    citation_pdfs counts the PDFs PaperQA finds no paper list row for; local says the answer model is local.
+    citation_pdfs counts the PDFs the paper list gives no citation for; local says the answer model is local.
     """
     enrich = MultimodalOptions.from_value(settings.parsing.multimodal).should_parse_and_enrich_media[1]
     whole_page = enrich and settings.parsing.reader_config.get("full_page", False)
@@ -417,24 +417,20 @@ def estimate_rebuild(
     )
 
 
-def citation_pdfs(settings: object, paper_dir: Path, files: list[str], path_type: type = Path) -> int:
-    """Return how many of these PDFs, as paths under the PDF folder, PaperQA will find no paper list row for.
+def citation_pdfs(settings: object, paper_dir: Path, files: list[str]) -> int:
+    """Return how many of these PDFs, as paths under the PDF folder, the paper list gives PaperQA no citation for.
 
-    PaperQA reads the paper list it is given (`agent.index.manifest_file`) with its own reader, and looks each PDF up
-    by its path under the PDF folder as the computer writes it, then by its full path. A PDF it finds takes its
-    citation from the row, or one made from the row's title, so only the others have their citation read. On
-    Windows a path is written with backslashes, so a row written with forward slashes is not found.
+    PaperQA reads the paper list it is given (`agent.index.manifest_file`) through paper_list.read_for_paperqa,
+    which gives it only the rows with a citation, keyed by each path as the computer writes it (#160). It looks each
+    PDF up by that path, then by its full path. A PDF it finds takes its citation from the row, so only the others
+    have their citation read.
     """
     if not files:
         return 0
     location = manifest_location(settings)
-    manifest = anyio.run(_read_manifest, location) if location else {}
+    manifest = anyio.run(paper_list.read_for_paperqa, location) if location else {}
     absolute = Path(paper_dir).absolute()
-    return sum(
-        1
-        for file in files
-        if not (manifest.get(str(path_type(file))) or manifest.get(str(path_type(absolute, file))))
-    )
+    return sum(1 for file in files if not (manifest.get(str(Path(file))) or manifest.get(str(absolute / file))))
 
 
 def manifest_location(settings: object) -> Path | None:
@@ -446,12 +442,6 @@ def manifest_location(settings: object) -> Path | None:
     path = Path(named)
     return path if path.exists() else Path(settings.agent.index.paper_directory) / path
 
-
-async def _read_manifest(location: Path) -> dict:
-    """Read the paper list with PaperQA's own reader, which gives no rows for one that is missing or unreadable."""
-    from paperqa.agents.search import maybe_get_manifest
-
-    return await maybe_get_manifest(anyio.Path(location))
 
 
 def estimate_files(settings: object, paper_dir: Path, files: list[str], local: bool = False) -> RebuildEstimate:
@@ -516,7 +506,7 @@ def describe(result: RebuildEstimate) -> list[str]:
         one = result.citation_pdfs == 1
         cost = LOCAL_NOTE if result.local else describe_cost(result.citation_cost)
         lines.append(
-            f"PaperQA finds no row in the paper list for {result.citation_pdfs} of these PDFs, so "
+            f"The paper list gives no citation for {result.citation_pdfs} of these PDFs, so "
             f"`{result.citation_model}` is asked {'twice' if result.citation_calls == 2 else 'once'} for "
             f"{'it' if one else 'each'} to read its citation: {cost}"
         )

@@ -235,6 +235,8 @@ Open **Which PDFs are searched** in the sidebar to choose the scope of the index
 - Cost and time: PDFs that come into scope are indexed when you click **Rebuild the index**, which costs money for embeddings.
 - Affects indexing, questions and exhaustive search.
 
+When it indexes a PDF, PaperQA takes the PDF's citation from its row in the paper list, word for word, and names the document after it the way it names one after a citation it reads (`Bretag (2020) ...` becomes `Bretag2020`). A PDF whose row has no citation, or that has no row, has its citation read from its first pages by the answer model instead. A PDF already in the index keeps the citation it was indexed with, so changing a citation in the paper list only affects PDFs indexed afterwards.
+
 ### Search subfolders
 
 - PaperQA setting: `recurse_subdirectories`.

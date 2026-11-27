@@ -30,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PDF = PROJECT_ROOT / "tests" / "fixtures" / "tiny-enthusiasm.pdf"
 PDF_NAME = "tiny-enthusiasm.pdf"
 PDF_TITLE = "Tiny enthusiasm fixture"
+PDF_CITATION = f"Tests (2026) {PDF_TITLE}"
 QUESTION = "Does teacher enthusiasm help students learn?"
 QUOTE = "Enthusiasm is contagious in a classroom."
 FAKE_API_KEY = "sk-test-not-a-real-key"
@@ -49,16 +50,16 @@ def forget_project_modules():
 
 
 @contextlib.contextmanager
-def tiny_workspace():
-    """Set up a throwaway folder with the fixture PDF and its manifest, and load the project against it."""
+def tiny_workspace(folder: str = ""):
+    """Set up a throwaway folder with the fixture PDF (in `folder` under the PDF folder, if given) and its manifest,
+    and load the project against it."""
     root = PROJECT_ROOT / "tests" / ".tmp" / str(uuid.uuid4())
     papers = root / "papers"
-    papers.mkdir(parents=True)
-    shutil.copy(FIXTURE_PDF, papers / PDF_NAME)
+    (papers / folder).mkdir(parents=True)
+    shutil.copy(FIXTURE_PDF, papers / folder / PDF_NAME)
     manifest = root / "manifest.csv"
-    manifest.write_text(
-        f"file_location,title,citation,doi\n{PDF_NAME},{PDF_TITLE},Tests (2026) {PDF_TITLE},\n", encoding="utf-8"
-    )
+    listed = f"{folder}/{PDF_NAME}" if folder else PDF_NAME
+    manifest.write_text(f"file_location,title,citation,doi\n{listed},{PDF_TITLE},{PDF_CITATION},\n", encoding="utf-8")
 
     with pytest.MonkeyPatch.context() as env:
         env.setenv("PAPER_DIR", str(papers))
@@ -138,6 +139,36 @@ def test_rebuild_indexes_the_tiny_pdf_with_its_text(tiny_index):
     saved = pickle.loads(zlib.decompress((tiny_index.index_dir / "docs" / f"{index_files[PDF_NAME]}.zip").read_bytes()))
     saved_text = " ".join(" ".join(text.text.split()) for text in saved.texts)
     assert "shows genuine enthusiasm for the subject." in saved_text
+
+
+def saved_doc(index_dir: Path, file_location: str):
+    """Return the document PaperQA saved in the index for this PDF."""
+    index_files = pickle.loads(zlib.decompress((index_dir / "files.zip").read_bytes()))
+    saved = pickle.loads(zlib.decompress((index_dir / "docs" / f"{index_files[file_location]}.zip").read_bytes()))
+    return next(iter(saved.docs.values()))
+
+
+def test_the_rebuild_takes_the_citation_from_the_paper_list(tiny_index):
+    doc = saved_doc(tiny_index.index_dir, PDF_NAME)
+
+    assert doc.citation == PDF_CITATION
+    assert doc.docname == "Tests2026"
+
+
+def test_a_pdf_in_a_subfolder_takes_its_citation_from_the_paper_list_without_asking_the_model():
+    # The fake API key makes any call to the answer model fail, so the PDF only indexes if PaperQA finds its row.
+    with tiny_workspace(folder="Session 1") as (_root, rebuild):
+        for _attempt in range(REBUILD_ATTEMPTS):
+            output = asyncio.run(rebuild_once(rebuild))
+            if "Indexed after run: 1" in output:
+                break
+        index_dir = rebuild.get_active_index_dir()
+
+        assert "Failed PDFs: 0" in output
+        doc = saved_doc(index_dir, str(Path("Session 1") / PDF_NAME))
+
+    assert doc.citation == PDF_CITATION
+    assert doc.docname == "Tests2026"
 
 
 def test_a_rebuild_after_one_whose_index_write_failed_finishes(monkeypatch):

@@ -25,6 +25,7 @@ from pdf_research_assistant import (
     query_client,
     rate_profiles,
     rebuild_client,
+    rebuild_estimate,
     research_presets,
     saved_answers,
     saved_settings,
@@ -134,6 +135,9 @@ REBUILD_INDEX_STATE_UNUSABLE = (
     "The index's file list cannot be read, so the index may be damaged. Rebuild it before asking questions."
 )
 REBUILD_LOG_TITLE = "Show the end of the rebuild log"
+REBUILD_COST_MISSING_NOTE = "The rebuild ended without recording what it cost. Its log may say more."
+# The confirm step's estimate, kept with the index it is for, so the PDFs are read once per confirm step.
+REBUILD_ESTIMATE_STATE = "rebuild_estimate"
 INDEX_SETTINGS_UNCHANGED_NOTE = "These are the settings already in use, so nothing was saved."
 MEDIA_PACKAGE_NOTE = (
     "Images and tables cannot be read yet, because the `pypdfium2` package is not installed. Install it with "
@@ -1020,9 +1024,13 @@ def index_needs_rebuild(
 
 
 def describe_rebuild_plan(
-    settings, active_index_dir: Path, pdf_count: int, indexed_count: int, friendly_name: str | None = None
+    active_index_dir: Path,
+    pdf_count: int,
+    indexed_count: int,
+    estimate: rebuild_estimate.RebuildEstimate,
+    friendly_name: str | None = None,
 ) -> list[str]:
-    """Describe what a rebuild will do and what is paid for, so the user can decide whether to start it."""
+    """Describe what a rebuild will do and roughly what it costs, so the user can decide whether to start it."""
     scope = f"PDFs in scope: {pdf_count}"
     if indexed_count:
         scope += f". {indexed_count} are already in this index and are not indexed again"
@@ -1030,22 +1038,41 @@ def describe_rebuild_plan(
         scope,
         f"Index: {describe_index_name(active_index_dir.name, friendly_name)}, built with the library and index "
         "settings saved in the sidebar",
-        f"Each PDF that is indexed is read, split into passages and sent to the embedding model "
-        f"`{settings.embedding}`, which costs money. The app cannot estimate how much before reading the PDFs",
+        *rebuild_estimate.describe(estimate),
+        REBUILD_TIME_NOTE,
     ]
-    media = settings_groups.current_choice(settings_groups.get_setting("multimodal"), settings)
-    if media == "on_with_enrichment":
-        lines.append(
-            "Images and tables are on with enrichment, so the model "
-            f"`{settings.parsing.enrichment_llm}` is also paid to describe every image and table"
-        )
-    lines.append(REBUILD_TIME_NOTE)
     return lines
+
+
+def get_rebuild_estimate(settings, active_index_dir: Path) -> rebuild_estimate.RebuildEstimate:
+    """Return the rough cost and time of indexing the PDFs this index does not hold yet. Makes no paid calls.
+
+    It is worked out once for each confirm step and index, since reading the PDFs takes a couple of seconds.
+    """
+    kept = st.session_state.get(REBUILD_ESTIMATE_STATE)
+    if kept and kept[0] == str(active_index_dir):
+        return kept[1]
+    estimate = rebuild_estimate.estimate_files(
+        settings,
+        bootstrap.PAPER_DIR,
+        bootstrap.get_files_to_index(active_index_dir),
+        bootstrap.load_allowed_manifest_paths(),
+        local=bool(local_llm.load_config()),
+    )
+    st.session_state[REBUILD_ESTIMATE_STATE] = (str(active_index_dir), estimate)
+    return estimate
+
+
+def end_rebuild_pending() -> None:
+    st.session_state.rebuild_pending = False
+    st.session_state.pop(REBUILD_ESTIMATE_STATE, None)
 
 
 def request_rebuild() -> None:
     """Ask the user to confirm a rebuild. Nothing starts here."""
     st.session_state.rebuild_pending = True
+    # The PDFs may have changed since an earlier confirm step.
+    st.session_state.pop(REBUILD_ESTIMATE_STATE, None)
     st.rerun()
 
 
@@ -1054,16 +1081,20 @@ def render_rebuild_pending(settings, active_index_dir: Path, manifest_count: int
     pdf_count = manifest_count or rebuild_client.count_pdfs(bootstrap.PAPER_DIR, bootstrap.saved_scope()[1])
     st.markdown(f"**{REBUILD_LABEL}**")
     plan = describe_rebuild_plan(
-        settings, active_index_dir, pdf_count, indexed_count, index_names.get_name(active_index_dir)
+        active_index_dir,
+        pdf_count,
+        indexed_count,
+        get_rebuild_estimate(settings, active_index_dir),
+        index_names.get_name(active_index_dir),
     )
     st.markdown("\n".join(f"- {line}" for line in plan))
     if st.button(REBUILD_CONFIRM_LABEL, key="rebuild_confirm"):
         rebuild_client.start(active_index_dir, pdf_count)
-        st.session_state.rebuild_pending = False
+        end_rebuild_pending()
         st.rerun()
         return
     if st.button("Cancel", key="rebuild_cancel"):
-        st.session_state.rebuild_pending = False
+        end_rebuild_pending()
         st.rerun()
 
 
@@ -1116,6 +1147,11 @@ def render_rebuild_result(result: dict | None) -> None:
             st.info(REBUILD_INDEX_STATE_USABLE.format(count=index["indexed"]))
         elif index:
             st.error(REBUILD_INDEX_STATE_UNUSABLE)
+    # A stopped or failed rebuild still paid for the PDFs it started.
+    if result.get("cost"):
+        st.markdown(rebuild_client.describe_cost(result["cost"]))
+    else:
+        st.caption(REBUILD_COST_MISSING_NOTE)
     if result["lines"]:
         with st.expander(REBUILD_LOG_TITLE):
             st.code("\n".join(result["lines"]))

@@ -229,14 +229,22 @@ def count_pages(settings: object) -> float:
     return settings.parsing.reader_config["chunk_chars"] / CHARACTERS_PER_PAGE + 1
 
 
-def count_pictures(settings: object) -> float:
-    """Return roughly how many pictures go with each passage, or 0 with images and tables off."""
+def pictures_per_page(settings: object) -> float:
+    """Return roughly how many pictures each page gives, or 0 with images and tables off.
+
+    The rebuild estimate counts the pictures sent for describing the same way.
+    """
     parse_media, _ = MultimodalOptions.from_value(settings.parsing.multimodal).should_parse_and_enrich_media
     if not parse_media:
         return 0
     if settings.parsing.reader_config.get("full_page", False):
-        return count_pages(settings)
-    return PICTURES_PER_PAGE * count_pages(settings)
+        return 1
+    return PICTURES_PER_PAGE
+
+
+def count_pictures(settings: object) -> float:
+    """Return roughly how many pictures go with each passage, or 0 with images and tables off."""
+    return pictures_per_page(settings) * count_pages(settings)
 
 
 def picture_pixels(settings: object) -> tuple[int, int]:

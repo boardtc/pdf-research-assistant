@@ -336,6 +336,18 @@ def test_count_pages_includes_the_page_a_passage_runs_into():
     assert estimate.count_pages(_paperqa_settings()) == 5000 / estimate.CHARACTERS_PER_PAGE + 1
 
 
+def test_pictures_per_page_is_zero_with_images_and_tables_off():
+    assert estimate.pictures_per_page(_paperqa_settings(media=False)) == 0
+
+
+def test_pictures_per_page_guesses_from_a_typical_page_when_on():
+    assert estimate.pictures_per_page(_paperqa_settings(media=True)) == estimate.PICTURES_PER_PAGE
+
+
+def test_pictures_per_page_is_one_with_whole_page_pictures():
+    assert estimate.pictures_per_page(_paperqa_settings(media=True, whole_page=True)) == 1
+
+
 def test_count_pictures_is_zero_with_images_and_tables_off():
     assert estimate.count_pictures(_paperqa_settings(media=False)) == 0
 

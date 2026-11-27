@@ -1,21 +1,29 @@
 import asyncio
+import contextvars
 import importlib
 import inspect
+import json
 import os
 import pickle
 import zlib
 from pathlib import Path
 
+import litellm
+from lmi.cost_tracker import GLOBAL_COST_TRACKER, enable_cost_tracking
 from paperqa.agents.search import get_directory_index
+from paperqa.settings import Settings
 from tenacity import stop_after_attempt
 
-from pdf_research_assistant import index_record, rebuild_client
+from pdf_research_assistant import index_record, local_llm, rebuild_client, rebuild_estimate
 from pdf_research_assistant.bootstrap import (
     FAILED_DOCUMENT_ADD_ID,
+    PAPER_DIR,
     build_settings,
     get_allowed_paths,
     get_failed_files,
+    get_files_to_index,
     get_indexed_doc_count,
+    load_allowed_manifest_paths,
 )
 from pdf_research_assistant.saved_answers import LOCK_ATTEMPTS, release_writer
 
@@ -23,6 +31,9 @@ settings = build_settings()
 
 # How many PDFs were left unstarted because the app asked this rebuild to stop.
 stop_state = {"skipped": 0}
+# Set while PaperQA describes a PDF's images and tables, so their calls' cost is counted as enrichment.
+enriching = contextvars.ContextVar("enriching", default=False)
+ESTIMATE_HEADING = "Rough estimate before starting:"
 
 
 class _StopRequested(Exception):
@@ -193,9 +204,92 @@ async def async_main():
         print(f"FAILED: {file_location}")
 
 
+def cost_kind(response) -> str:
+    """Say which kind of call a response's cost belongs to: embeddings, enrichment, or reading a citation.
+
+    Apart from embeddings and enrichment, the only calls a rebuild makes are the two that read the citation of
+    a PDF without a row in the paper list.
+    """
+    if isinstance(response, litellm.EmbeddingResponse):
+        return "embeddings"
+    return "enrichment" if enriching.get() else "citations"
+
+
+class CostCounter:
+    """Add up the cost PaperQA's model client tracks for each call, by kind of call.
+
+    The tracker adds each call's cost to its running total, then calls back with the response, so the cost of
+    the call is what the total has grown by since the last call back.
+    """
+
+    def __init__(self, tracker=GLOBAL_COST_TRACKER):
+        self.tracker = tracker
+        self.seen = tracker.lifetime_cost_usd
+        self.costs = rebuild_client.empty_costs()
+
+    async def __call__(self, response) -> None:
+        cost = self.tracker.lifetime_cost_usd - self.seen
+        self.seen = self.tracker.lifetime_cost_usd
+        self.costs[cost_kind(response)] += cost
+
+
+def mark_enrichment(make_media_enricher):
+    """Wrap PaperQA's maker of picture describers, so the calls each describer makes are marked as enrichment."""
+
+    def make(settings):
+        describe = make_media_enricher(settings)
+
+        async def describe_and_mark(parsed_text):
+            token = enriching.set(True)
+            try:
+                return await describe(parsed_text)
+            finally:
+                enriching.reset(token)
+
+        return describe_and_mark
+
+    return make
+
+
+def report_costs(costs: dict[str, float]) -> None:
+    """Print what the rebuild cost, and write it where the app asked for it, when it did."""
+    print(rebuild_client.describe_cost(costs))
+    cost_file = os.environ.get(rebuild_client.COST_ENV)
+    if cost_file:
+        Path(cost_file).write_text(json.dumps(costs), encoding="utf-8")
+
+
+async def rebuild_counting_costs() -> None:
+    """Rebuild the index and report what it really cost, through LiteLLM's prices, even if it fails part way."""
+    counter = CostCounter()
+    GLOBAL_COST_TRACKER.add_callback(counter)
+    # Off by default; the calls PaperQA makes from here on are counted.
+    enable_cost_tracking()
+    original_enricher = Settings.make_media_enricher
+    Settings.make_media_enricher = mark_enrichment(original_enricher)
+    try:
+        await async_main()
+    finally:
+        Settings.make_media_enricher = original_enricher
+        GLOBAL_COST_TRACKER._callbacks.remove(counter)
+        report_costs(counter.costs)
+
+
+def print_estimate() -> None:
+    """Print the rough cost and time of indexing the PDFs that are not in the index yet. Makes no paid calls."""
+    files = get_files_to_index(get_active_index_dir())
+    result = rebuild_estimate.estimate_files(
+        settings, PAPER_DIR, files, load_allowed_manifest_paths(), local=bool(local_llm.load_config())
+    )
+    print(ESTIMATE_HEADING)
+    for line in rebuild_estimate.describe(result):
+        print(f"- {line}")
+
+
 def main() -> int:
-    """Run the async rebuild workflow from console-script entry points."""
-    asyncio.run(async_main())
+    """Run the async rebuild workflow from console-script entry points, with the estimate before it and the cost after."""
+    print_estimate()
+    asyncio.run(rebuild_counting_costs())
     return rebuild_client.STOPPED_EXIT_CODE if stop_state["skipped"] else 0
 
 

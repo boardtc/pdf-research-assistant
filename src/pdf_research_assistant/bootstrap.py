@@ -228,6 +228,17 @@ def get_unindexed_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[st
     return sorted(get_files_in_scope(paper_dir) - get_index_entries(index_dir))
 
 
+def get_files_to_index(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
+    """Return the PDFs a rebuild will index, as paths under the PDF folder: the ones the index does not list yet,
+    and the ones that failed before and are still in scope, which the rebuild tries again.
+    """
+    if not paper_dir.exists():
+        return []
+    in_scope = get_files_in_scope(paper_dir)
+    failed = {normalize_file_location(file, paper_dir=paper_dir) for file in get_failed_files(index_dir)}
+    return sorted((in_scope - get_index_entries(index_dir)) | (failed & in_scope))
+
+
 def get_out_of_scope_files(index_dir: Path, paper_dir: Path = PAPER_DIR) -> list[str]:
     """Return the PDFs the index holds that are no longer in scope, as paths under the PDF folder.
 

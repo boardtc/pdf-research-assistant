@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import shutil
 import pickle
 import sys
@@ -37,12 +38,16 @@ def rebuild_index_module():
     settings_object = mock.Mock()
     settings_object.agent.index.index_directory = Path("index-root")
     settings_object.get_index_name.return_value = "active-index"
+    settings_object.parsing.multimodal = False
 
     bootstrap_module.get_allowed_paths = mock.Mock(return_value={"paper_a.pdf", "paper_b.pdf"})
     bootstrap_module.FAILED_DOCUMENT_ADD_ID = "ERROR"
     bootstrap_module.build_settings = mock.Mock(return_value=settings_object)
     bootstrap_module.get_failed_files = mock.Mock(return_value=[])
     bootstrap_module.get_indexed_doc_count = mock.Mock(side_effect=[1, 2])
+    bootstrap_module.get_files_to_index = mock.Mock(return_value=[])
+    bootstrap_module.load_allowed_manifest_paths = mock.Mock(return_value=set())
+    bootstrap_module.PAPER_DIR = Path("papers")
 
     search_module.get_directory_index = mock.AsyncMock(name="get_directory_index")
     search_module.process_file = mock.AsyncMock(name="process_file")
@@ -653,3 +658,158 @@ def test_the_lock_cap_is_the_one_saved_answers_uses(rebuild_index_module):
 
     assert rebuild_index_module.LOCK_ATTEMPTS == saved_answers.LOCK_ATTEMPTS
     assert rebuild_index_module.release_writer is saved_answers.release_writer
+
+
+# The rough cost before a rebuild and the real cost after it (#153).
+
+
+def _embedding_response():
+    import litellm
+
+    return litellm.EmbeddingResponse()
+
+
+def _completion_response():
+    import litellm
+
+    return litellm.ModelResponse()
+
+
+def test_cost_kind_tells_embeddings_from_citation_reading_and_enrichment(rebuild_index_module):
+    module = rebuild_index_module
+
+    assert module.cost_kind(_embedding_response()) == "embeddings"
+    assert module.cost_kind(_completion_response()) == "citations"
+    token = module.enriching.set(True)
+    try:
+        assert module.cost_kind(_completion_response()) == "enrichment"
+    finally:
+        module.enriching.reset(token)
+
+
+def test_cost_counter_adds_each_calls_cost_to_its_kind(rebuild_index_module):
+    module = rebuild_index_module
+    tracker = mock.Mock(lifetime_cost_usd=1.0)
+    counter = module.CostCounter(tracker)
+
+    async def calls():
+        # The tracker adds a call's cost to its running total before it calls back.
+        tracker.lifetime_cost_usd = 1.25
+        await counter(_embedding_response())
+        tracker.lifetime_cost_usd = 1.75
+        await counter(_completion_response())
+        tracker.lifetime_cost_usd = 1.80
+        await counter(_embedding_response())
+
+    asyncio.run(calls())
+
+    assert counter.costs == pytest.approx({"embeddings": 0.30, "enrichment": 0.0, "citations": 0.50})
+
+
+def test_mark_enrichment_marks_the_calls_made_while_describing_pictures(rebuild_index_module):
+    module = rebuild_index_module
+    seen = []
+
+    async def describe_pictures(parsed_text):
+        async def one_picture():
+            seen.append(module.enriching.get())
+
+        # PaperQA describes the pictures side by side, in tasks of their own.
+        await asyncio.gather(one_picture(), one_picture())
+        return f"described {parsed_text}"
+
+    make = module.mark_enrichment(lambda settings: describe_pictures)
+
+    async def run():
+        result = await make("settings")("text")
+        seen.append(module.enriching.get())
+        return result
+
+    assert asyncio.run(run()) == "described text"
+    assert seen == [True, True, False]
+
+
+def test_rebuild_counting_costs_reports_what_each_kind_of_call_cost(rebuild_index_module, workspace_tmp_path, monkeypatch):
+    from lmi.cost_tracker import GLOBAL_COST_TRACKER
+    from paperqa.settings import Settings
+
+    module = rebuild_index_module
+    cost_file = workspace_tmp_path / "rebuild.cost.json"
+    monkeypatch.setenv(module.rebuild_client.COST_ENV, str(cost_file))
+    original_enricher = Settings.make_media_enricher
+    callbacks_before = list(GLOBAL_COST_TRACKER._callbacks)
+
+    async def rebuild():
+        assert GLOBAL_COST_TRACKER.enabled.get() is True
+        assert Settings.make_media_enricher is not original_enricher
+        GLOBAL_COST_TRACKER.lifetime_cost_usd += 0.002
+        await GLOBAL_COST_TRACKER._callbacks[-1](_embedding_response())
+
+    with mock.patch.object(module, "async_main", side_effect=rebuild):
+        with mock.patch("builtins.print") as print_mock:
+            asyncio.run(module.rebuild_counting_costs())
+
+    costs = {"embeddings": pytest.approx(0.002), "enrichment": 0.0, "citations": 0.0}
+    assert json.loads(cost_file.read_text(encoding="utf-8")) == costs
+    print_mock.assert_called_with(module.rebuild_client.describe_cost(json.loads(cost_file.read_text(encoding="utf-8"))))
+    assert Settings.make_media_enricher is original_enricher
+    assert GLOBAL_COST_TRACKER._callbacks == callbacks_before
+
+
+def test_rebuild_counting_costs_still_reports_the_cost_when_the_rebuild_fails(rebuild_index_module, monkeypatch):
+    module = rebuild_index_module
+    monkeypatch.delenv(module.rebuild_client.COST_ENV, raising=False)
+
+    with mock.patch.object(module, "async_main", side_effect=RuntimeError("crash")):
+        with mock.patch("builtins.print") as print_mock:
+            with pytest.raises(RuntimeError):
+                asyncio.run(module.rebuild_counting_costs())
+
+    print_mock.assert_called_once_with(module.rebuild_client.describe_cost(module.rebuild_client.empty_costs()))
+
+
+def test_print_estimate_prints_the_rough_cost_of_the_pdfs_still_to_index(rebuild_index_module):
+    module = rebuild_index_module
+    module.get_files_to_index = mock.Mock(return_value=["new.pdf"])
+    module.load_allowed_manifest_paths = mock.Mock(return_value={"new.pdf"})
+    result = mock.Mock()
+
+    with mock.patch.object(module.rebuild_estimate, "estimate_files", return_value=result) as estimate_files:
+        with mock.patch.object(module.rebuild_estimate, "describe", return_value=["line one", "line two"]):
+            with mock.patch("builtins.print") as print_mock:
+                module.print_estimate()
+
+    module.get_files_to_index.assert_called_once_with(module.get_active_index_dir())
+    estimate_files.assert_called_once_with(module.settings, Path("papers"), ["new.pdf"], {"new.pdf"}, local=False)
+    assert print_mock.call_args_list == [
+        mock.call(module.ESTIMATE_HEADING),
+        mock.call("- line one"),
+        mock.call("- line two"),
+    ]
+
+
+def test_print_estimate_counts_a_saved_local_model_as_free(rebuild_index_module):
+    module = rebuild_index_module
+
+    with mock.patch.object(module.local_llm, "load_config", return_value={"model": "llama3"}):
+        with mock.patch.object(module.rebuild_estimate, "estimate_files") as estimate_files:
+            with mock.patch.object(module.rebuild_estimate, "describe", return_value=[]):
+                with mock.patch("builtins.print"):
+                    module.print_estimate()
+
+    assert estimate_files.call_args.kwargs["local"] is True
+
+
+def test_main_prints_the_estimate_before_the_rebuild_starts(rebuild_index_module):
+    module = rebuild_index_module
+    order = []
+
+    async def rebuild():
+        order.append("rebuild")
+
+    with mock.patch.object(module, "print_estimate", side_effect=lambda: order.append("estimate")):
+        with mock.patch.object(module, "async_main", side_effect=rebuild):
+            with mock.patch("builtins.print"):
+                assert module.main() == 0
+
+    assert order == ["estimate", "rebuild"]

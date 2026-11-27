@@ -309,16 +309,27 @@ From the app, click **Rebuild the index**. The button appears at the top of the 
 
 Questions never index PDFs themselves: they search the index as it is, so a PDF added to the folder is not searched until the next rebuild. The page says how many PDFs in the folder are not in the index yet, and a question asked before there is any index fails straight away, at no cost.
 
-1. The page lists how many PDFs are in scope, the index that will be built and what is paid for: the embedding model and, with images and tables on with enrichment, a model call for every image and table. It gives no cost figure, because that depends on the text in the PDFs.
+1. The page lists how many PDFs are in scope, the index that will be built, and a rough cost and time for the PDFs that will actually be indexed (see [The rebuild estimate](#the-rebuild-estimate)). PDFs already in the index are not counted.
 2. Nothing starts until you click **Start paid rebuild**. **Cancel** leaves everything as it was.
 3. The rebuild runs the same code as `pdf-research-rebuild`, in its own process, with the library and index settings saved in the sidebar. PDFs already in the index are left alone; new ones, and ones that failed before, are indexed.
 4. A progress bar shows how many PDFs are done. Questions and the index settings are switched off until it finishes, and the output goes to `rebuild.log` in `INDEX_DIR`. The index counts and warnings at the top of the page are hidden meanwhile, because the rebuild is changing them.
 5. **Stop rebuild**, under the progress bar, ends the rebuild early (see [Stopping a rebuild](#stopping-a-rebuild)).
-6. When it finishes, the page shows the end of the log (**Show the end of the rebuild log**) and the new state of the index, and the warning about changed settings goes away.
+6. When it finishes, the page shows what the rebuild really cost, the end of the log (**Show the end of the rebuild log**) and the new state of the index, and the warning about changed settings goes away. The cost is shown after a stopped or failed rebuild too, since the PDFs it started were paid for. It is also written at the end of `rebuild.log`, such as `Real cost: $0.0123 in all: embeddings $0.0021, describing images and tables $0.0102.`
 
 The rebuild carries on if you close the page, and a reloaded page picks its progress up again. Stopping the Streamlit server does not stop it, but the page then no longer follows it.
 
 If PaperQA reports that a PDF is empty but the file opens normally, it may be image-only and need OCR before it can be indexed.
+
+#### The rebuild estimate
+
+The estimate makes no paid calls. It counts only the PDFs the rebuild will index: those the index does not list yet, and those that failed before and are still in scope.
+
+- **Embeddings**: the app opens the PDFs locally, counts their pages and reads the text of three pages spread through each, to work out how much text each PDF holds. PaperQA splits that text into passages of `chunk_chars` characters, each repeating the last `overlap` characters of the one before (see [Chunk size](#chunk-size)), and sends them all to the embedding model (`settings.embedding`). The cost is that many tokens at the model's price in LiteLLM's price list.
+- **Citations**: a PDF without a row in the paper list has no citation, so PaperQA asks the answer model twice to read one from its first passage. The estimate counts these calls; with a manifest that lists every PDF in scope there are none, and with a local model they cost nothing.
+- **Images and tables**: with images and tables on with enrichment, `parsing.enrichment_llm` is called once for each picture, with the picture and the text of the pages around it. The pictures are not counted in the PDFs: they are guessed from a typical page, 0.7 per page, as for [the next-question estimate](#the-next-question-estimate) (or one per page with whole-page pictures). The page says that this part is a guess, and it is usually by far the largest part.
+- **Time**: about 80 seconds to start the rebuild process and to save and close the index at the end, plus, for each PDF, the time the app took to read its text, about 5 seconds for PaperQA to read it, embed it and save it, the citation calls, and one round of picture descriptions with enrichment. PaperQA indexes `concurrency` PDFs at a time. The fixed times were measured on one small rebuild, so the time is rougher than the cost: it depends on OpenAI's speed and on how busy the computer is.
+
+Reading every page of a large library takes minutes (about 80 ms to open each PDF and 24 ms a page on a library of 141 PDFs on a synced drive), so the app reads PDFs for at most 2 seconds, from across the whole library in the same order each time, and assumes the rest are like them. The page then says how many of the PDFs the estimate was worked out from. A PDF that a synced drive must fetch first can take longer; the page waits at most 4 seconds and goes on with the PDFs read by then. The estimate is worked out once each time you click **Rebuild the index**.
 
 #### Stopping a rebuild
 
@@ -337,7 +348,7 @@ Use the terminal command when:
 - you add new PDFs and want to rebuild the index before querying again
 - you want a terminal-only indexing run instead of using the app's button
 
-On a clean rebuild, it is normal to see `Manifest PDFs: <n>` and `Indexed before run: 0` before indexing starts. At the end it prints `Indexed after run`, `Failed PDFs` and a `FAILED:` line for each PDF that could not be indexed.
+It starts by printing the same [estimate](#the-rebuild-estimate) as the app's confirm step, under `Rough estimate before starting:`, then starts at once. On a clean rebuild, it is normal to see `Manifest PDFs: <n>` and `Indexed before run: 0` before indexing starts. At the end it prints `Indexed after run`, `Failed PDFs`, a `FAILED:` line for each PDF that could not be indexed, and what the rebuild really cost (`Real cost: ...`), counted from LiteLLM's cost tracking the same way questions count theirs, with embeddings and image and table descriptions given separately.
 
 See [`windows-helper-commands.example.md`](../windows-helper-commands.example.md) for optional PowerShell commands that help check index build progress and troubleshoot rebuild issues on Windows. If you want a version with your own local paths ready to copy and paste, create `windows-helper-commands.md` from it.
 

@@ -8,6 +8,7 @@ and not in one browser session. A reloaded page or a second browser tab then sti
 a second rebuild beside it.
 """
 
+import json
 import os
 import pickle
 import subprocess
@@ -17,6 +18,8 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
+from pdf_research_assistant.costs import format_cost
+
 HELPER = Path(__file__).with_name("rebuild.py")
 LOG_NAME = "rebuild.log"
 LOG_TAIL_LINES = 30
@@ -25,6 +28,12 @@ STOP_NAME = "rebuild.stop"
 # The rebuild process looks for this file between PDFs; rebuild.py reads the same names.
 STOP_ENV = "PDF_RESEARCH_STOP_FILE"
 STOPPED_EXIT_CODE = 3
+# The rebuild writes what it really cost to this file, by kind of call; rebuild.py reads the same names.
+COST_NAME = "rebuild.cost.json"
+COST_ENV = "PDF_RESEARCH_COST_FILE"
+# Embeddings of the passages, descriptions of images and tables, and reading the citation of a PDF the paper
+# list does not name.
+COST_KINDS = ("embeddings", "enrichment", "citations")
 # PaperQA's marker in files.zip for a PDF it could not index (bootstrap.py repeats it for the app).
 FAILED_DOCUMENT_ADD_ID = "ERROR"
 
@@ -48,6 +57,34 @@ def stop_path(index_dir: Path) -> Path:
     return Path(index_dir).parent / STOP_NAME
 
 
+def cost_path(index_dir: Path) -> Path:
+    """Return where a rebuild writes what it cost: beside the log, replaced by each rebuild."""
+    return Path(index_dir).parent / COST_NAME
+
+
+def empty_costs() -> dict[str, float]:
+    return dict.fromkeys(COST_KINDS, 0.0)
+
+
+def read_cost(path: Path) -> dict[str, float] | None:
+    """Return what a rebuild cost by kind of call, or None when it wrote no usable record, as after a crash."""
+    try:
+        costs = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(costs, dict) or not all(isinstance(costs.get(kind), int | float) for kind in COST_KINDS):
+        return None
+    return {kind: float(costs[kind]) for kind in COST_KINDS}
+
+
+def describe_cost(costs: dict[str, float]) -> str:
+    """Say what a rebuild really cost, in all and for embeddings and enrichment, with citations when they cost anything."""
+    parts = [f"embeddings {format_cost(costs['embeddings'])}", f"describing images and tables {format_cost(costs['enrichment'])}"]
+    if costs["citations"]:
+        parts.append(f"reading citations {format_cost(costs['citations'])}")
+    return f"Real cost: {format_cost(sum(costs.values()))} in all: {', '.join(parts)}."
+
+
 def get_run() -> dict | None:
     """Return the rebuild that is running, or None."""
     return _state["run"]
@@ -65,6 +102,7 @@ def start(index_dir: Path, pdf_count: int) -> dict:
         log.parent.mkdir(parents=True, exist_ok=True)
         # A request left by an earlier rebuild must not stop this one before it begins.
         stop_path(index_dir).unlink(missing_ok=True)
+        cost_path(index_dir).unlink(missing_ok=True)
         with open(log, "w", encoding="utf-8") as handle:
             process = subprocess.Popen(
                 # Unbuffered, so the log can be read while the rebuild runs.
@@ -72,7 +110,12 @@ def start(index_dir: Path, pdf_count: int) -> dict:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 # File names in the output may hold characters the console encoding cannot write.
-                env=os.environ | {"PYTHONIOENCODING": "utf-8", STOP_ENV: str(stop_path(index_dir))},
+                env=os.environ
+                | {
+                    "PYTHONIOENCODING": "utf-8",
+                    STOP_ENV: str(stop_path(index_dir)),
+                    COST_ENV: str(cost_path(index_dir)),
+                },
             )
         _state["result"] = None
         _state["run"] = {
@@ -159,6 +202,7 @@ def collect_result() -> dict | None:
         "lines": read_log_tail(run["log_path"]),
         "index_dir": run["index_dir"],
         "index": read_index_state(run["index_dir"]),
+        "cost": read_cost(cost_path(run["index_dir"])),
     }
     return _state["result"]
 

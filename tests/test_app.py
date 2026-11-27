@@ -37,6 +37,30 @@ def _template_prompt(name):
     return answer_templates.template_prompt(answer_templates.get_template(name))
 
 
+LOCAL_CONFIG = {"provider": "ollama", "address": "http://localhost:11434", "model": "llama3"}
+
+
+def _rebuild_estimate(**changes):
+    from pdf_research_assistant.rebuild_estimate import RebuildEstimate
+
+    values = dict(
+        pdfs=2,
+        read=2,
+        pages=20,
+        embedding_model="text-embedding-3-small",
+        embedding_tokens=15000,
+        embedding_cost=0.0003,
+        citation_pdfs=0,
+        citation_model="gpt-4o-mini",
+        citation_cost=0.0,
+        enrichment_model=None,
+        pictures=0,
+        enrichment_cost=0.0,
+        seconds=40.0,
+    )
+    return RebuildEstimate(**(values | changes))
+
+
 def _fake_settings(**changes):
     """Stand in for PaperQA settings with the values the sidebar reads."""
     values = {
@@ -125,6 +149,8 @@ def imported_pdf_research_assistant(
     index_changes=None,
     clicked_keys=(),
     rebuild_patches=None,
+    files_to_index=None,
+    estimate_patches=None,
     index_names=None,
     unindexed_files=None,
     out_of_scope_files=None,
@@ -208,6 +234,7 @@ def imported_pdf_research_assistant(
     bootstrap_module.get_failed_files = mock.Mock(return_value=[] if failed_files is None else failed_files)
     bootstrap_module.get_indexed_doc_count = mock.Mock(return_value=indexed_count)
     bootstrap_module.get_unindexed_files = mock.Mock(return_value=[] if unindexed_files is None else unindexed_files)
+    bootstrap_module.get_files_to_index = mock.Mock(return_value=[] if files_to_index is None else files_to_index)
     bootstrap_module.get_out_of_scope_files = mock.Mock(
         return_value=[] if out_of_scope_files is None else out_of_scope_files
     )
@@ -253,6 +280,11 @@ def imported_pdf_research_assistant(
                         }
                         | (rebuild_patches or {})
                     ),
+                ), \
+                mock.patch.multiple(
+                    # No PDF is ever read for a rebuild estimate unless a test says so.
+                    "pdf_research_assistant.rebuild_estimate",
+                    **({"read_sample_in_time": mock.Mock(return_value=[])} | (estimate_patches or {})),
                 ), \
                 mock.patch.multiple(
                     # Never write a record of the index during tests; report the index changes asked for.
@@ -3752,6 +3784,7 @@ def test_a_pending_rebuild_shows_what_it_involves_and_switches_questions_off():
         indexed_count=0,
         chat_input_value="q",
         rebuild_patches={"start": start},
+        files_to_index=["a.pdf", "b.pdf"],
     ) as module:
         text = _markdown_text(module)
         keys = _button_keys(module)
@@ -3821,17 +3854,18 @@ def test_cancelling_a_pending_rebuild_starts_nothing():
 def test_describe_rebuild_plan_says_how_many_pdfs_are_already_indexed(pdf_research_assistant_module):
     module = pdf_research_assistant_module
 
-    lines = module.describe_rebuild_plan(_fake_settings(), Path("index/pqa_index_abc"), 10, 4)
+    lines = module.describe_rebuild_plan(Path("index/pqa_index_abc"), 10, 4, _rebuild_estimate())
 
     assert lines[0] == "PDFs in scope: 10. 4 are already in this index and are not indexed again"
     assert lines[1].startswith("Index: `pqa_index_abc`")
+    assert lines[2:-1] == module.rebuild_estimate.describe(_rebuild_estimate())
     assert lines[-1] == module.REBUILD_TIME_NOTE
-    assert not any("enrichment" in line for line in lines)
+    assert not any("cannot estimate" in line or "enrichment" in line for line in lines)
 
 
 def test_describe_rebuild_plan_names_the_index_by_its_friendly_name(pdf_research_assistant_module):
     lines = pdf_research_assistant_module.describe_rebuild_plan(
-        _fake_settings(), Path("index/pqa_index_abc"), 10, 0, "My library"
+        Path("index/pqa_index_abc"), 10, 0, _rebuild_estimate(), "My library"
     )
 
     assert lines[1].startswith("Index: **My library** (`pqa_index_abc`), built with")
@@ -3850,17 +3884,95 @@ def test_rebuild_confirm_step_names_the_active_index_by_its_friendly_name():
 
 
 def test_describe_rebuild_plan_leaves_out_the_indexed_count_for_an_empty_index(pdf_research_assistant_module):
-    lines = pdf_research_assistant_module.describe_rebuild_plan(_fake_settings(), Path("index/pqa_index_abc"), 10, 0)
+    lines = pdf_research_assistant_module.describe_rebuild_plan(Path("index/pqa_index_abc"), 10, 0, _rebuild_estimate())
 
     assert lines[0] == "PDFs in scope: 10"
 
 
 def test_describe_rebuild_plan_warns_that_enrichment_pays_a_model_for_every_image(pdf_research_assistant_module):
-    lines = pdf_research_assistant_module.describe_rebuild_plan(
-        _fake_settings(multimodal=True), Path("index/pqa_index_abc"), 10, 0
-    )
+    estimate = _rebuild_estimate(enrichment_model="gpt-4o", pictures=70, enrichment_cost=0.5)
+
+    lines = pdf_research_assistant_module.describe_rebuild_plan(Path("index/pqa_index_abc"), 10, 0, estimate)
 
     assert any("`gpt-4o` is also paid to describe every image and table" in line for line in lines)
+
+
+def test_the_confirm_step_estimates_only_the_pdfs_still_to_index_and_says_what_it_reckons():
+    estimate_files = mock.Mock(return_value=_rebuild_estimate())
+
+    with imported_pdf_research_assistant(
+        indexed_count=3,
+        allowed_paths={"a.pdf", "b.pdf"},
+        app_state=_empty_state() | {"rebuild_pending": True},
+        files_to_index=["b.pdf"],
+        estimate_patches={"estimate_files": estimate_files},
+    ) as module:
+        plans = [call.args[0] for call in module.st.markdown.call_args_list if call.args[0].startswith("- PDFs")]
+        module.bootstrap.get_files_to_index.assert_called_once_with(Path(r"C:\index\active-shard"))
+
+    settings, paper_dir, files, listed = estimate_files.call_args.args
+    assert (paper_dir, files, listed) == (Path(r"D:\papers"), ["b.pdf"], {"a.pdf", "b.pdf"})
+    assert estimate_files.call_args.kwargs == {"local": False}
+    assert module.rebuild_estimate.describe(_rebuild_estimate())[0] in plans[0]
+
+
+def test_the_confirm_step_counts_citation_reading_by_a_saved_local_model_as_free():
+    estimate_files = mock.Mock(return_value=_rebuild_estimate())
+
+    with mock.patch("pdf_research_assistant.local_llm.load_config", return_value=LOCAL_CONFIG):
+        with imported_pdf_research_assistant(
+            indexed_count=0,
+            app_state=_empty_state() | {"rebuild_pending": True},
+            estimate_patches={"estimate_files": estimate_files},
+        ):
+            pass
+
+    assert estimate_files.call_args.kwargs == {"local": True}
+
+
+def test_get_rebuild_estimate_reads_the_pdfs_once_for_each_confirm_step(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop(module.REBUILD_ESTIMATE_STATE, None)
+    settings = _fake_settings()
+
+    with mock.patch.object(module.rebuild_estimate, "estimate_files", return_value=_rebuild_estimate()) as estimate_files:
+        first = module.get_rebuild_estimate(settings, Path("index/a"))
+        second = module.get_rebuild_estimate(settings, Path("index/a"))
+
+    assert first is second
+    estimate_files.assert_called_once()
+    module.st.session_state.pop(module.REBUILD_ESTIMATE_STATE, None)
+
+
+def test_get_rebuild_estimate_works_it_out_again_for_another_index(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.pop(module.REBUILD_ESTIMATE_STATE, None)
+    settings = _fake_settings()
+
+    with mock.patch.object(module.rebuild_estimate, "estimate_files", return_value=_rebuild_estimate()) as estimate_files:
+        module.get_rebuild_estimate(settings, Path("index/a"))
+        module.get_rebuild_estimate(settings, Path("index/b"))
+
+    assert estimate_files.call_count == 2
+    module.st.session_state.pop(module.REBUILD_ESTIMATE_STATE, None)
+
+
+@pytest.mark.parametrize("key", ["rebuild_confirm", "rebuild_cancel"])
+def test_leaving_the_confirm_step_forgets_its_estimate(key):
+    state = _empty_state() | {"rebuild_pending": True}
+
+    with imported_pdf_research_assistant(app_state=state, indexed_count=0, clicked_keys={key}) as module:
+        assert module.REBUILD_ESTIMATE_STATE not in module.st.session_state
+
+
+def test_asking_for_a_rebuild_forgets_an_estimate_left_from_before(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state[module.REBUILD_ESTIMATE_STATE] = ("index/a", _rebuild_estimate())
+
+    module.request_rebuild()
+
+    assert module.REBUILD_ESTIMATE_STATE not in module.st.session_state
+    module.st.session_state.pop("rebuild_pending", None)
 
 
 def test_a_running_rebuild_shows_progress_and_switches_questions_and_index_settings_off(tmp_path):
@@ -4121,6 +4233,38 @@ def test_a_rebuild_that_stopped_unexpectedly_is_reported_as_an_error(pdf_researc
 
     module.st.error.assert_called_once_with(f"{module.REBUILD_FAILED_NOTICE} See `index/rebuild.log`.")
     module.st.expander.assert_not_called()
+
+
+def test_a_finished_rebuild_says_what_it_really_cost(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.markdown.reset_mock()
+    costs = {"embeddings": 0.01, "enrichment": 0.2, "citations": 0.0}
+
+    module.render_rebuild_result({"ok": True, "log_path": "x", "lines": [], "cost": costs})
+
+    module.st.markdown.assert_any_call(module.rebuild_client.describe_cost(costs))
+
+
+def test_a_stopped_rebuild_says_what_it_cost_so_far(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.markdown.reset_mock()
+    costs = {"embeddings": 0.01, "enrichment": 0.0, "citations": 0.0}
+    index = {"usable": True, "indexed": 2}
+
+    module.render_rebuild_result(
+        {"ok": False, "stopped": True, "log_path": "x", "lines": [], "index": index, "cost": costs}
+    )
+
+    module.st.markdown.assert_any_call(module.rebuild_client.describe_cost(costs))
+
+
+def test_a_rebuild_that_left_no_cost_record_says_so(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.caption.reset_mock()
+
+    module.render_rebuild_result({"ok": False, "log_path": "index/rebuild.log", "lines": [], "cost": None})
+
+    module.st.caption.assert_any_call(module.REBUILD_COST_MISSING_NOTE)
 
 
 def test_no_rebuild_result_shows_nothing(pdf_research_assistant_module):

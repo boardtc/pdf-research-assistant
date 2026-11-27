@@ -790,6 +790,25 @@ def test_get_unindexed_files_skips_an_unreadable_index_file_list(bootstrap_modul
         assert bootstrap_module.get_unindexed_files(index_dir, paper_dir) == ["paper.pdf"]
 
 
+def test_get_files_to_index_lists_new_pdfs_and_failed_ones_still_in_scope(bootstrap_module, workspace_tmp_path):
+    paper_dir = workspace_tmp_path / "papers"
+    _make_papers(paper_dir, "kept.pdf", "failed.pdf", "new.pdf")
+    index_dir = workspace_tmp_path / "index" / "pqa_index_x"
+    index_dir.mkdir(parents=True)
+    failed = bootstrap_module.FAILED_DOCUMENT_ADD_ID
+    # gone.pdf failed once and has since left the folder, so a rebuild does not retry it.
+    (index_dir / "files.zip").write_bytes(
+        zlib.compress(pickle.dumps({"kept.pdf": "OK", "failed.pdf": failed, "gone.pdf": failed}))
+    )
+
+    with mock.patch.object(bootstrap_module, "get_allowed_paths", return_value=set()):
+        assert bootstrap_module.get_files_to_index(index_dir, paper_dir) == ["failed.pdf", "new.pdf"]
+
+
+def test_get_files_to_index_is_empty_when_the_pdf_folder_does_not_exist(bootstrap_module, workspace_tmp_path):
+    assert bootstrap_module.get_files_to_index(workspace_tmp_path / "index", workspace_tmp_path / "missing") == []
+
+
 def test_get_unindexed_files_is_empty_when_the_pdf_folder_does_not_exist(bootstrap_module, workspace_tmp_path):
     assert bootstrap_module.get_unindexed_files(workspace_tmp_path / "index", workspace_tmp_path / "missing") == []
 

@@ -1,3 +1,4 @@
+import json
 import pickle
 import sys
 import zlib
@@ -152,6 +153,7 @@ def test_collect_result_ends_a_finished_rebuild_and_keeps_its_last_log_lines(tmp
         "lines": ["Indexed after run: 3", "Failed PDFs: 0"],
         "index_dir": run["index_dir"],
         "index": {"usable": True, "indexed": 0},
+        "cost": None,
     }
     assert rebuild_client.get_run() is None
 
@@ -299,3 +301,60 @@ def test_the_failed_marker_matches_the_one_paperqa_writes():
     from paperqa.agents.search import FAILED_DOCUMENT_ADD_ID
 
     assert rebuild_client.FAILED_DOCUMENT_ADD_ID == FAILED_DOCUMENT_ADD_ID
+
+
+# The real cost of a rebuild (#153).
+
+
+def test_start_tells_the_rebuild_where_to_write_its_cost_and_clears_an_old_one(tmp_path):
+    old = rebuild_client.cost_path(tmp_path / "index" / "pqa_index_abc")
+    old.parent.mkdir(parents=True)
+    old.write_text("{}", encoding="utf-8")
+
+    _, popen = _start(tmp_path)
+
+    assert popen.call_args.kwargs["env"][rebuild_client.COST_ENV] == str(tmp_path / "index" / "rebuild.cost.json")
+    assert not old.exists()
+
+
+def test_collect_result_reads_what_the_rebuild_cost(tmp_path):
+    run, _ = _start(tmp_path, _process(returncode=0))
+    costs = {"embeddings": 0.01, "enrichment": 0.2, "citations": 0.003}
+    rebuild_client.cost_path(run["index_dir"]).write_text(json.dumps(costs), encoding="utf-8")
+
+    assert rebuild_client.collect_result()["cost"] == costs
+
+
+def test_collect_result_has_no_cost_when_the_rebuild_wrote_none(tmp_path):
+    _start(tmp_path, _process(returncode=1))
+
+    assert rebuild_client.collect_result()["cost"] is None
+
+
+@pytest.mark.parametrize("text", ["not json", "[1, 2]", '{"embeddings": "a lot"}', '{"embeddings": 0.1}'])
+def test_read_cost_is_none_for_a_cost_file_it_cannot_use(tmp_path, text):
+    path = tmp_path / "rebuild.cost.json"
+    path.write_text(text, encoding="utf-8")
+
+    assert rebuild_client.read_cost(path) is None
+
+
+def test_read_cost_is_none_without_a_cost_file(tmp_path):
+    assert rebuild_client.read_cost(tmp_path / "missing.json") is None
+
+
+def test_empty_costs_start_every_kind_at_zero():
+    assert rebuild_client.empty_costs() == {"embeddings": 0.0, "enrichment": 0.0, "citations": 0.0}
+
+
+def test_describe_cost_gives_the_total_then_embeddings_and_enrichment():
+    assert rebuild_client.describe_cost({"embeddings": 0.0123, "enrichment": 0.5, "citations": 0.0}) == (
+        "Real cost: $0.5123 in all: embeddings $0.0123, describing images and tables $0.5000."
+    )
+
+
+def test_describe_cost_adds_reading_citations_when_it_cost_something():
+    assert rebuild_client.describe_cost({"embeddings": 0.001, "enrichment": 0.0, "citations": 0.002}) == (
+        "Real cost: $0.0030 in all: embeddings $0.0010, describing images and tables $0.0000, "
+        "reading citations $0.0020."
+    )

@@ -41,6 +41,7 @@ The modules in `src/pdf_research_assistant/`:
 | `cli.py` | The `pdf-research` command line |
 | `rebuild.py` | The `pdf-research-rebuild` command, also run by the app's rebuild button |
 | `rebuild_client.py` | Starts a rebuild from the app and follows its progress |
+| `rebuild_estimate.py` | The rough cost and time of a rebuild, from a quick local read of the PDFs still to index |
 | `bootstrap.py` | Reads `.env`, finds the PDFs and the index, and builds the PaperQA settings everything else uses |
 | `pdf_parser.py` | Reads PDFs, with a fallback for some PDFs whose fonts the usual reader cannot decode, and a second reading of ProQuest Ebook Central chapters whose italic words and citation years the usual reader moves to the end of the line |
 | `query_once.py` | Answers one question in its own process, for the app and the CLI |
@@ -107,6 +108,7 @@ These are created as you use the app. The ones in the project folder are ignored
 | `last_index.json` | `INDEX_DIR` | The settings of the last built index, for the changed-settings warning |
 | `rebuild.log` | `INDEX_DIR` | Output of the last rebuild started from the app |
 | `rebuild.stop` | `INDEX_DIR` | Written by **Stop rebuild** to ask a running rebuild to stop |
+| `rebuild.cost.json` | `INDEX_DIR` | What the last rebuild started from the app really cost, by kind of call |
 | `answers/` | `INDEX_DIR` | Kept answers, for **Search previous answers**, with the pictures shown with them in `answers/pictures` |
 
 ## Windows notes

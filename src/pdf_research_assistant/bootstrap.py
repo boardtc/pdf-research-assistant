@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from paperqa import Settings
 from paperqa.settings import AgentSettings, AnswerSettings, IndexSettings, ParsingSettings
 
-from pdf_research_assistant import local_llm, rate_profiles, saved_answers, saved_settings, scope_change, settings_groups
+from pdf_research_assistant import local_llm, paper_list, rate_profiles, saved_answers, saved_settings, scope_change, settings_groups
 from pdf_research_assistant.pdf_parser import parse_pdf_with_fallback
 
 load_dotenv()
@@ -322,6 +322,8 @@ def build_settings() -> Settings:
             ),
         ),
     )
+    # PaperQA's own reader finds no paper list row for a PDF in a subfolder on Windows (#160).
+    paper_list.use_with_paperqa()
     # A rate profile saved in the sidebar replaces this one when saved_settings.apply runs.
     rate_profiles.apply_profile(settings, rate_profiles.DEFAULT_PROFILE)
     saved_settings.apply(settings)

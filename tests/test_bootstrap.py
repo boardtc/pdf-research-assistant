@@ -48,6 +48,9 @@ def workspace_tmp_path():
 def bootstrap_module(workspace_tmp_path):
     paperqa_module = ModuleType("paperqa")
     paperqa_settings_module = ModuleType("paperqa.settings")
+    # build_settings swaps in the app's paper list reader here (#160).
+    paperqa_agents_module = ModuleType("paperqa.agents")
+    paperqa_search_module = ModuleType("paperqa.agents.search")
     dotenv_module = ModuleType("dotenv")
 
     paperqa_module.Settings = _CaptureSettings
@@ -76,6 +79,8 @@ def bootstrap_module(workspace_tmp_path):
             {
                 "paperqa": paperqa_module,
                 "paperqa.settings": paperqa_settings_module,
+                "paperqa.agents": paperqa_agents_module,
+                "paperqa.agents.search": paperqa_search_module,
                 "dotenv": dotenv_module,
                 "pdf_research_assistant.pdf_parser": ModuleType("pdf_research_assistant.pdf_parser"),
             },

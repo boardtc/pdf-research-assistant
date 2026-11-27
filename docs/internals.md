@@ -43,6 +43,7 @@ The modules in `src/pdf_research_assistant/`:
 | `rebuild_client.py` | Starts a rebuild from the app and follows its progress |
 | `rebuild_estimate.py` | The rough cost and time of a rebuild, from a quick local read of the PDFs still to index |
 | `bootstrap.py` | Reads `.env`, finds the PDFs and the index, and builds the PaperQA settings everything else uses |
+| `paper_list.py` | Hands PaperQA the paper list's rows when it indexes PDFs, keyed by each path as PaperQA looks it up (with backslashes on Windows) and keeping each row's citation as written |
 | `pdf_parser.py` | Reads PDFs, with a fallback for some PDFs whose fonts the usual reader cannot decode, and a second reading of ProQuest Ebook Central chapters whose italic words and citation years the usual reader moves to the end of the line |
 | `query_once.py` | Answers one question in its own process, for the app and the CLI |
 | `quote_check.py` | Checks that text an answer puts in quote marks is word for word in the passages, and unquotes it when it is not |

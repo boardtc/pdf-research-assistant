@@ -23,7 +23,6 @@ from pdf_research_assistant.bootstrap import (
     get_failed_files,
     get_files_to_index,
     get_indexed_doc_count,
-    load_allowed_manifest_paths,
 )
 from pdf_research_assistant.saved_answers import LOCK_ATTEMPTS, release_writer
 
@@ -278,9 +277,7 @@ async def rebuild_counting_costs() -> None:
 def print_estimate() -> None:
     """Print the rough cost and time of indexing the PDFs that are not in the index yet. Makes no paid calls."""
     files = get_files_to_index(get_active_index_dir())
-    result = rebuild_estimate.estimate_files(
-        settings, PAPER_DIR, files, load_allowed_manifest_paths(), local=bool(local_llm.load_config())
-    )
+    result = rebuild_estimate.estimate_files(settings, PAPER_DIR, files, local=bool(local_llm.load_config()))
     print(ESTIMATE_HEADING)
     for line in rebuild_estimate.describe(result):
         print(f"- {line}")

@@ -1,10 +1,12 @@
 import math
 import threading
+from pathlib import PurePosixPath, PureWindowsPath
 from dataclasses import replace
 from pathlib import Path
 
 import litellm
 import pytest
+import tiktoken
 from paperqa import Settings
 from paperqa.settings import MultimodalOptions
 
@@ -16,9 +18,12 @@ EMBEDDING = "text-embedding-3-small"
 MODEL = "gpt-4o-mini"
 
 
-def _settings(media=False, whole_page=False, concurrency=1, radius=1, embedding=EMBEDDING, llm=MODEL) -> Settings:
+def _settings(
+    media=False, whole_page=False, concurrency=1, radius=1, embedding=EMBEDDING, llm=MODEL, doc_details=True
+) -> Settings:
     """Real PaperQA settings with the app's chunk size and picture resolution."""
     settings = Settings(llm=llm, summary_llm=llm, embedding=embedding)
+    settings.parsing.use_doc_details = doc_details
     settings.parsing.multimodal = media
     settings.parsing.reader_config = {"chunk_chars": 5000, "overlap": 250, "dpi": 150, "full_page": whole_page}
     settings.parsing.enrichment_page_radius = radius
@@ -26,10 +31,14 @@ def _settings(media=False, whole_page=False, concurrency=1, radius=1, embedding=
     return settings
 
 
-def _reading(pages=10, characters=30000, seconds=0.5, open_seconds=0.0) -> PdfReading:
+def _reading(pages=10, characters=30000, seconds=0.5, open_seconds=0.0, tokens=None) -> PdfReading:
     """A PDF whose text was read: seconds is how long all its pages take."""
     return PdfReading(
-        pages=pages, open_seconds=open_seconds, characters=characters, seconds_per_page=seconds / pages if pages else 0
+        pages=pages,
+        open_seconds=open_seconds,
+        characters=characters,
+        seconds_per_page=seconds / pages if pages else 0,
+        tokens=tokens,
     )
 
 
@@ -43,6 +52,7 @@ def _estimate(**changes) -> rebuild_estimate.RebuildEstimate:
         embedding_cost=0.0003,
         citation_pdfs=0,
         citation_model=MODEL,
+        citation_calls=2,
         citation_cost=0.0,
         enrichment_model=None,
         pictures=0,
@@ -57,12 +67,18 @@ def _estimate(**changes) -> rebuild_estimate.RebuildEstimate:
 # pages_to_read
 
 
+def test_pages_to_read_reads_the_middle_page_of_a_pdf():
+    # One page from each of many PDFs gives the text per page more closely than a few pages from fewer PDFs.
+    assert rebuild_estimate.pages_to_read(100) == [50]
+    assert rebuild_estimate.pages_to_read(1) == [0]
+
+
 def test_pages_to_read_reads_every_page_of_a_short_pdf():
-    assert rebuild_estimate.pages_to_read(2) == [0, 1]
+    assert rebuild_estimate.pages_to_read(2, count=3) == [0, 1]
 
 
 def test_pages_to_read_spreads_a_few_pages_through_a_long_pdf():
-    assert rebuild_estimate.pages_to_read(100) == [25, 50, 75]
+    assert rebuild_estimate.pages_to_read(100, count=3) == [25, 50, 75]
 
 
 def test_pages_to_read_reads_nothing_of_a_pdf_without_pages():
@@ -87,6 +103,17 @@ class _Reader:
         self.pages = pages
 
 
+class _CountedReader:
+    """A reader whose PDF records its page count, and whose pages would take time to list."""
+
+    def __init__(self, count):
+        self.trailer = {"/Root": {"/Pages": {"/Count": count}}}
+
+    @property
+    def pages(self):
+        raise AssertionError("listed the pages")
+
+
 def _ticks(*values):
     """A clock that gives these times, then the last one for ever."""
     values = list(values)
@@ -100,6 +127,14 @@ def test_open_and_count_counts_the_pages_of_a_real_pdf():
     assert reading.open_seconds > 0
     assert reading.text_read is False
     assert len(reader.pages) == 1
+
+
+def test_count_pages_reads_the_page_count_the_pdf_records():
+    assert rebuild_estimate.count_pages(_CountedReader(7)) == 7
+
+
+def test_count_pages_lists_the_pages_when_the_pdf_records_no_count():
+    assert rebuild_estimate.count_pages(_Reader([_Page()] * 3)) == 3
 
 
 def test_open_and_count_counts_a_pdf_that_cannot_be_opened_as_empty(tmp_path):
@@ -127,12 +162,63 @@ def test_read_text_scales_the_pages_it_read_to_the_whole_pdf():
     reading = rebuild_estimate.read_text(_Reader([_Page()] * 30), PdfReading(pages=30, open_seconds=0.1))
 
     assert reading.characters == 30000
+    # Without a tokenizer, four characters make a token.
+    assert reading.tokens == 30000 // estimate.CHARACTERS_PER_TOKEN
+
+
+def test_read_text_counts_listing_the_pages_as_opening_the_pdf_not_reading_its_pages():
+    # Listing a long PDF's pages takes a while once, the first time; it must not be charged to every page.
+    reading = rebuild_estimate.read_text(
+        _Reader([_Page()] * 100), PdfReading(pages=100, open_seconds=0.1), clock=_ticks(0, 5, 6)
+    )
+
+    assert reading.open_seconds == pytest.approx(5.1)
+    assert reading.seconds_per_page == pytest.approx(1)
+
+
+def test_read_text_reads_nothing_from_a_pdf_whose_pages_cannot_be_listed():
+    reading = rebuild_estimate.read_text(_CountedReader(4), PdfReading(pages=4, open_seconds=0.1))
+
+    assert (reading.characters, reading.tokens) == (0, 0)
+
+
+def test_read_text_counts_tokens_with_the_tokenizer_given():
+    reading = rebuild_estimate.read_text(
+        _Reader([_Page("one two")] * 10), PdfReading(pages=10, open_seconds=0.1), count_tokens=lambda text: 2
+    )
+
+    assert reading.tokens == 20
 
 
 def test_read_text_counts_a_page_whose_text_cannot_be_read_as_empty():
     reading = rebuild_estimate.read_text(_Reader([_Page(error=ValueError("bad font"))]), PdfReading(1, 0.1))
 
     assert reading.characters == 0
+    assert reading.tokens == 0
+
+
+# token_counter
+
+
+def test_token_counter_uses_the_embedding_models_own_tokenizer():
+    words = "Teacher enthusiasm and student motivation"
+    expected = len(tiktoken.encoding_for_model(EMBEDDING).encode(words))
+
+    assert rebuild_estimate.token_counter(EMBEDDING)(words) == expected
+    # LiteLLM's provider prefix makes no difference.
+    assert rebuild_estimate.token_counter(f"openai/{EMBEDDING}")(words) == expected
+
+
+def test_token_counter_falls_back_to_openais_usual_tokenizer_for_other_models():
+    words = "Teacher enthusiasm and student motivation"
+
+    assert rebuild_estimate.token_counter("ollama/nomic-embed-text")(words) == len(
+        tiktoken.get_encoding(rebuild_estimate.FALLBACK_ENCODING).encode(words)
+    )
+
+
+def test_token_counter_counts_text_that_looks_like_a_special_token():
+    assert rebuild_estimate.token_counter(EMBEDDING)("<|endoftext|>") > 1
 
 
 def test_a_pdf_without_pages_has_no_text_to_read():
@@ -170,6 +256,16 @@ def test_read_sample_counts_pages_first_then_reads_text_while_there_is_time():
 
     assert [reading.pages for reading in readings] == [2, 2, 2]
     assert [reading.text_read for reading in readings] == [True, False, False]
+
+
+def test_read_sample_counts_tokens_with_the_tokenizer_given():
+    readings = []
+
+    rebuild_estimate.read_sample(
+        [Path("a.pdf")], readings, open_pdf=lambda path: _Reader([_Page()] * 4), count_tokens=lambda text: 5
+    )
+
+    assert readings[0].tokens == 20
 
 
 def test_read_sample_counts_and_reads_at_least_one_pdf():
@@ -238,6 +334,12 @@ def test_read_sample_in_time_returns_every_reading_when_all_finish():
     assert all(reading.text_read for reading in readings)
 
 
+def test_read_sample_in_time_counts_tokens_with_the_tokenizer_given():
+    readings = rebuild_estimate.read_sample_in_time([TINY_PDF], count_tokens=lambda text: 3)
+
+    assert readings[0].tokens == 3
+
+
 # Embedding price
 
 
@@ -271,8 +373,17 @@ def test_embedding_tokens_count_each_passage_with_its_overlap():
     # 9,500 characters make two 5,000-character passages; the second repeats the last 250 of the first.
     result = rebuild_estimate.estimate_rebuild(_settings(), [_reading(characters=9500)], pdfs=1, citation_pdfs=0)
 
-    assert result.embedding_tokens == (9500 + 250) // estimate.CHARACTERS_PER_TOKEN
+    assert result.embedding_tokens == round((9500 + 250) / estimate.CHARACTERS_PER_TOKEN)
     assert result.embedding_cost == pytest.approx(result.embedding_tokens * rebuild_estimate.embedding_price(EMBEDDING))
+
+
+def test_embedding_tokens_use_the_tokens_counted_in_the_text_read():
+    # 9,500 characters counted as 1,900 tokens: five characters a token, overlap included.
+    result = rebuild_estimate.estimate_rebuild(
+        _settings(), [_reading(characters=9500, tokens=1900)], pdfs=1, citation_pdfs=0
+    )
+
+    assert result.embedding_tokens == round((9500 + 250) / 5)
 
 
 def test_a_pdf_shorter_than_a_passage_is_sent_once_without_any_overlap():
@@ -313,9 +424,11 @@ def test_pdfs_without_a_paper_list_row_pay_the_answer_model_to_read_their_citati
     result = rebuild_estimate.estimate_rebuild(_settings(), [_reading()], pdfs=4, citation_pdfs=3)
 
     assert without.citation_cost == 0
+    # Each of the PDFs has 3,000 characters a page; PaperQA reads the citation from the first three pages, cut to
+    # one passage of 5,000 characters: 1,250 tokens.
     one_pdf = estimate.call_cost(
         MODEL,
-        rebuild_estimate.citation_input_tokens(5000),
+        rebuild_estimate.citation_input_tokens(1250),
         rebuild_estimate.CITATION_OUTPUT_TOKENS,
     ) + estimate.call_cost(
         MODEL, rebuild_estimate.STRUCTURED_CITATION_INPUT_TOKENS, rebuild_estimate.CITATION_OUTPUT_TOKENS
@@ -325,14 +438,60 @@ def test_pdfs_without_a_paper_list_row_pay_the_answer_model_to_read_their_citati
     assert result.seconds > without.seconds
 
 
-def test_citation_reading_sends_a_short_pdfs_whole_text_as_its_first_passage():
-    assert rebuild_estimate.citation_input_tokens(2000) == (
-        estimate.count_prompt_tokens(rebuild_estimate.citation_prompt) + 2000 // estimate.CHARACTERS_PER_TOKEN
+def test_without_looking_citations_up_paperqa_asks_once_for_each():
+    # The app turns PaperQA's use_doc_details off, so the citation is not read back as JSON to look it up.
+    twice = rebuild_estimate.estimate_rebuild(_settings(), [_reading()], pdfs=4, citation_pdfs=3)
+    once = rebuild_estimate.estimate_rebuild(_settings(doc_details=False), [_reading()], pdfs=4, citation_pdfs=3)
+    read = estimate.call_cost(
+        MODEL, rebuild_estimate.citation_input_tokens(1250), rebuild_estimate.CITATION_OUTPUT_TOKENS
     )
-    short = rebuild_estimate.estimate_rebuild(_settings(), [_reading(characters=2000)], pdfs=1, citation_pdfs=1)
-    long = rebuild_estimate.estimate_rebuild(_settings(), [_reading(characters=20000)], pdfs=1, citation_pdfs=1)
 
-    assert short.citation_cost < long.citation_cost
+    assert (twice.citation_calls, once.citation_calls) == (2, 1)
+    assert once.citation_cost == pytest.approx(3 * read)
+    assert twice.seconds - once.seconds == pytest.approx(
+        3 * estimate.call_seconds(rebuild_estimate.CITATION_OUTPUT_TOKENS)
+    )
+
+
+def test_citation_input_is_the_prompt_and_the_first_passage():
+    assert rebuild_estimate.citation_input_tokens(500) == (
+        estimate.count_prompt_tokens(rebuild_estimate.citation_prompt) + 500
+    )
+
+
+def _citation_cost(first_passage_tokens: int) -> float:
+    return estimate.call_cost(
+        MODEL, rebuild_estimate.citation_input_tokens(first_passage_tokens), rebuild_estimate.CITATION_OUTPUT_TOKENS
+    ) + estimate.call_cost(
+        MODEL, rebuild_estimate.STRUCTURED_CITATION_INPUT_TOKENS, rebuild_estimate.CITATION_OUTPUT_TOKENS
+    )
+
+
+def test_citation_reading_sends_only_the_first_three_pages():
+    # 1,000 characters a page: the first three pages are 3,000 characters, 750 tokens.
+    result = rebuild_estimate.estimate_rebuild(
+        _settings(), [_reading(pages=10, characters=10000)], pdfs=1, citation_pdfs=1
+    )
+
+    assert result.citation_cost == pytest.approx(_citation_cost(750))
+
+
+def test_citation_reading_sends_a_short_pdfs_whole_text():
+    result = rebuild_estimate.estimate_rebuild(
+        _settings(), [_reading(pages=1, characters=2000)], pdfs=1, citation_pdfs=1
+    )
+
+    assert result.citation_cost == pytest.approx(_citation_cost(500))
+
+
+def test_citation_reading_counts_the_first_pages_of_pdfs_whose_text_was_not_read():
+    counted = PdfReading(pages=40, open_seconds=0.25)
+
+    result = rebuild_estimate.estimate_rebuild(
+        _settings(), [_reading(pages=10, characters=10000), counted], pdfs=2, citation_pdfs=2
+    )
+
+    assert result.citation_cost == pytest.approx(2 * _citation_cost(750))
 
 
 def test_reading_citations_with_a_local_model_costs_nothing():
@@ -481,24 +640,99 @@ def test_pdfs_indexed_side_by_side_take_less_time():
 # estimate_files
 
 
-def test_estimate_files_reads_the_pdfs_to_index_and_counts_those_without_a_paper_list_row():
+def test_estimate_files_reads_the_pdfs_to_index_and_counts_those_whose_citation_is_read(tmp_path):
     paper_dir = TINY_PDF.parent
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, [str(Path(TINY_PDF.name))])
 
-    result = rebuild_estimate.estimate_files(_settings(), paper_dir, [TINY_PDF.name, "missing.pdf"], {TINY_PDF.name})
+    result = rebuild_estimate.estimate_files(settings, paper_dir, [TINY_PDF.name, "missing.pdf"])
 
     assert result.pdfs == 2
     assert result.read == 2
     assert result.citation_pdfs == 1
     # The missing PDF is read as empty, so only the real one has pages.
     assert result.pages == 1
+    # The tiny PDF's text was counted with the embedding model's tokenizer.
+    assert 0 < result.embedding_tokens < 100
 
 
 def test_estimate_files_reads_nothing_when_nothing_needs_indexing(monkeypatch):
-    monkeypatch.setattr(rebuild_estimate, "read_sample_in_time", lambda paths: pytest.fail("read"))
+    monkeypatch.setattr(rebuild_estimate, "read_sample_in_time", lambda *args, **kwargs: pytest.fail("read"))
 
-    result = rebuild_estimate.estimate_files(_settings(), Path("papers"), [], set())
+    result = rebuild_estimate.estimate_files(_settings(), Path("papers"), [])
 
     assert result.pdfs == 0
+
+
+# citation_pdfs
+
+
+def _manifest(folder: Path, locations: list[str], citation: str = "Someone (2020)") -> Path:
+    manifest = folder / "manifest.csv"
+    rows = "".join(f'"{location}",A title,{citation},\n' for location in locations)
+    manifest.write_text("file_location,title,citation,doi\n" + rows, encoding="utf-8")
+    return manifest
+
+
+def test_no_pdfs_means_no_citations_and_no_paper_list_read(monkeypatch, tmp_path):
+    monkeypatch.setattr(rebuild_estimate.anyio, "run", lambda *args: pytest.fail("read the paper list"))
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf"])
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, []) == 0
+
+
+def test_without_a_paper_list_every_pdfs_citation_is_read(tmp_path):
+    settings = _settings()
+    settings.agent.index.manifest_file = None
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf"]) == 2
+
+
+def test_a_pdf_whose_row_paperqa_finds_has_its_citation_already(tmp_path):
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf", "sub/b.pdf"])
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf"], PurePosixPath) == 0
+
+
+def test_a_row_paperqa_finds_needs_no_citation_of_its_own(tmp_path):
+    # PaperQA fills in a citation from the title when a row has none, so it reads none from the PDF.
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf"], citation="")
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"], PurePosixPath) == 0
+
+
+def test_on_windows_paperqa_finds_no_row_written_with_forward_slashes(tmp_path):
+    # PaperQA looks a PDF up by its path as Windows writes it, so "sub/b.pdf" is looked up as "sub\\b.pdf".
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, ["a.pdf", "sub/b.pdf", "sub\\c.pdf"])
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf", "sub/b.pdf", "sub/c.pdf"], PureWindowsPath) == 1
+
+
+def test_paperqa_also_finds_a_row_by_the_pdfs_full_path(tmp_path):
+    settings = _settings()
+    settings.agent.index.manifest_file = _manifest(tmp_path, [str(tmp_path.absolute() / "sub" / "b.pdf")])
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["sub/b.pdf", "c.pdf"]) == 1
+
+
+def test_paperqa_finds_a_paper_list_named_from_the_pdf_folder(tmp_path):
+    _manifest(tmp_path, ["a.pdf"])
+    settings = _settings()
+    settings.agent.index.paper_directory = str(tmp_path)
+    settings.agent.index.manifest_file = "manifest.csv"
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"], PurePosixPath) == 0
+
+
+def test_a_paper_list_that_is_missing_gives_no_citations(tmp_path):
+    settings = _settings()
+    settings.agent.index.manifest_file = tmp_path / "missing.csv"
+
+    assert rebuild_estimate.citation_pdfs(settings, tmp_path, ["a.pdf"]) == 1
 
 
 # Wording
@@ -572,8 +806,26 @@ def test_describe_explains_the_citation_calls():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=1, citation_cost=0.0002))
 
     assert (
-        "1 of these PDFs has no row in the paper list, so `gpt-4o-mini` is asked twice for it to read its "
-        "citation: less than 1 cent"
+        "PaperQA finds no row in the paper list for 1 of these PDFs, so `gpt-4o-mini` is asked twice for it to "
+        "read its citation: less than 1 cent"
+    ) in lines
+
+
+def test_describe_explains_the_citation_calls_for_several_pdfs():
+    lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_cost=0.0004))
+
+    assert (
+        "PaperQA finds no row in the paper list for 2 of these PDFs, so `gpt-4o-mini` is asked twice for each to "
+        "read its citation: less than 1 cent"
+    ) in lines
+
+
+def test_describe_says_when_each_citation_takes_one_call():
+    lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_calls=1, citation_cost=0.0004))
+
+    assert (
+        "PaperQA finds no row in the paper list for 2 of these PDFs, so `gpt-4o-mini` is asked once for each to "
+        "read its citation: less than 1 cent"
     ) in lines
 
 
@@ -581,7 +833,8 @@ def test_describe_explains_the_citation_calls_of_a_local_model():
     lines = rebuild_estimate.describe(_estimate(citation_pdfs=2, citation_model="ollama/llama3", local=True))
 
     assert any(
-        line.startswith("2 of these PDFs have no row in the paper list") and line.endswith(rebuild_estimate.LOCAL_NOTE)
+        line.startswith("PaperQA finds no row in the paper list for 2 of these PDFs")
+        and line.endswith(rebuild_estimate.LOCAL_NOTE)
         for line in lines
     )
 
@@ -606,13 +859,13 @@ def test_describe_says_whole_page_pictures_are_one_for_each_page():
 
 def test_describe_sample_says_when_only_some_pdfs_were_read():
     assert rebuild_estimate.describe_sample(12, 140) == (
-        "Worked out from 12 of the 140 PDFs, counting their pages and reading a few pages of some, because "
+        "Worked out from 12 of the 140 PDFs, counting their pages and reading a page of some, because "
         "reading them all would hold up the page. The rest are assumed to be like them"
     )
 
 
 def test_describe_sample_says_when_every_pdf_was_read():
-    assert rebuild_estimate.describe_sample(3, 3) == "Worked out from all 3 PDFs, counting their pages and reading a few pages of some"
+    assert rebuild_estimate.describe_sample(3, 3) == "Worked out from all 3 PDFs, counting their pages and reading a page of some"
 
 
 def test_total_cost_adds_up_the_parts():

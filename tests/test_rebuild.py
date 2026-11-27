@@ -771,7 +771,6 @@ def test_rebuild_counting_costs_still_reports_the_cost_when_the_rebuild_fails(re
 def test_print_estimate_prints_the_rough_cost_of_the_pdfs_still_to_index(rebuild_index_module):
     module = rebuild_index_module
     module.get_files_to_index = mock.Mock(return_value=["new.pdf"])
-    module.load_allowed_manifest_paths = mock.Mock(return_value={"new.pdf"})
     result = mock.Mock()
 
     with mock.patch.object(module.rebuild_estimate, "estimate_files", return_value=result) as estimate_files:
@@ -780,7 +779,8 @@ def test_print_estimate_prints_the_rough_cost_of_the_pdfs_still_to_index(rebuild
                 module.print_estimate()
 
     module.get_files_to_index.assert_called_once_with(module.get_active_index_dir())
-    estimate_files.assert_called_once_with(module.settings, Path("papers"), ["new.pdf"], {"new.pdf"}, local=False)
+    # Which PDFs PaperQA must read a citation for comes from the paper list PaperQA itself is given.
+    estimate_files.assert_called_once_with(module.settings, Path("papers"), ["new.pdf"], local=False)
     assert print_mock.call_args_list == [
         mock.call(module.ESTIMATE_HEADING),
         mock.call("- line one"),

@@ -108,6 +108,7 @@ def _fake_settings(**changes):
             reader_config=values["reader_config"],
             multimodal=values["multimodal"],
             enrichment_llm=values["enrichment_llm"],
+            use_doc_details=False,
         ),
         agent=SimpleNamespace(
             index=SimpleNamespace(
@@ -3910,8 +3911,8 @@ def test_the_confirm_step_estimates_only_the_pdfs_still_to_index_and_says_what_i
         plans = [call.args[0] for call in module.st.markdown.call_args_list if call.args[0].startswith("- PDFs")]
         module.bootstrap.get_files_to_index.assert_called_once_with(Path(r"C:\index\active-shard"))
 
-    settings, paper_dir, files, listed = estimate_files.call_args.args
-    assert (paper_dir, files, listed) == (Path(r"D:\papers"), ["b.pdf"], {"a.pdf", "b.pdf"})
+    settings, paper_dir, files = estimate_files.call_args.args
+    assert (paper_dir, files) == (Path(r"D:\papers"), ["b.pdf"])
     assert estimate_files.call_args.kwargs == {"local": False}
     assert module.rebuild_estimate.describe(_rebuild_estimate())[0] in plans[0]
 

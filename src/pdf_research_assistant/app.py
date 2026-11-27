@@ -1056,7 +1056,6 @@ def get_rebuild_estimate(settings, active_index_dir: Path) -> rebuild_estimate.R
         settings,
         bootstrap.PAPER_DIR,
         bootstrap.get_files_to_index(active_index_dir),
-        bootstrap.load_allowed_manifest_paths(),
         local=bool(local_llm.load_config()),
     )
     st.session_state[REBUILD_ESTIMATE_STATE] = (str(active_index_dir), estimate)

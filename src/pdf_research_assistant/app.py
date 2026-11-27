@@ -266,7 +266,7 @@ ANSWER_SEARCH_TITLE = "Search previous answers"
 ANSWER_SEARCH_NOTE = (
     "Every answer to a question asked in Query mode, here or from the command line, is kept in PaperQA's "
     "index of past answers: the `answers` folder in the index folder. It stays after a restart, and Clear chat "
-    "does not remove it. Answers from every index are searched, and each says which index it came from. "
+    "does not remove it; Delete this answer, under a found answer, does. Answers from every index are searched, and each says which index it came from. "
     "Exhaustive-search reports are kept in their own folder and are not searched here. "
     "Searching makes no API calls and does not change the PDF index or the next question."
 )
@@ -284,6 +284,10 @@ ANSWER_SEARCH_UNREADABLE_NOTE = (
     "type them in small letters to look for them as words."
 )
 ANSWER_SEARCH_CLEAR_LABEL = "Clear search results"
+ANSWER_DELETE_LABEL = "Delete this answer"
+ANSWER_DELETE_CONFIRM = "Delete for good"
+ANSWER_DELETE_CANCEL = "Keep it"
+ANSWER_DELETE_FAILED_NOTE = "The answer could not be deleted and is still kept:"
 ANSWER_NOT_SAVED_NOTE = "This answer could not be kept for searching later:"
 NO_ANSWER_DETAILS_NOTE = (
     "Kept by PaperQA itself rather than this app, so there is no date, passage list or settings list to show."
@@ -533,6 +537,7 @@ def describe_search_result(result: dict) -> str:
 
 def search_previous_answers(text: str) -> None:
     """Search the kept answers, and keep what was found, or why nothing could be, for the page to show."""
+    st.session_state.answer_search_to_delete = None
     text = text.strip()
     if not text:
         st.session_state.answer_search_found = {"note": ANSWER_SEARCH_EMPTY_NOTE}
@@ -546,8 +551,72 @@ def search_previous_answers(text: str) -> None:
         st.session_state.answer_search_found = {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def render_found_answer(answer: dict, names: dict) -> None:
-    """Show one kept answer as it was shown under the question, with its question and when it was asked."""
+def describe_answer_delete(question: str, shared: int | None) -> str:
+    """Return the warning shown before a kept answer is deleted, with the answers that go with it.
+
+    PaperQA keeps answers with the same text in one stored file, so they go together. `shared` is how many
+    other answers share the file, or None if that could not be checked.
+    """
+    warning = f"Delete the answer to “{escape_markdown(question)}” for good? This cannot be undone."
+    if shared is None:
+        return (
+            f"{warning} Could not check whether other kept answers have exactly the same text. "
+            "Any that do share its stored file in PaperQA and are deleted with it."
+        )
+    if shared == 1:
+        return (
+            f"{warning} Another kept answer has exactly the same text, and PaperQA keeps the two in one "
+            "stored file, so deleting this answer deletes that one too."
+        )
+    if shared > 1:
+        return (
+            f"{warning} {shared} other kept answers have exactly the same text, and PaperQA keeps them all in "
+            "one stored file, so deleting this answer deletes those too."
+        )
+    return warning
+
+
+def answer_sharing(answer_id: str) -> int | None:
+    """Return how many other kept answers share this one's stored file, or None if that cannot be read."""
+    try:
+        return saved_answers.count_sharing(bootstrap.INDEX_DIR, answer_id)
+    except Exception:
+        return None
+
+
+def delete_found_answer(answer: dict, text: str) -> None:
+    """Delete one kept answer, then search again, so the results and the count show what is kept now."""
+    error = saved_answers.delete_answer(bootstrap.INDEX_DIR, answer["id"])
+    search_previous_answers(text)
+    if error:
+        notice = ("error", f"{ANSWER_DELETE_FAILED_NOTE} {escape_markdown(error)}")
+    else:
+        notice = ("success", f"Deleted the answer to “{escape_markdown(answer['question'])}”.")
+    st.session_state.answer_search_notice = notice
+    st.rerun()
+
+
+def render_found_answer_delete(answer: dict, text: str) -> None:
+    """Offer to delete a found answer, asking once more before it goes."""
+    answer_id = answer["id"]
+    if st.session_state.get("answer_search_to_delete") != answer_id:
+        if st.button(ANSWER_DELETE_LABEL, key=f"answer_search_delete_{answer_id}"):
+            st.session_state.answer_search_to_delete = answer_id
+            st.rerun()
+        return
+    st.warning(describe_answer_delete(answer["question"], answer_sharing(answer_id)))
+    if st.button(ANSWER_DELETE_CONFIRM, key=f"answer_search_delete_confirm_{answer_id}"):
+        delete_found_answer(answer, text)
+    if st.button(ANSWER_DELETE_CANCEL, key=f"answer_search_delete_cancel_{answer_id}"):
+        st.session_state.answer_search_to_delete = None
+        st.rerun()
+
+
+def render_found_answer(answer: dict, names: dict, text: str) -> None:
+    """Show one kept answer as it was shown under the question, with its question and when it was asked.
+
+    `text` is what the search looked for, so the search can run again once the answer is deleted.
+    """
     with st.container(border=True):
         st.markdown(f"**{escape_markdown(answer['question'])}**")
         st.caption(describe_found_answer(answer, names))
@@ -556,11 +625,19 @@ def render_found_answer(answer: dict, names: dict) -> None:
         render_answer_settings(answer["settings"])
         if not answer.get("asked_at"):
             st.caption(NO_ANSWER_DETAILS_NOTE)
+        render_found_answer_delete(answer, text)
 
 
 def render_search_results(found: dict) -> None:
-    """Show the answers the last search found, or why there are none, with a button to put them away."""
+    """Show the answers the last search found, or why there are none, with a button to put them away.
+
+    What the last delete did is shown first, once.
+    """
     with st.container(border=True):
+        notice = st.session_state.pop("answer_search_notice", None)
+        if notice:
+            kind, message = notice
+            (st.error if kind == "error" else st.success)(message)
         if "error" in found:
             st.error(f"{ANSWER_SEARCH_FAILED_NOTE} {escape_markdown(found['error'])}")
         elif "note" in found:
@@ -569,9 +646,10 @@ def render_search_results(found: dict) -> None:
             st.markdown(describe_search_result(found))
             names = index_names.load(bootstrap.INDEX_DIR)
             for answer in found["answers"]:
-                render_found_answer(answer, names)
+                render_found_answer(answer, names, found["text"])
         if st.button(ANSWER_SEARCH_CLEAR_LABEL, key="answer_search_clear"):
             st.session_state.answer_search_found = None
+            st.session_state.answer_search_to_delete = None
             st.rerun()
 
 

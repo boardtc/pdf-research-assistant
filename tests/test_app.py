@@ -5042,7 +5042,7 @@ def test_render_found_answer_shows_the_question_when_where_the_answer_its_passag
     with mock.patch.object(module, "render_source_passages") as passages, mock.patch.object(
         module, "render_answer_settings"
     ) as answer_settings:
-        module.render_found_answer(answer, {})
+        module.render_found_answer(answer, {}, "sky")
 
     assert [call.args[0] for call in st.markdown.call_args_list] == [
         f"**{module.escape_markdown('Why *blue*?')}**",
@@ -5058,7 +5058,7 @@ def test_render_found_answer_explains_an_answer_kept_by_paperqa_itself(pdf_resea
     module.st.caption.reset_mock()
     answer = FOUND_ANSWER | {"asked_at": None, "contexts": [], "settings": None}
 
-    module.render_found_answer(answer, {})
+    module.render_found_answer(answer, {}, "sky")
 
     assert module.st.caption.call_args_list[-1] == mock.call(module.NO_ANSWER_DETAILS_NOTE)
 
@@ -5095,8 +5095,8 @@ def test_render_search_results_shows_each_answer_found_with_the_index_names(pdf_
     module.st.markdown.assert_called_once_with(module.describe_search_result(found))
     module.index_names.load.assert_called_with(module.bootstrap.INDEX_DIR)
     assert render_found_answer.call_args_list == [
-        mock.call(FOUND_ANSWER, {"pqa_index_x": "Thesis"}),
-        mock.call(FOUND_ANSWER | {"id": "a2"}, {"pqa_index_x": "Thesis"}),
+        mock.call(FOUND_ANSWER, {"pqa_index_x": "Thesis"}, "sky"),
+        mock.call(FOUND_ANSWER | {"id": "a2"}, {"pqa_index_x": "Thesis"}, "sky"),
     ]
 
 
@@ -5120,6 +5120,206 @@ def test_clearing_the_search_results_puts_them_away():
 
         assert module.st.session_state.answer_search_found is None
         module.st.rerun.assert_called_once_with()
+
+
+def _click(module, *keys):
+    module.st.button = mock.Mock(side_effect=lambda _label, key=None, **_kwargs: key in keys)
+    module.st.rerun.reset_mock()
+    module.st.warning.reset_mock()
+
+
+def test_clearing_the_search_results_also_drops_an_answer_waiting_to_be_deleted():
+    with imported_pdf_research_assistant(clicked_keys={"answer_search_clear"}) as module:
+        module.st.session_state.answer_search_to_delete = "a1"
+
+        module.render_search_results({"note": "x"})
+
+        assert module.st.session_state.answer_search_to_delete is None
+
+
+def test_a_new_search_drops_an_answer_waiting_to_be_deleted(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    module.st.session_state.answer_search_to_delete = "a1"
+
+    with mock.patch.object(module.saved_answers, "search", return_value={"text": "sky", "answers": [], "searched": 0}):
+        module.search_previous_answers("sky")
+
+    assert module.st.session_state.answer_search_to_delete is None
+
+
+def test_a_found_answer_offers_to_delete_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module)
+    module.st.session_state.pop("answer_search_to_delete", None)
+
+    module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    module.st.button.assert_any_call(module.ANSWER_DELETE_LABEL, key="answer_search_delete_a1")
+    module.st.warning.assert_not_called()
+
+
+def test_deleting_a_found_answer_asks_once_more_first(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module, "answer_search_delete_a1")
+
+    with mock.patch.object(module.saved_answers, "delete_answer") as delete:
+        module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    assert module.st.session_state.answer_search_to_delete == "a1"
+    delete.assert_not_called()
+    module.st.rerun.assert_called_once_with()
+
+
+def test_an_answer_waiting_to_be_deleted_offers_to_delete_it_for_good_or_keep_it(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module)
+    module.st.session_state.answer_search_to_delete = "a1"
+
+    with mock.patch.object(module.saved_answers, "count_sharing", return_value=0) as sharing, mock.patch.object(
+        module.saved_answers, "delete_answer"
+    ) as delete:
+        module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    sharing.assert_called_once_with(module.bootstrap.INDEX_DIR, "a1")
+    module.st.warning.assert_called_once_with(module.describe_answer_delete("Why is the sky blue?", 0))
+    assert _button_keys(module)[-2:] == ["answer_search_delete_confirm_a1", "answer_search_delete_cancel_a1"]
+    assert [call.args[0] for call in module.st.button.call_args_list[-2:]] == [
+        module.ANSWER_DELETE_CONFIRM,
+        module.ANSWER_DELETE_CANCEL,
+    ]
+    delete.assert_not_called()
+
+
+def test_a_delete_waiting_for_another_answer_is_not_shown(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module)
+    module.st.session_state.answer_search_to_delete = "a2"
+
+    module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    module.st.warning.assert_not_called()
+    assert _button_keys(module)[-1] == "answer_search_delete_a1"
+
+
+def test_confirming_the_delete_deletes_the_answer_and_searches_again(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module, "answer_search_delete_confirm_a1")
+    module.st.session_state.answer_search_to_delete = "a1"
+    after = {"text": "sky", "answers": [], "searched": 1}
+
+    with mock.patch.object(module.saved_answers, "count_sharing", return_value=0), mock.patch.object(
+        module.saved_answers, "delete_answer", return_value=None
+    ) as delete, mock.patch.object(module.saved_answers, "search", return_value=after) as search:
+        module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    delete.assert_called_once_with(module.bootstrap.INDEX_DIR, "a1")
+    search.assert_called_once_with(module.bootstrap.INDEX_DIR, "sky")
+    state = module.st.session_state
+    assert state.answer_search_found == after
+    assert state.answer_search_to_delete is None
+    assert state.answer_search_notice == ("success", "Deleted the answer to “Why is the sky blue?”.")
+    module.st.rerun.assert_called_once_with()
+
+
+def test_a_delete_that_fails_says_why_and_shows_the_answers_as_they_are(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module, "answer_search_delete_confirm_a1")
+    module.st.session_state.answer_search_to_delete = "a1"
+    still = {"text": "sky", "answers": [FOUND_ANSWER], "searched": 1}
+
+    with mock.patch.object(module.saved_answers, "count_sharing", return_value=0), mock.patch.object(
+        module.saved_answers, "delete_answer", return_value="ValueError: Access is denied. (os error 5)"
+    ), mock.patch.object(module.saved_answers, "search", return_value=still):
+        module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    state = module.st.session_state
+    assert state.answer_search_found == still
+    assert state.answer_search_to_delete is None
+    assert state.answer_search_notice == (
+        "error",
+        f"{module.ANSWER_DELETE_FAILED_NOTE} {module.escape_markdown('ValueError: Access is denied. (os error 5)')}",
+    )
+    module.st.rerun.assert_called_once_with()
+
+
+def test_keeping_the_answer_cancels_the_delete(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+    _click(module, "answer_search_delete_cancel_a1")
+    module.st.session_state.answer_search_to_delete = "a1"
+
+    with mock.patch.object(module.saved_answers, "count_sharing", return_value=0), mock.patch.object(
+        module.saved_answers, "delete_answer"
+    ) as delete:
+        module.render_found_answer(FOUND_ANSWER, {}, "sky")
+
+    delete.assert_not_called()
+    assert module.st.session_state.answer_search_to_delete is None
+    module.st.rerun.assert_called_once_with()
+
+
+def test_describe_answer_delete_asks_to_delete_the_answer_for_good(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    assert module.describe_answer_delete("Why *blue*?", 0) == (
+        f"Delete the answer to “{module.escape_markdown('Why *blue*?')}” for good? This cannot be undone."
+    )
+
+
+@pytest.mark.parametrize(
+    "shared, expected",
+    [
+        (
+            1,
+            "Another kept answer has exactly the same text, and PaperQA keeps the two in one stored file, "
+            "so deleting this answer deletes that one too.",
+        ),
+        (
+            2,
+            "2 other kept answers have exactly the same text, and PaperQA keeps them all in one stored file, "
+            "so deleting this answer deletes those too.",
+        ),
+        (
+            None,
+            "Could not check whether other kept answers have exactly the same text. Any that do share its "
+            "stored file in PaperQA and are deleted with it.",
+        ),
+    ],
+)
+def test_describe_answer_delete_says_which_other_answers_go_with_it(pdf_research_assistant_module, shared, expected):
+    module = pdf_research_assistant_module
+
+    assert module.describe_answer_delete("Q?", shared) == (
+        f"Delete the answer to “Q?” for good? This cannot be undone. {expected}"
+    )
+
+
+def test_answer_sharing_counts_the_answers_sharing_the_stored_file(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.saved_answers, "count_sharing", return_value=2) as sharing:
+        assert module.answer_sharing("a1") == 2
+
+    sharing.assert_called_once_with(module.bootstrap.INDEX_DIR, "a1")
+
+
+def test_answer_sharing_gives_none_when_the_index_cannot_be_read(pdf_research_assistant_module):
+    module = pdf_research_assistant_module
+
+    with mock.patch.object(module.saved_answers, "count_sharing", side_effect=OSError("locked")):
+        assert module.answer_sharing("a1") is None
+
+
+@pytest.mark.parametrize("kind", ["success", "error"])
+def test_render_search_results_shows_what_the_last_delete_did_once(pdf_research_assistant_module, kind):
+    module = pdf_research_assistant_module
+    module.st.success.reset_mock()
+    module.st.error.reset_mock()
+    module.st.session_state.answer_search_notice = (kind, "Done.")
+
+    module.render_search_results({"note": "x"})
+
+    getattr(module.st, kind).assert_called_once_with("Done.")
+    assert "answer_search_notice" not in module.st.session_state
 
 
 def test_render_answer_search_draws_the_box_and_no_results_before_a_search(pdf_research_assistant_module):

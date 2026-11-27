@@ -373,3 +373,265 @@ def test_load_picture_refuses_a_name_that_is_not_a_kept_picture(tmp_path, name):
 def test_load_picture_raises_when_the_picture_is_gone(tmp_path):
     with pytest.raises(FileNotFoundError):
         saved_answers.load_picture(tmp_path, PICTURE_NAME)
+
+
+def _stored_files(directory):
+    docs = saved_answers.answers_folder(directory) / "docs"
+    return sorted(path.name for path in docs.iterdir()) if docs.exists() else []
+
+
+def _kept_pictures(directory):
+    return sorted(path.name for path in saved_answers.pictures_folder(directory).iterdir())
+
+
+OTHER_PICTURE = b"another picture"
+OTHER_PICTURE_NAME = hashlib.sha256(OTHER_PICTURE).hexdigest()
+
+
+def test_deleting_an_answer_takes_it_out_of_paperqas_index_and_leaves_the_others(tmp_path):
+    gone = _response("Why is the sky blue?", "Scattering of light.")
+    kept = _response("Why is grass green?", "Chlorophyll reflects green light.")
+    _save(tmp_path, gone)
+    _save(tmp_path, kept)
+    files_before = _stored_files(tmp_path)
+
+    assert saved_answers.delete_answer(tmp_path, str(gone.session.id)) is None
+
+    found = saved_answers.search(tmp_path, "light")
+    assert [answer["id"] for answer in found["answers"]] == [str(kept.session.id)]
+    assert found["searched"] == 1
+    results = asyncio.run(index_search("light", index_name="answers", index_directory=tmp_path))
+    assert [name for _found, name in results] == [str(kept.session.id)]
+    assert str(gone.session.id) not in asyncio.run(saved_answers.open_index(tmp_path).index_files)
+    assert len(_stored_files(tmp_path)) == len(files_before) - 1
+
+
+def test_paperqas_own_delete_leaves_an_answer_counted_which_is_why_the_app_deletes_by_phrase(tmp_path):
+    # If this starts failing, PaperQA's remove_from_index works on its own and delete_from_search can go.
+    response = _response()
+    _save(tmp_path, response)
+    _save(tmp_path, _response("Other?", "Another answer."))
+    index = saved_answers.open_index(tmp_path)
+
+    async def remove():
+        await index.remove_from_index(str(response.session.id))
+        await index.save_index()
+
+    asyncio.run(remove())
+
+    assert asyncio.run(saved_answers.open_index(tmp_path).count) == 2
+
+
+def test_paperqas_own_save_cannot_save_an_empty_list_which_is_why_the_app_saves_it_itself(tmp_path):
+    # If this starts failing, save_empty_list can go.
+    response = _response()
+    _save(tmp_path, response)
+    index = saved_answers.open_index(tmp_path)
+
+    async def remove():
+        await index.remove_from_index(str(response.session.id))
+        await index.save_index()
+
+    with pytest.raises(Exception, match="decompressing"):
+        asyncio.run(remove())
+
+
+def test_deleting_the_last_answer_leaves_an_empty_index_that_can_be_searched_and_saved_to(tmp_path):
+    response = _response()
+    _save(tmp_path, response)
+
+    assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is None
+
+    assert saved_answers.search(tmp_path, "sky") == {"text": "sky", "answers": [], "searched": 0}
+    assert _stored_files(tmp_path) == []
+    _save(tmp_path, _response("Again?", "Sky again."))
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+
+
+def test_deleting_an_answer_kept_by_paperqa_itself_works_too(tmp_path):
+    response = _response()
+    with mock.patch.object(saved_answers, "StoredAnswer", lambda **_data: response):
+        _save(tmp_path, response)
+
+    assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is None
+
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 0
+
+
+def test_deleting_an_answer_that_is_no_longer_kept_changes_nothing(tmp_path):
+    response = _response()
+    _save(tmp_path, response)
+
+    assert saved_answers.delete_answer(tmp_path, "not-a-kept-answer") is None
+
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+
+
+def test_deleting_one_of_two_answers_with_the_same_text_deletes_both(tmp_path):
+    # They share one stored file, so the other could not be shown once that file is gone.
+    first = _response("First?", "I cannot answer.")
+    second = _response("Second?", "I cannot answer.")
+    other = _response("Other?", "Cannot say for sure.")
+    for response in (first, second, other):
+        _save(tmp_path, response)
+
+    assert saved_answers.delete_answer(tmp_path, str(second.session.id)) is None
+
+    found = saved_answers.search(tmp_path, "cannot")
+    assert [answer["id"] for answer in found["answers"]] == [str(other.session.id)]
+    assert found["searched"] == 1
+    index_files = asyncio.run(saved_answers.open_index(tmp_path).index_files)
+    assert set(index_files) == {str(other.session.id)}
+
+
+def test_count_sharing_counts_the_other_answers_with_the_same_text(tmp_path):
+    first = _response("First?", "I cannot answer.")
+    second = _response("Second?", "I cannot answer.")
+    alone = _response("Alone?", "Something else.")
+    for response in (first, second, alone):
+        _save(tmp_path, response)
+
+    assert saved_answers.count_sharing(tmp_path, str(first.session.id)) == 1
+    assert saved_answers.count_sharing(tmp_path, str(second.session.id)) == 1
+    assert saved_answers.count_sharing(tmp_path, str(alone.session.id)) == 0
+    assert saved_answers.count_sharing(tmp_path, "not-a-kept-answer") == 0
+
+
+def test_count_sharing_is_nought_when_no_answer_has_been_kept(tmp_path):
+    assert saved_answers.count_sharing(tmp_path, "a") == 0
+
+
+def test_deleting_an_answer_removes_its_own_pictures_and_keeps_those_another_answer_shows(tmp_path):
+    other_text = base64.b64encode(OTHER_PICTURE).decode("ascii")
+    gone = _response("Why is the sky blue?", "Scattering of light.")
+    kept = _response("Why is grass green?", "Chlorophyll.")
+    _save(tmp_path, gone, _picture_record([{"page": 1, "image": PICTURE_TEXT}, {"page": 2, "image": other_text}]))
+    _save(tmp_path, kept, _picture_record([{"page": 2, "image": other_text}]))
+
+    assert saved_answers.delete_answer(tmp_path, str(gone.session.id)) is None
+
+    assert _kept_pictures(tmp_path) == [OTHER_PICTURE_NAME]
+    assert saved_answers.load_picture(tmp_path, OTHER_PICTURE_NAME) == OTHER_PICTURE
+
+
+def test_deleting_an_answer_keeps_every_picture_when_another_answer_cannot_be_read(tmp_path):
+    # Which pictures the other answer shows cannot be told, so none is removed rather than one it shows.
+    gone = _response("Why is the sky blue?", "Scattering of light.")
+    unreadable = _response("Why is grass green?", "Chlorophyll.")
+    _save(tmp_path, gone, _picture_record([{"page": 1, "image": PICTURE_TEXT}]))
+    _save(tmp_path, unreadable)
+    real_read = SearchIndex.get_saved_object
+
+    async def read(self, file_location, keep_filenames=False):
+        if file_location == str(unreadable.session.id):
+            raise OSError("cannot read")
+        return await real_read(self, file_location, keep_filenames)
+
+    with mock.patch.object(SearchIndex, "get_saved_object", read):
+        assert saved_answers.delete_answer(tmp_path, str(gone.session.id)) is None
+
+    assert _kept_pictures(tmp_path) == [PICTURE_NAME]
+    assert asyncio.run(saved_answers.open_index(tmp_path).count) == 1
+
+
+def test_deleting_an_answer_whose_stored_file_is_gone_still_takes_it_out_of_the_index(tmp_path):
+    response = _response()
+    _save(tmp_path, response, _picture_record([{"page": 1, "image": PICTURE_TEXT}]))
+    for path in (saved_answers.answers_folder(tmp_path) / "docs").iterdir():
+        path.unlink()
+
+    assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is None
+
+    assert asyncio.run(saved_answers.open_index(tmp_path).count) == 0
+    # With no record to name them, its pictures are left where they are.
+    assert _kept_pictures(tmp_path) == [PICTURE_NAME]
+
+
+def test_a_picture_that_cannot_be_removed_is_left_and_the_answer_still_deleted(tmp_path):
+    response = _response()
+    _save(tmp_path, response, _picture_record([{"page": 1, "image": PICTURE_TEXT}]))
+
+    with mock.patch.object(saved_answers, "remove_picture", side_effect=PermissionError("in use")):
+        assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is None
+
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 0
+    assert _kept_pictures(tmp_path) == [PICTURE_NAME]
+
+
+def test_remove_picture_deletes_the_named_picture_and_ignores_one_already_gone(tmp_path):
+    saved_answers.write_picture(saved_answers.pictures_folder(tmp_path), PICTURE)
+
+    saved_answers.remove_picture(tmp_path, PICTURE_NAME)
+    saved_answers.remove_picture(tmp_path, PICTURE_NAME)
+
+    assert _kept_pictures(tmp_path) == []
+
+
+def test_a_delete_that_fails_says_why_and_leaves_the_answer_in_place(tmp_path):
+    response = _response()
+    _save(tmp_path, response, _picture_record([{"page": 1, "image": PICTURE_TEXT}]))
+    files_before = _stored_files(tmp_path)
+    denied = ValueError("An IO error occurred: 'Access is denied. (os error 5)'")
+
+    with mock.patch.object(saved_answers, "delete_from_search", side_effect=denied):
+        error = saved_answers.delete_answer(tmp_path, str(response.session.id))
+
+    assert error == "ValueError: An IO error occurred: 'Access is denied. (os error 5)'"
+    assert [answer["id"] for answer in saved_answers.search(tmp_path, "sky")["answers"]] == [str(response.session.id)]
+    assert _stored_files(tmp_path) == files_before
+    assert _kept_pictures(tmp_path) == [PICTURE_NAME]
+
+
+def test_a_delete_that_fails_while_saving_lets_go_of_the_writer_lock(tmp_path, failing_saves, monkeypatch):
+    # A writer left holding the lock would make every later save or delete in the folder wait for it.
+    monkeypatch.setattr(saved_answers, "LOCK_ATTEMPTS", 1)
+    response = _response()
+    _save(tmp_path, response)
+    failing_saves["left"] = 1
+
+    assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is not None
+
+    assert saved_answers.delete_answer(tmp_path, str(response.session.id)) is None
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 0
+
+
+def test_a_delete_waits_only_a_little_for_a_writer_lock_another_save_holds(tmp_path, monkeypatch):
+    # PaperQA's own delete tries a thousand times, each waiting up to a minute, so it could wait for hours.
+    monkeypatch.setattr(saved_answers, "LOCK_ATTEMPTS", 1)
+    response = _response()
+    _save(tmp_path, response)
+    holder = saved_answers.open_index(tmp_path)
+
+    async def hold():
+        async with holder.writer():
+            pass
+
+    asyncio.run(hold())
+    try:
+        error = saved_answers.delete_answer(tmp_path, str(response.session.id))
+    finally:
+        saved_answers.release_writer(holder)
+
+    assert error is not None
+    assert "lock" in error.lower()
+    assert saved_answers.search(tmp_path, "sky")["searched"] == 1
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        None,
+        {},
+        {"app": "text"},
+        {"app": {"contexts": "text"}},
+        {"app": {"contexts": ["text", {"media": "text"}, {"media": ["text", {"picture": "../secret"}, {"image": "x"}]}]}},
+    ],
+)
+def test_picture_names_finds_none_in_anything_without_kept_pictures(stored):
+    assert saved_answers.picture_names(stored) == set()
+
+
+def test_picture_names_lists_each_kept_picture_an_answer_shows():
+    stored = {"app": {"contexts": [{"media": [{"picture": PICTURE_NAME}]}, {"media": [{"picture": OTHER_PICTURE_NAME}]}]}}
+
+    assert saved_answers.picture_names(stored) == {PICTURE_NAME, OTHER_PICTURE_NAME}

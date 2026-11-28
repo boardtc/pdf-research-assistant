@@ -640,6 +640,18 @@ def test_the_time_counts_reading_each_pdf_and_one_embedding_call():
     assert result.seconds == pytest.approx(2 + rebuild_estimate.PDF_SECONDS + rebuild_estimate.START_AND_FINISH_SECONDS)
 
 
+def test_a_full_library_takes_about_as_long_as_the_measured_full_rebuild():
+    # 27 Nov 2026: 120 PDFs (3,163 pages, which PaperQA read in 163 seconds), one citation call each, took 948
+    # seconds from start to end.
+    readings = [_reading(pages=3163 / 120, characters=60000, seconds=163 / 120)]
+
+    result = rebuild_estimate.estimate_rebuild(
+        _settings(doc_details=False), readings, pdfs=120, citation_pdfs=120
+    )
+
+    assert result.seconds == pytest.approx(948, rel=0.1)
+
+
 def test_pdfs_indexed_side_by_side_take_less_time():
     one = rebuild_estimate.estimate_rebuild(_settings(), [_reading()], pdfs=4, citation_pdfs=0)
     two = rebuild_estimate.estimate_rebuild(_settings(concurrency=2), [_reading()], pdfs=4, citation_pdfs=0)

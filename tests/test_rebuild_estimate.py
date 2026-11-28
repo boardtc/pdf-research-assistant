@@ -531,7 +531,7 @@ def test_enrichment_pays_one_call_for_each_picture_guessed_from_a_typical_page()
     assert result.pictures == round(10 * estimate.PICTURES_PER_PAGE)
     per_call = estimate.call_cost(
         settings.parsing.enrichment_llm,
-        rebuild_estimate.enrichment_input_tokens(settings, 3000),
+        rebuild_estimate.enrichment_input_tokens(settings, 3000, 10),
         rebuild_estimate.ENRICHMENT_OUTPUT_TOKENS,
     )
     assert result.enrichment_cost == pytest.approx(10 * estimate.PICTURES_PER_PAGE * per_call)
@@ -561,12 +561,24 @@ def test_enrichment_input_counts_the_picture_and_the_pages_around_it():
     settings = _settings(media=MultimodalOptions.ON_WITH_ENRICHMENT)
     width, height = estimate.picture_pixels(settings)
 
-    tokens = rebuild_estimate.enrichment_input_tokens(settings, 2000)
+    tokens = rebuild_estimate.enrichment_input_tokens(settings, 2000, pages_per_pdf=10)
 
     picture = estimate.count_picture_tokens(settings.parsing.enrichment_llm, width, height)
     prompt = estimate.count_prompt_tokens(settings.parsing.enrichment_prompt)
     # A radius of one page: the picture's own page and one either side.
     assert tokens == picture + prompt + 3 * 2000 // estimate.CHARACTERS_PER_TOKEN
+
+
+def test_enrichment_input_never_counts_more_pages_than_the_pdf_has():
+    settings = _settings(media=MultimodalOptions.ON_WITH_ENRICHMENT)
+    width, height = estimate.picture_pixels(settings)
+
+    # PaperQA sends a one-page PDF's picture with that one page only.
+    tokens = rebuild_estimate.enrichment_input_tokens(settings, 2000, pages_per_pdf=1)
+
+    picture = estimate.count_picture_tokens(settings.parsing.enrichment_llm, width, height)
+    prompt = estimate.count_prompt_tokens(settings.parsing.enrichment_prompt)
+    assert tokens == picture + prompt + 2000 // estimate.CHARACTERS_PER_TOKEN
 
 
 def test_enrichment_input_with_a_radius_of_all_pages_counts_the_whole_pdf():

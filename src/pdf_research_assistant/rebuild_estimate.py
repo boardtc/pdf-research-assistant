@@ -287,10 +287,13 @@ def citation_input_tokens(first_passage_tokens: float) -> int:
     return estimate.count_prompt_tokens(citation_prompt) + round(first_passage_tokens)
 
 
-def enrichment_input_tokens(settings: object, characters_per_page: float, pages_per_pdf: float = 1) -> int:
-    """Return the tokens sent to describe one picture: the picture, the prompt and the text of the pages near it."""
+def enrichment_input_tokens(settings: object, characters_per_page: float, pages_per_pdf: float) -> int:
+    """Return the tokens sent to describe one picture: the picture, the prompt and the text of the pages near it.
+
+    The pages near it stop at the ends of the PDF, so a short PDF sends fewer of them.
+    """
     radius = settings.parsing.enrichment_page_radius
-    pages = pages_per_pdf if radius == -1 else 2 * radius + 1
+    pages = pages_per_pdf if radius == -1 else min(2 * radius + 1, pages_per_pdf)
     width, height = estimate.picture_pixels(settings)
     return (
         estimate.count_picture_tokens(settings.parsing.enrichment_llm, width, height)
